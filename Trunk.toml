@@ -1,0 +1,15 @@
+# Config for the browser demo (src/bin/vlat_web.rs). Run from the repo root:
+#   trunk serve            # dev server with live reload
+#   trunk build --release  # static site in docs/, for GitHub Pages
+#
+# dist is "docs" (not the usual "dist" or "demo") because GitHub Pages can only
+# serve a repo's root or a folder literally named "docs" on the default branch
+# - so these files are meant to be committed, unlike a normal build artifact.
+[build]
+target = "web/demo.html"
+dist = "docs"
+# Trunk defaults to naming the output "index.html" and hashing asset
+# filenames; both are pinned here so the build reproduces the URL the
+# README links to (.../vlat/demo.html) and stable asset names.
+html_output = "demo.html"
+filehash = false

@@ -1,0 +1,9 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Deliberately dependency-free: this only shells out to `trunk` and `git`,
+# so it stays fast to compile and never pulls in vlat's native/web deps.
+[dependencies]
