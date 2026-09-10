@@ -298,6 +298,9 @@ pub fn bubble_metric(state: &TargetState, sort: &SortMode) -> f64 {
         SortMode::Cv     => state.win_cv(),
         SortMode::Srtt   => state.srtt,
         SortMode::Mtr    => state.win_mtr().unwrap_or_else(|| state.win_avg()),
+        SortMode::Last   => state.last_up
+            .map(|t| crate::time::Instant::now().saturating_duration_since(t).as_secs_f64())
+            .unwrap_or(0.0),
     }
 }
 

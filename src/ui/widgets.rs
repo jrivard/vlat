@@ -27,7 +27,7 @@ use crate::cli::{Args, BaseStat, ExtraStat};
 use crate::constants::{BAR_ANIM_SECS, GRAPH_ANIM_SECS, TIER_FAST_PCT, TIER_HIGH_PCT};
 use crate::state::{GraphColCache, MtrTrend, SparklineColCache, TargetState};
 use crate::types::Sample;
-use super::{ColWidths, RttColWidth, fmt_count, fmt_cv, fmt_rtt, fmt_rtt_nodec, Theme};
+use super::{ColWidths, RttColWidth, fmt_count, fmt_cv, fmt_last_up, fmt_rtt, fmt_rtt_nodec, Theme};
 
 pub fn trend_spark_span(trend: MtrTrend, ascii: bool, theme: &Theme) -> Span<'static> {
     let (ch, style) = if ascii {
@@ -614,6 +614,7 @@ pub fn build_stats_keys_line(
             ExtraStat::Cv     => if let Some(cv_w)   = cw.cv      { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "cv",     w = 1 + cv_w),           dim)); }
             ExtraStat::Srtt   => if let Some(ref col) = cw.srtt   { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "srtt",   w = 1 + col.active_w()), dim)); }
             ExtraStat::Streak => if let Some(stk_w)  = cw.streak  { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "streak", w = 1 + stk_w),          dim)); }
+            ExtraStat::Last   => if let Some(last_w) = cw.last    { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "last",   w = 1 + last_w),         dim)); }
             _ => {}
         }
     }
@@ -743,6 +744,7 @@ pub fn build_stats_line<'a>(
                 ExtraStat::Cv     => if let Some(cv_w) = cw.cv        { spans.push(Span::raw(sp.clone())); spans.push(Span::styled(sym("%", "%", "cv"), dim)); spans.push(Span::styled(format!("{:>w$}", d, w = cv_w), dim)); }
                 ExtraStat::Srtt   => if let Some(ref col) = cw.srtt   { spans.push(Span::raw(sp.clone())); spans.push(Span::styled(sym("t", "\u{03c4}", "srtt"), dim)); push_mtr_placeholder(&mut spans, d, dim, col); }
                 ExtraStat::Streak => if let Some(stk_w) = cw.streak   { spans.push(Span::raw(sp.clone())); spans.push(Span::styled(sym("#", "#", "streak"), dim)); spans.push(Span::styled(format!("{:>w$}", d, w = stk_w), dim)); }
+                ExtraStat::Last   => if let Some(last_w) = cw.last    { spans.push(Span::raw(sp.clone())); spans.push(Span::styled(sym("u", "\u{2191}", "last"), dim)); spans.push(Span::styled(format!("{:>w$}", d, w = last_w), dim)); }
                 _ => {}
             }
         }
@@ -898,6 +900,15 @@ pub fn build_stats_line<'a>(
                 let stk_style = if count > 0 { Style::default().fg(theme.drop_color).add_modifier(Modifier::BOLD) } else { bright };
                 spans.push(Span::styled(sym("#", "#", "streak"), dim));
                 spans.push(Span::styled(format!("{:>w$}", fmt_count(count as u64), w = stk_w), stk_style));
+            }
+            ExtraStat::Last => if let Some(last_w) = cw.last {
+                spans.push(Span::styled(sym("u", "\u{2191}", "last"), dim));
+                if let Some(t) = s.last_up {
+                    let val = fmt_last_up(Some(t), Instant::now());
+                    spans.push(Span::styled(format!("{:>w$}", val, w = last_w), bright));
+                } else {
+                    spans.push(Span::styled(format!("{:>w$}", d, w = last_w), dim));
+                }
             }
             _ => { spans.pop(); } // remove the gap we pushed for unrecognised/pseudo variants
         }

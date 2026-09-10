@@ -151,13 +151,14 @@ pub const HELP_SORTS: &[(&str, &str)] = &[
     ("cv",     "lowest coefficient of variation (std/avg) to top"),
     ("srtt",   "lowest smoothed RTT (RFC\u{00a0}6298 SRTT) to top"),
     ("streak", "no current drop streak first"),
+    ("last",   "most recently responded (host up) to top"),
 ];
 
 /// Section layout for the sort picker: (display name, start index into HELP_SORTS, item count)
 pub const SORT_GROUPS: &[(&str, usize, usize)] = &[
     ("basic",  0, 2),   // none, name
     ("stats",  2, 5),   // avg, loss, jitter, mtr, std
-    ("detail", 7, 8),   // p01, p10, p50, p95, p99, cv, srtt, streak
+    ("detail", 7, 9),   // p01, p10, p50, p95, p99, cv, srtt, streak, last
 ];
 
 pub const HELP_THEMES: &[&str] = &[
@@ -469,6 +470,7 @@ pub fn draw_sort_picker_dialog(f: &mut Frame, area: Rect, ascii: bool, theme: &T
     };
 
     let cursor = cursor.min(HELP_SORTS.len().saturating_sub(1));
+    let name_w = HELP_SORTS.iter().map(|&(name, _)| name.len()).max().unwrap_or(0);
 
     let (rev_check, rev_style) = if reverse {
         ("[x]", key)
@@ -500,14 +502,14 @@ pub fn draw_sort_picker_dialog(f: &mut Frame, area: Rect, ascii: bool, theme: &T
             let is_sel = i == cursor;
             if is_sel {
                 body.push(Line::from(vec![
-                    Span::styled(format!("{}{:<5}", pref_s, name), sel_fg),
+                    Span::styled(format!("{}{:<w$}", pref_s, name, w = name_w), sel_fg),
                     Span::styled(format!("  {}", desc), sel_fg),
                     Span::raw("  "),
                 ]).style(sel_bg));
             } else {
                 body.push(Line::from(vec![
                     Span::raw(pref_n),
-                    Span::styled(format!("{:<5}", name), key),
+                    Span::styled(format!("{:<w$}", name, w = name_w), key),
                     Span::styled(format!("  {}", desc), label),
                 ]));
             }
@@ -1507,6 +1509,7 @@ pub fn explain_content_lines(ascii: bool) -> Vec<Line<'static>> {
             ("%", "cv    ", "coefficient of variation (stddev/avg %)"),
             ("t", "srtt  ", "RFC 6298 smoothed RTT"),
             ("#", "streak", "consecutive drop streak count"),
+            ("u", "last  ", "time since the last successful response"),
         ] {
             lines.push(Line::from(vec![raw("    "), span(sym, bld), raw("  "), raw(name), raw("  "), raw(desc)]));
         }
@@ -1522,6 +1525,7 @@ pub fn explain_content_lines(ascii: bool) -> Vec<Line<'static>> {
             ("%",        "cv    ", "coefficient of variation (stddev/avg %)"),
             ("\u{03c4}", "srtt  ", "RFC 6298 smoothed RTT"),
             ("#",        "streak", "consecutive drop streak count"),
+            ("\u{2191}", "last  ", "time since the last successful response"),
         ] {
             lines.push(Line::from(vec![raw("    "), span(sym, bld), raw("  "), raw(name), raw("  "), raw(desc)]));
         }
@@ -2104,7 +2108,7 @@ pub fn draw_explain_dialog(f: &mut Frame, area: Rect, scroll: u16, ascii: bool, 
 }
 
 /// Number of items in the column toggle dialog (5 identity + 4 base + 12 extra).
-pub const STAT_TOGGLE_COUNT: usize = 21;
+pub const STAT_TOGGLE_COUNT: usize = 22;
 
 /// Full rendered height of the column toggle dialog: 3 header lines, the items,
 /// 3 group separators, 1 trailing blank, plus 2 border rows.
@@ -2159,12 +2163,12 @@ pub fn draw_stat_column_toggle_dialog(
     let symbols: [&str; STAT_TOGGLE_COUNT] = if ascii {
         [" ", " ", ":", " ", " ",
          "~", "r", "j", "x",
-         "w", "s", "0", "1", "p", "5", "9", "%", "t", "#",
+         "w", "s", "0", "1", "p", "5", "9", "%", "t", "#", "u",
          "o", "|"]
     } else {
         [" ", " ", ":", " ", "\u{21bb}",
          "\u{2248}", "\u{21d5}", "\u{03b4}", "\u{2717}",
-         "\u{03a9}", "\u{00b1}", "\u{2080}", "\u{2081}", "\u{00bd}", "\u{2085}", "\u{2089}", "%", "\u{03c4}", "#",
+         "\u{03a9}", "\u{00b1}", "\u{2080}", "\u{2081}", "\u{00bd}", "\u{2085}", "\u{2089}", "%", "\u{03c4}", "#", "\u{2191}",
          "\u{25cb}", "\u{258f}"]
     };
 
@@ -2192,7 +2196,7 @@ pub fn draw_stat_column_toggle_dialog(
     // (name, description, is_enabled)
     // Indices 0-4:  identity columns (enabled = effective state from `identity`)
     // Indices 5-8:  base stats (enabled = NOT in hidden_base)
-    // Indices 9-20: extra stats (enabled = in extra_stats)
+    // Indices 9-21: extra stats (enabled = in extra_stats)
     let rows: [(&str, &str, bool); STAT_TOGGLE_COUNT] = [
         ("mode  ", "probe-type badge  (auto: mixed modes)",   identity[0]),
         ("name  ", "custom label or hostname",                identity[1]),
@@ -2213,6 +2217,7 @@ pub fn draw_stat_column_toggle_dialog(
         ("cv    ", "coefficient of variation",              extra_stats.contains(&ExtraStat::Cv)),
         ("srtt  ", "smoothed RTT  (RFC 6298)",              extra_stats.contains(&ExtraStat::Srtt)),
         ("streak", "consecutive drop streak",               extra_stats.contains(&ExtraStat::Streak)),
+        ("last  ", "time since last successful response",   extra_stats.contains(&ExtraStat::Last)),
         ("recent", "per-probe sparkline on target row",     extra_stats.contains(&ExtraStat::Recent)),
         ("bar   ", "inline range bar on target row",        extra_stats.contains(&ExtraStat::Bar)),
     ];
@@ -2226,7 +2231,7 @@ pub fn draw_stat_column_toggle_dialog(
     for (i, (name, desc, enabled)) in rows.iter().enumerate() {
         if i == 5  { body.push(section_sep!("base stats")); }
         if i == 9  { body.push(section_sep!("extra stats")); }
-        if i == 19 { body.push(section_sep!("visual")); }
+        if i == 20 { body.push(section_sep!("visual")); }
 
         let is_cursor  = i == cursor;
         let is_narrow  = *enabled && (space_hidden >> i) & 1 == 1;

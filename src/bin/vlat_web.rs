@@ -113,7 +113,8 @@ fn sort_mode_at_idx(idx: usize) -> SortMode {
         11 => SortMode::P99,
         12 => SortMode::Cv,
         13 => SortMode::Srtt,
-        _  => SortMode::Streak,
+        14 => SortMode::Streak,
+        _  => SortMode::Last,
     }
 }
 
@@ -134,6 +135,7 @@ fn sort_idx(mode: &SortMode) -> usize {
         SortMode::Cv     => 12,
         SortMode::Srtt   => 13,
         SortMode::Streak => 14,
+        SortMode::Last   => 15,
     }
 }
 
@@ -180,6 +182,7 @@ fn sort_key(mode: &SortMode, s: &TargetState) -> f64 {
         SortMode::P10    => s.win_p10(),
         SortMode::Cv     => s.win_cv(),
         SortMode::Srtt   => if s.srtt > 0.0 { s.srtt } else { f64::MAX },
+        SortMode::Last   => s.last_up.map(|t| Instant::now().saturating_duration_since(t).as_secs_f64()).unwrap_or(f64::MAX),
     }
 }
 

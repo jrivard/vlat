@@ -116,6 +116,7 @@ fn sort_idx(mode: &SortMode) -> usize {
         SortMode::Cv     => 12,
         SortMode::Srtt   => 13,
         SortMode::Streak => 14,
+        SortMode::Last   => 15,
     }
 }
 
@@ -135,7 +136,8 @@ fn sort_mode_at_idx(idx: usize) -> SortMode {
         11 => SortMode::P99,
         12 => SortMode::Cv,
         13 => SortMode::Srtt,
-        _  => SortMode::Streak,
+        14 => SortMode::Streak,
+        _  => SortMode::Last,
     }
 }
 
@@ -357,6 +359,7 @@ fn extra_stat_cli_name(stat: &crate::cli::ExtraStat) -> &'static str {
         ExtraStat::P50    => "p50",    ExtraStat::P95  => "p95",
         ExtraStat::P99    => "p99",    ExtraStat::Cv   => "cv",
         ExtraStat::Srtt   => "srtt",   ExtraStat::Streak => "streak",
+        ExtraStat::Last   => "last",
         ExtraStat::Recent => "recent", ExtraStat::Bar  => "bar",
         _ => "?",
     }
@@ -2915,6 +2918,24 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                                 let ka = win_sort_key(a);
                                 let kb = win_sort_key(b);
                                 bubble_swap_u32!(i, ka, kb);
+                            }
+                        }
+                        SortMode::Last => {
+                            // Bubble-sort pass: most recently responded (host up) to top;
+                            // never-up targets sink to the bottom.
+                            let n = sort_order.len();
+                            let win_sort_key = |slot: usize| -> f64 {
+                                states[slot].last_up
+                                    .map(|t| now.saturating_duration_since(t).as_secs_f64())
+                                    .unwrap_or(f64::MAX)
+                            };
+                            for i in 0..n.saturating_sub(1) {
+                                let a = sort_order[i];
+                                let b = sort_order[i + 1];
+                                if states[a].waiting || states[b].waiting { continue; }
+                                let ka = win_sort_key(a);
+                                let kb = win_sort_key(b);
+                                bubble_swap_f64!(i, ka, kb);
                             }
                         }
                         SortMode::P50 | SortMode::P95 | SortMode::P99

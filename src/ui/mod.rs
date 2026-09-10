@@ -49,6 +49,7 @@ pub const STATUS_BADGE_W: usize = 3;
 use ratatui::{Frame, layout::{Constraint, Direction, Layout, Rect}, style::{Color, Style}, text::{Line, Span}, widgets::Paragraph};
 use crate::cli::{Args, BaseStat, ExtraStat, SortMode};
 use crate::state::TargetState;
+use crate::time::Instant;
 
 /// Per-frame context shared by every full-frame view: CLI args, per-target
 /// labels, column geometry, and UI chrome state.  Built once per frame in the
@@ -424,6 +425,7 @@ pub struct ColWidths {
     pub cv:     Option<usize>,      // max width of fmt_cv() string, e.g. "12.3%"
     pub srtt:   Option<RttColWidth>,
     pub streak: Option<usize>,      // max digit count of cur_drop_streak
+    pub last:   Option<usize>,      // max width of fmt_last_up() string, e.g. "12m"
     pub stat_order: Vec<ExtraStat>, // display order of active extra stat columns
     pub hidden_base_stats: Vec<BaseStat>, // base stats the user has hidden at runtime
 }
@@ -452,7 +454,8 @@ impl ColWidths {
             + self.p99.as_ref().map_or(0,    |c| c.active_w() + gap + 1)
             + self.cv.map_or(0,              |w| w + gap + 1)
             + self.srtt.as_ref().map_or(0,   |c| c.active_w() + gap + 1)
-            + self.streak.map_or(0,          |w| w + gap + 1);
+            + self.streak.map_or(0,          |w| w + gap + 1)
+            + self.last.map_or(0,            |w| w + gap + 1);
         let show_drops = show_drp && !hide(BaseStat::Drops);
         base + extras
             + if show_drops { self.drp + gap + 1 } else { 0 }
@@ -518,12 +521,12 @@ pub fn mode_badge_visible(vis: Option<bool>, mode_labels: &[String]) -> bool {
     vis.unwrap_or_else(|| !mode_labels.iter().all(|m| m == "icmp"))
 }
 
-/// Returns a bitmask (one bit per dialog row index 0–20) where a set bit means
+/// Returns a bitmask (one bit per dialog row index 0–21) where a set bit means
 /// the column is enabled but not currently rendered because the terminal is too narrow.
 /// Bits 0–4 (identity) are always 0 after the min_size check.
-/// Bits 5–8 = base stats; 9–18 = extra numerical stats.
-/// Bit 19 = recent sparkline (set when `show_recent && circles_w == 0`).
-/// Bit 20 = bar (always 0; bar gets its own allocation before `stats_avail`).
+/// Bits 5–8 = base stats; 9–19 = extra numerical stats (18 = streak, 19 = last).
+/// Bit 20 = recent sparkline (set when `show_recent && circles_w == 0`).
+/// Bit 21 = bar (always 0; bar gets its own allocation before `stats_avail`).
 ///
 /// Pass `effective_cw` (after `with_budget`) and the same `gap` and `show_*` flags
 /// used when rendering, so the simulation matches the actual render path.
@@ -565,13 +568,14 @@ pub fn compute_space_hidden(
             ExtraStat::Cv     => (16, cw.cv.map(|w| gap + 1 + w)),
             ExtraStat::Srtt   => (17, cw.srtt.as_ref().map(|c| gap + 1 + c.active_w())),
             ExtraStat::Streak => (18, cw.streak.map(|w| gap + 1 + w)),
+            ExtraStat::Last   => (19, cw.last.map(|w| gap + 1 + w)),
             _ => continue,
         };
         if let Some(w) = w_opt {
             check!(bit, w);
         }
     }
-    if show_recent && circles_w == 0 { mask |= 1 << 19; }
+    if show_recent && circles_w == 0 { mask |= 1 << 20; }
     mask
 }
 
@@ -580,8 +584,8 @@ pub fn compute_space_hidden(
 /// Bit 4 (resolve): set when the auto-show condition is not met (ip_changes <= 1 for all).
 /// Bits 5–7 = avg/range/jitter (set when the window is empty).
 /// Bit 8 = drops (set when no drops have occurred in the rolling window).
-/// Bits 9–18 = extra numerical stats (stat-specific checks).
-/// Bits 19–20 = recent/bar (set when no target has any history).
+/// Bits 9–19 = extra numerical stats (stat-specific checks; 19 = last).
+/// Bits 20–21 = recent/bar (set when no target has any history).
 pub fn compute_no_data(states: &[TargetState], extras: &[ExtraStat], hidden_base: &[BaseStat]) -> u32 {
     if states.is_empty() { return 0; }
     let mut mask = 0u32;
@@ -594,6 +598,7 @@ pub fn compute_no_data(states: &[TargetState], extras: &[ExtraStat], hidden_base
     let any_mtr      = states.iter().any(|s| s.win_mtr().is_some());
     let any_srtt     = states.iter().any(|s| s.srtt > 0.0);
     let any_cv       = states.iter().any(|s| s.win_cv() > 0.0);
+    let any_last     = states.iter().any(|s| s.last_up.is_some());
     // Use > 1 to match the auto-show condition in ip_changes_slot_width / identity_column_states.
     let any_resolve  = states.iter().any(|s| s.ip_changes > 1);
     let any_drops    = states.iter().any(|s| s.win_drops > 0);
@@ -619,9 +624,10 @@ pub fn compute_no_data(states: &[TargetState], extras: &[ExtraStat], hidden_base
     if want(&ExtraStat::Cv)     && !any_cv      { mask |= 1 << 16; }
     if want(&ExtraStat::Srtt)   && !any_srtt    { mask |= 1 << 17; }
     // streak (bit 18) always has data — "0" is a valid reading
+    if want(&ExtraStat::Last)   && !any_last    { mask |= 1 << 19; }
 
-    if want(&ExtraStat::Recent) && !any_history { mask |= 1 << 19; }
-    if want(&ExtraStat::Bar)    && !any_history { mask |= 1 << 20; }
+    if want(&ExtraStat::Recent) && !any_history { mask |= 1 << 20; }
+    if want(&ExtraStat::Bar)    && !any_history { mask |= 1 << 21; }
 
     mask
 }
@@ -648,6 +654,8 @@ pub fn compute_col_widths(states: &[TargetState], stats_window: bool, extras: &[
     let (mut srt_c, mut srt_i, mut srt_f) = (3usize, 1usize, 0usize);
     let mut cv_w     = 4usize;   // min: "0.0%"
     let mut streak_w = 1usize;
+    let mut last_w   = 1usize;   // min: "~" placeholder
+    let now = Instant::now();
     for s in states {
         // name column: custom label, or hostname (non-IP host string), or blank for pure IP targets
         let name_len = if !show_name {
@@ -754,6 +762,9 @@ pub fn compute_col_widths(states: &[TargetState], stats_window: bool, extras: &[
         if want(&ExtraStat::Streak) {
             streak_w = streak_w.max(fmt_count(s.cur_drop_streak as u64).len());
         }
+        if want(&ExtraStat::Last) {
+            last_w = last_w.max(fmt_last_up(s.last_up, now).len());
+        }
     }
     ColWidths {
         name_w,
@@ -773,6 +784,7 @@ pub fn compute_col_widths(states: &[TargetState], stats_window: bool, extras: &[
         cv:         if want(&ExtraStat::Cv)     { Some(cv_w) }     else { None },
         srtt:       if want(&ExtraStat::Srtt)   { Some(RttColWidth { compact: srt_c, int_w: srt_i, frac_w: srt_f }) } else { None },
         streak:     if want(&ExtraStat::Streak) { Some(streak_w) } else { None },
+        last:       if want(&ExtraStat::Last)   { Some(last_w) }   else { None },
         stat_order: extras.to_vec(),
         hidden_base_stats: hidden_base.to_vec(),
     }
@@ -858,6 +870,7 @@ fn col_widths_max(a: &ColWidths, b: &ColWidths) -> ColWidths {
         cv:            match (a.cv, b.cv) { (Some(x), Some(y)) => Some(x.max(y)), (x, y) => x.or(y) },
         srtt:          ormax(&a.srtt, &b.srtt),
         streak:        match (a.streak, b.streak) { (Some(x), Some(y)) => Some(x.max(y)), (x, y) => x.or(y) },
+        last:          match (a.last, b.last) { (Some(x), Some(y)) => Some(x.max(y)), (x, y) => x.or(y) },
         // Visibility/order reflect the user's current toggle state and shouldn't be
         // held back by the width hysteresis below - only numeric widths get that.
         stat_order:    b.stat_order.clone(),
@@ -922,6 +935,21 @@ pub fn fmt_rtt(ms: f64) -> String {
 
 pub fn fmt_cv(cv: f64) -> String {
     if cv < 100.0 { format!("{:.1}%", cv) } else { format!("{:.0}%", cv) }
+}
+
+/// Compact "time since" string for the last successful response, e.g. "5s", "12m", "3h", "2d".
+/// None (no response yet) formats as "~", matching the other stat columns' placeholder.
+pub fn fmt_last_up(last: Option<Instant>, now: Instant) -> String {
+    match last {
+        None => "~".into(),
+        Some(t) => {
+            let secs = now.saturating_duration_since(t).as_secs();
+            if secs < 60           { format!("{}s", secs) }
+            else if secs < 3_600   { format!("{}m", secs / 60) }
+            else if secs < 86_400  { format!("{}h", secs / 3_600) }
+            else                   { format!("{}d", secs / 86_400) }
+        }
+    }
 }
 
 pub fn fmt_rtt_nodec(ms: f64) -> String {

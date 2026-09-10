@@ -145,6 +145,10 @@ pub struct TargetState {
     /// Smoothed expected response window in ms: max(500, 1.5 × win_mtr).
     /// Visual only - does not affect probe behaviour.
     pub display_timeout_ms: f64,
+
+    /// Wall-clock time of the last successful probe response (host was up).
+    /// None until the first successful response arrives.
+    pub last_up: Option<Instant>,
 }
 
 impl TargetState {
@@ -210,6 +214,7 @@ impl TargetState {
             prev_ip:         None,
             current_ip:      None,
             display_timeout_ms: 1000.0,
+            last_up:         None,
         }
     }
 
@@ -244,6 +249,7 @@ impl TargetState {
             Ok(rtt_ms) => {
                 self.last_was_drop = false;
                 let now = Instant::now();
+                self.last_up = Some(now);
 
                 // Compute p95 of the last 20 window entries BEFORE adding the current sample,
                 // so the new probe is scored against prior behavior, not its own influence.

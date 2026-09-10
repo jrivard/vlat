@@ -31,11 +31,12 @@ use ratatui::{
 };
 use crate::cli::{Args, BaseStat, ExtraStat};
 use crate::state::TargetState;
+use crate::time::Instant;
 use super::ViewCtx;
 use super::{
     accent_color,
     compute_no_data,
-    fmt_count, fmt_cv, fmt_rtt, fmt_rtt_nodec,
+    fmt_count, fmt_cv, fmt_last_up, fmt_rtt, fmt_rtt_nodec,
     trim_range_bar,
     widgets,
     layout::{render_window_label, render_dialogs, truncate_line},
@@ -89,6 +90,7 @@ fn stat_cell_count(args: &Args) -> usize {
     let extras = args.extra_stats.iter().filter(|e| matches!(e,
         ExtraStat::Mtr | ExtraStat::Std | ExtraStat::P01 | ExtraStat::P10 | ExtraStat::P50
         | ExtraStat::P95 | ExtraStat::P99 | ExtraStat::Cv | ExtraStat::Srtt | ExtraStat::Streak
+        | ExtraStat::Last
     )).count();
     base + extras
 }
@@ -166,6 +168,7 @@ fn stat_cells(state: &TargetState, args: &Args, theme: &super::Theme) -> Vec<(&'
             }
             ExtraStat::Srtt => v.push(("srtt", if state.srtt > 0.0 { fmt_rtt(state.srtt) } else { "~".into() }, val)),
             ExtraStat::Streak => v.push(("strk", fmt_count(state.cur_drop_streak as u64), val)),
+            ExtraStat::Last => v.push(("last", fmt_last_up(state.last_up, Instant::now()), val)),
             // Recent / Bar are dedicated rows; identity / meta variants never appear here.
             _ => {}
         }

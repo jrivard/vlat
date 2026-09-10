@@ -1250,6 +1250,7 @@ fn stat_cli_name(stat: &ExtraStat) -> &'static str {
         ExtraStat::P50    => "p50",    ExtraStat::P95    => "p95",
         ExtraStat::P99    => "p99",    ExtraStat::Cv     => "cv",
         ExtraStat::Srtt   => "srtt",   ExtraStat::Streak => "streak",
+        ExtraStat::Last   => "last",
         ExtraStat::Recent => "recent", ExtraStat::Bar    => "bar",
         _ => "?",
     }
@@ -1262,6 +1263,7 @@ fn stat_from_name(name: &str) -> Option<ExtraStat> {
         "p50" => ExtraStat::P50,       "p95" => ExtraStat::P95,
         "p99" => ExtraStat::P99,       "cv"  => ExtraStat::Cv,
         "srtt" => ExtraStat::Srtt,     "streak" => ExtraStat::Streak,
+        "last" => ExtraStat::Last,
         "recent" => ExtraStat::Recent, "bar" => ExtraStat::Bar,
         _ => return None,
     })

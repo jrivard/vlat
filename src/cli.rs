@@ -490,6 +490,8 @@ pub enum SortMode {
     Cv,
     /// Lowest smoothed RTT (RFC 6298 SRTT) to top
     Srtt,
+    /// Most recently responded (host up) to top
+    Last,
 }
 
 impl SortMode {
@@ -510,6 +512,7 @@ impl SortMode {
             SortMode::P10    => "p10",
             SortMode::Cv     => "cv",
             SortMode::Srtt   => "srtt",
+            SortMode::Last   => "last",
         }
     }
 }
@@ -651,7 +654,7 @@ pub struct Args {
 
     /// Columns and visual elements to display. Default set includes the recent sparkline
     /// and range bar; numeric extras are off by default. Stat values: mtr std p01 p10
-    /// p50 p95 p99 cv srtt streak recent bar.
+    /// p50 p95 p99 cv srtt streak last recent bar.
     /// Identity values (auto-shown unless overridden): mode name port addr resolve.
     /// Pseudo-values: all (all columns), none (reset to empty), default (default set).
     /// 'none' may be combined: --columns none,mtr shows only mtr; 'all' is exclusive.
@@ -998,6 +1001,8 @@ pub enum ExtraStat {
     Srtt,
     /// Current consecutive-drop streak  (# / #)
     Streak,
+    /// Time since the last successful response, e.g. "5m" (↑ / u)
+    Last,
     /// Show the per-probe sparkline on every target row (on by default)
     Recent,
     /// Show the inline range bar on every target row (on by default)
@@ -1009,7 +1014,7 @@ pub enum ExtraStat {
 pub const EXTRA_STAT_ALL: &[ExtraStat] = &[
     ExtraStat::Mtr, ExtraStat::Std,
     ExtraStat::P01, ExtraStat::P10, ExtraStat::P50, ExtraStat::P95, ExtraStat::P99,
-    ExtraStat::Cv, ExtraStat::Srtt, ExtraStat::Streak,
+    ExtraStat::Cv, ExtraStat::Srtt, ExtraStat::Streak, ExtraStat::Last,
     ExtraStat::Recent, ExtraStat::Bar,
 ];
 

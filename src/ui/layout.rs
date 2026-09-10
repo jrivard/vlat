@@ -152,6 +152,7 @@ pub fn render_window_label(f: &mut Frame, area: Rect, _states: &[TargetState], a
         SortMode::P10    => "  \u{21c5}\u{2081}\u{2080}",         // ⇅₁₀
         SortMode::Cv     => "  \u{21c5}cv",                       // ⇅cv
         SortMode::Srtt   => "  \u{21c5}\u{03c4}",                 // ⇅τ
+        SortMode::Last   => "  \u{21c5}\u{2191}",                 // ⇅↑
     };
 
     // Highlight briefly after a mode change, then fade to the same grey as the window span.
@@ -855,6 +856,7 @@ fn compute_single_layout(area: Rect, states: &[TargetState], args: &Args, col_wi
             StatItem::Extra(ExtraStat::Cv)     => (3, effective_cw.cv.unwrap_or(0)),
             StatItem::Extra(ExtraStat::Srtt)   => (5, effective_cw.srtt.as_ref().map_or(0, |c| c.active_w())),
             StatItem::Extra(ExtraStat::Streak) => (7, effective_cw.streak.unwrap_or(0)),
+            StatItem::Extra(ExtraStat::Last)   => (5, effective_cw.last.unwrap_or(0)),
             StatItem::Extra(_) => (0, 0),
         };
         if label_w == 0 && val_w == 0 { 0 } else { gap + label_w + val_w }
@@ -1769,7 +1771,7 @@ mod single_view_layout_tests {
         // A stats row is one containing any of the (word-form) stat labels. With
         // `--columns all` there are far more labels than fit on one 60-wide row, so
         // they must be spread across several rows rather than truncated onto one.
-        let labels = ["avg ", "range ", "jitter ", "loss ", "mtr ", "std ", "p01 ", "p10 ", "p50 ", "p95 ", "p99 ", "cv ", "srtt ", "streak "];
+        let labels = ["avg ", "range ", "jitter ", "loss ", "mtr ", "std ", "p01 ", "p10 ", "p50 ", "p95 ", "p99 ", "cv ", "srtt ", "streak ", "last "];
         let is_stats_row = |l: &&str| labels.iter().any(|lbl| l.contains(lbl));
         let stats_lines: Vec<&str> = lines.iter().copied().filter(is_stats_row).collect();
         assert!(stats_lines.len() >= 2, "expected the enabled columns to wrap onto 2+ rows: {:?}", lines);
