@@ -154,6 +154,17 @@ pub const HELP_SORTS: &[(&str, &str)] = &[
     ("last",   "most recently responded (host up) to top"),
 ];
 
+/// Per-row symbol for the sort picker, one entry per `HELP_SORTS` row (same order).
+/// Reuses the exact glyph the 'c' column dialog shows for the matching stat, so a
+/// sort mode and its column read as the same thing across both dialogs.
+const SORT_SYMBOLS_ASCII: &[&str] = &[
+    " ", "a", "~", "x", "j", "w", "s", "0", "1", "p", "5", "9", "%", "t", "#", "u",
+];
+const SORT_SYMBOLS_UNICODE: &[&str] = &[
+    " ", "a", "\u{2248}", "\u{2717}", "\u{03b4}", "\u{03a9}", "\u{00b1}",
+    "\u{2080}", "\u{2081}", "\u{00bd}", "\u{2085}", "\u{2089}", "%", "\u{03c4}", "#", "\u{2191}",
+];
+
 /// Section layout for the sort picker: (display name, start index into HELP_SORTS, item count)
 pub const SORT_GROUPS: &[(&str, usize, usize)] = &[
     ("basic",  0, 2),   // none, name
@@ -459,9 +470,18 @@ pub fn draw_sort_picker_dialog(f: &mut Frame, area: Rect, ascii: bool, theme: &T
     let sel_fg = Style::default().fg(Color::Black).add_modifier(Modifier::BOLD);
     let sel_bg = Style::default().bg(theme.dlg_help_title);
     let hint   = Style::default().fg(theme.c(theme.dlg_help_label)).add_modifier(Modifier::DIM);
+    // Matches the 'c' column dialog's checkbox/symbol palette exactly.
+    let check_style = Style::default().fg(theme.rtt_good).add_modifier(Modifier::BOLD);
+    let sym_style   = Style::default().fg(theme.dlg_help_title).add_modifier(Modifier::DIM);
 
-    let pref_n: &str = "  ";
-    let pref_s: &str = if ascii { "> " } else { "\u{25b8} " };
+    // Reverse-sort is a real on/off toggle, so it keeps a checkbox.
+    let mark_on  = if ascii { "x" } else { "\u{2713}" };
+    let mark_off = " ";
+    // The metric list is single-select: only the active row gets a mark, so it
+    // doesn't read as a checkbox list. The selection bar itself marks the rest.
+    let radio_on  = if ascii { ">" } else { "\u{25b8}" };
+    let radio_off = " ";
+    let symbols: &[&str] = if ascii { SORT_SYMBOLS_ASCII } else { SORT_SYMBOLS_UNICODE };
 
     let nav_str = if ascii {
         "  Up/Down to select   Enter/s to confirm   R to reverse   Esc to cancel"
@@ -472,10 +492,10 @@ pub fn draw_sort_picker_dialog(f: &mut Frame, area: Rect, ascii: bool, theme: &T
     let cursor = cursor.min(HELP_SORTS.len().saturating_sub(1));
     let name_w = HELP_SORTS.iter().map(|&(name, _)| name.len()).max().unwrap_or(0);
 
-    let (rev_check, rev_style) = if reverse {
-        ("[x]", key)
+    let (rev_mark, rev_style) = if reverse {
+        (mark_on, check_style)
     } else {
-        ("[ ]", hint)
+        (mark_off, hint)
     };
 
     let mut body: Vec<Line> = vec![
@@ -483,9 +503,9 @@ pub fn draw_sort_picker_dialog(f: &mut Frame, area: Rect, ascii: bool, theme: &T
         Line::from(Span::styled(nav_str.to_owned(), hint)),
         Line::raw(""),
         Line::from(vec![
-            Span::raw(pref_n),
-            Span::styled("r     ", key),
-            Span::styled(rev_check, rev_style),
+            Span::raw("  r     ["),
+            Span::styled(rev_mark, rev_style),
+            Span::styled("]", hint),
             Span::styled("  reverse sort  (worst to top)", label),
         ]),
         Line::raw(""),
@@ -500,16 +520,26 @@ pub fn draw_sort_picker_dialog(f: &mut Frame, area: Rect, ascii: bool, theme: &T
         body.push(Line::from(Span::styled(sep_str, hint)));
         for (i, &(name, desc)) in HELP_SORTS.iter().enumerate().skip(start).take(count) {
             let is_sel = i == cursor;
+            let sym = symbols.get(i).copied().unwrap_or(" ");
             if is_sel {
                 body.push(Line::from(vec![
-                    Span::styled(format!("{}{:<w$}", pref_s, name, w = name_w), sel_fg),
+                    Span::styled("  ", sel_fg),
+                    Span::styled(radio_on, sel_fg),
+                    Span::styled(" ", sel_fg),
+                    Span::styled(format!("{:<w$}", name, w = name_w), sel_fg),
+                    Span::styled(" ", sel_fg),
+                    Span::styled(sym, sel_fg),
                     Span::styled(format!("  {}", desc), sel_fg),
                     Span::raw("  "),
                 ]).style(sel_bg));
             } else {
                 body.push(Line::from(vec![
-                    Span::raw(pref_n),
+                    Span::styled("  ", hint),
+                    Span::styled(radio_off, hint),
+                    Span::styled(" ", hint),
                     Span::styled(format!("{:<w$}", name, w = name_w), key),
+                    Span::styled(" ", hint),
+                    Span::styled(sym, sym_style),
                     Span::styled(format!("  {}", desc), label),
                 ]));
             }

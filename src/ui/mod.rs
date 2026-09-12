@@ -937,17 +937,18 @@ pub fn fmt_cv(cv: f64) -> String {
     if cv < 100.0 { format!("{:.1}%", cv) } else { format!("{:.0}%", cv) }
 }
 
-/// Compact "time since" string for the last successful response, e.g. "5s", "12m", "3h", "2d".
+/// Compact "time since" string for the last successful response, e.g. "now", "5s", "12m", "3h", "2d".
 /// None (no response yet) formats as "~", matching the other stat columns' placeholder.
 pub fn fmt_last_up(last: Option<Instant>, now: Instant) -> String {
     match last {
         None => "~".into(),
         Some(t) => {
             let secs = now.saturating_duration_since(t).as_secs();
-            if secs < 60           { format!("{}s", secs) }
-            else if secs < 3_600   { format!("{}m", secs / 60) }
-            else if secs < 86_400  { format!("{}h", secs / 3_600) }
-            else                   { format!("{}d", secs / 86_400) }
+            if secs < 1             { "now".into() }
+            else if secs < 60       { format!("{}s", secs) }
+            else if secs < 3_600    { format!("{}m", secs / 60) }
+            else if secs < 86_400   { format!("{}h", secs / 3_600) }
+            else                    { format!("{}d", secs / 86_400) }
         }
     }
 }
