@@ -149,6 +149,24 @@ pub struct TargetState {
     /// Wall-clock time of the last successful probe response (host was up).
     /// None until the first successful response arrives.
     pub last_up: Option<Instant>,
+
+    /// Wall-clock time of the most recent dropped probe. Unlike `win_drop_times`,
+    /// never pruned by the stats window - drives the "last drop <elapsed>" note in
+    /// the probe/uptime summary text, which should still work with `--window 0`
+    /// (lifetime) or a short window long after the drop itself has aged out of it.
+    pub last_drop_at: Option<Instant>,
+
+    /// Wall-clock time the very first probe was sent. Drives the elapsed-wait
+    /// display in the single-target view's compact pre-reply line.
+    pub first_sent_at: Option<Instant>,
+
+    /// `history` index of the very first successful reply. None until it arrives.
+    /// Lets the single-target view's row-by-row reveal count samples *since first
+    /// contact* rather than the raw resolved-sample count - a target that was down
+    /// for a while before finally answering may already have dozens of drops
+    /// sitting in `history`, and without this the view would jump straight to its
+    /// full row count the instant that backlog counts as "revealed" data.
+    pub first_success_idx: Option<usize>,
 }
 
 impl TargetState {
@@ -215,11 +233,15 @@ impl TargetState {
             current_ip:      None,
             display_timeout_ms: 1000.0,
             last_up:         None,
+            last_drop_at:    None,
+            first_sent_at:   None,
+            first_success_idx: None,
         }
     }
 
     /// Called when a probe is sent. Advances the timeline immediately.
     pub fn record_sent(&mut self, seq: usize) {
+        if self.first_sent_at.is_none() { self.first_sent_at = Some(Instant::now()); }
         // If the result already arrived (race: ProbeResult before ProbeStarted), skip.
         if self.early_results.remove(&seq) { return; }
         self.pending_map.insert(seq, self.history.len());
@@ -250,6 +272,7 @@ impl TargetState {
                 self.last_was_drop = false;
                 let now = Instant::now();
                 self.last_up = Some(now);
+                if self.first_success_idx.is_none() { self.first_success_idx = Some(idx); }
 
                 // Compute p95 of the last 20 window entries BEFORE adding the current sample,
                 // so the new probe is scored against prior behavior, not its own influence.
@@ -356,7 +379,9 @@ impl TargetState {
                 self.drop_flash  = 6;
                 self.drops      += 1;
                 self.win_drops  += 1;
-                self.win_drop_times.push(Instant::now());
+                let now = Instant::now();
+                self.win_drop_times.push(now);
+                self.last_drop_at = Some(now);
                 self.history[idx] = Sample::Drop;
                 if idx < self.circle_history.len() {
                     self.circle_history[idx] = 255; // drop sentinel - tier lookup not used for drops
@@ -367,6 +392,13 @@ impl TargetState {
                 }
             }
         }
+    }
+
+    /// True if the most recently resolved probe (skipping any still-pending ones)
+    /// was a drop - i.e. the target is down right now, as opposed to merely having
+    /// had some drops somewhere in its recent history.
+    pub fn is_currently_down(&self) -> bool {
+        self.history.iter().rev().find(|s| !s.is_pending()).map(|s| s.is_drop()).unwrap_or(false)
     }
 
     pub fn win_min(&self) -> f64 { self.window.iter().map(|&(_, v)| v).fold(f64::MAX, f64::min) }

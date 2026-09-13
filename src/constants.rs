@@ -62,7 +62,7 @@ pub const TIER_FAST_PCT:  f64 = -0.75; // below this → fast (green)
 pub const TIER_HIGH_PCT:  f64 =  0.75; // above this → high (red)
 
 // UI layout
-pub const SINGLE_HISTORY_ROWS: u16    = 10;  // history rows shown above stats in single view
+pub const SINGLE_HISTORY_ROWS: u16    = 0;   // history rows shown above stats in single view (adjust with Up/Down)
 pub const DIALOG_ROWS: u16            = 12;
 pub const SORT_ARROW_SECS:    u64     = 5;
 pub const FREEZE_NOTICE_SECS: u64     = 5;

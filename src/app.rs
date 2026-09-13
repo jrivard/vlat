@@ -84,7 +84,9 @@ fn view_cli_name(view: FullscreenView) -> &'static str {
 
 fn view_idx(view: FullscreenView) -> usize {
     let help_idx = match view {
-        FullscreenView::List    => 0,
+        // List and single share the picker's merged slot (help_idx 10 - see
+        // VIEW_PICKER_ORDER in ui/dialogs.rs), so both look it up the same way.
+        FullscreenView::List    => 10,
         FullscreenView::Single  => 10,
         FullscreenView::Graph   => 1,
         FullscreenView::Worm    => 2,
@@ -361,6 +363,7 @@ fn extra_stat_cli_name(stat: &crate::cli::ExtraStat) -> &'static str {
         ExtraStat::Srtt   => "srtt",   ExtraStat::Streak => "streak",
         ExtraStat::Last   => "last",
         ExtraStat::Recent => "recent", ExtraStat::Bar  => "bar",
+        ExtraStat::Status => "status",
         _ => "?",
     }
 }
@@ -848,7 +851,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                          else if args.pong  || args.view == ViewMode::Pong    { "pong"  }
                          else                                                   { "list"  };
         if let Ok((term_w, term_h)) = terminal::size() {
-            let init_cw = compute_col_widths(&states, args.is_window(), &args.extra_stats, &args.hidden_base_stats, args.ipv6, &args.column_vis);
+            let init_cw = compute_col_widths(&states, args.is_window(), &args.extra_stats, &args.hidden_base_stats, args.ipv6, &args.column_vis, args.interval);
             let (min_w, min_h) = min_size(start_view, states.len(), args.keys, true, &init_cw, &mode_labels, args.column_vis.mode);
             if term_w < min_w || term_h < min_h {
                 eprintln!(
@@ -983,6 +986,11 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
         ViewMode::Single  => if target_count == 1 { FullscreenView::Single } else { FullscreenView::List },
         ViewMode::Pong    => FullscreenView::Pong,
     };
+    // Tracks whether any view other than single has been active this run - including
+    // at startup, not just via a runtime switch. Drives the minimal single-view-only
+    // exit: no other view visited means no need for the full end-of-session summary,
+    // since the view's own last line already says everything worth keeping on screen.
+    let mut used_other_view = fullscreen_view != FullscreenView::Single;
     let mut tick_count = 0u64;
     // Runtime fullscreen: Some(slot) = that single target fullscreen; None = normal view.
     let mut fullscreen_target: Option<usize> = None;
@@ -1051,6 +1059,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
     macro_rules! enter_fullscreen {
         ($slot:expr) => {
             fullscreen_view   = FullscreenView::Graph;
+            used_other_view   = true;
             fullscreen_target = Some($slot);
             close_all_views!();
             enter_alt_screen!();
@@ -1064,6 +1073,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
     macro_rules! enter_screensaver {
         ($variant:ident, $state:ident, $flag:ident, $new:expr) => {
             fullscreen_view = FullscreenView::$variant;
+            used_other_view = true;
             let from_other_screensaver = in_alternate_screen && $state.is_none()
                 && (worm_state.is_some() || radar_state.is_some() || ekg_state.is_some()
                     || bars_state.is_some() || cards_state.is_some() || bubble_state.is_some()
@@ -1135,6 +1145,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
     macro_rules! enter_fullscreen_all {
         () => {
             fullscreen_view = FullscreenView::Graph;
+            used_other_view = true;
             fullscreen_all  = true;
             close_all_views!();
             enter_alt_screen!();
@@ -1145,6 +1156,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
     macro_rules! enter_list {
         () => {
             fullscreen_view = FullscreenView::List;
+            used_other_view = true;
             let was_alt      = in_alternate_screen;
             // Capture the inline viewport's top row before dropping the terminal.
             let viewport_top = terminal.get_frame().area().y;
@@ -1219,9 +1231,9 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
     // 3=radar, 4=ekg, 5=bars, 6=cards, 7=bubble, 8=scatter, 9=pong, 10=single
     // (the HELP_VIEWS order).
     // The '1'..'9' hotkeys follow display order instead (see VIEW_DISPLAY_ORDER):
-    // digit - 1 is a position in VIEW_DISPLAY_ORDER, which maps to this id. List and
-    // single have no hotkey - both are only reachable via the picker dialog, and single
-    // only when there's one target.
+    // digit - 1 is a position in VIEW_DISPLAY_ORDER, which maps to this id. The
+    // '0' hotkey and the picker's merged compact slot both pass id 10, which the
+    // `_` arm below resolves to single (exactly one target) or list (otherwise).
     macro_rules! enter_view_id {
         ($id:expr) => {
             match $id {
@@ -1443,7 +1455,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                 s
             };
             let disp: &[TargetState] = if frozen { &states_snapshot[..] } else { &states[..] };
-            let col_widths = col_widths_stabilizer.apply(compute_col_widths(disp, args.is_window(), &args.extra_stats, &args.hidden_base_stats, args.ipv6, &args.column_vis));
+            let col_widths = col_widths_stabilizer.apply(compute_col_widths(disp, args.is_window(), &args.extra_stats, &args.hidden_base_stats, args.ipv6, &args.column_vis, args.interval));
             let log_fmt    = output_file.as_ref().map(|f| f.format_name()).unwrap_or("");
             session_ui_updates += 1;
             let ctx = ViewCtx {
@@ -1923,7 +1935,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                                                     };
                                                     let sort_cli: &'static str = sort_mode.as_str();
                                                     if !in_alternate_screen && !args.fullscreen && !args.worm && !args.radar {
-                                                        ensure_dialog_space!(dialog_rows);
+                                                        ensure_dialog_space!(crate::ui::dialogs::SAVE_DEFAULTS_DIALOG_H);
                                                     }
                                                     dialog = make_save_defaults_dialog(view_cli, args.theme.name, sort_cli, show_col_keys, args.window, &args.extra_stats);
                                                 }
@@ -1960,6 +1972,9 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                                             FullscreenView::Pong    => Some("pong"),
                                         };
                                         let sort_cli: &'static str = sort_mode.as_str();
+                                        if !in_alternate_screen && !args.fullscreen && !args.worm && !args.radar {
+                                            ensure_dialog_space!(crate::ui::dialogs::SAVE_DEFAULTS_DIALOG_H);
+                                        }
                                         dialog = make_save_defaults_dialog(view_cli, args.theme.name, sort_cli, show_col_keys, args.window, &args.extra_stats);
                                     }
                                     _ => {
@@ -2014,6 +2029,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                                                     dialog = DialogMode::FilenameInput { format: OutputFormat::Csv, input: String::new() };
                                                 }
                                             }
+                                            KeyCode::Char('0') if !states.is_empty() => { enter_view_id!(10); }
                                             KeyCode::Char(ch @ '1'..='9') if !states.is_empty() => {
                                                 let display_c = (ch as u8 - b'1') as usize;
                                                 enter_view_id!(VIEW_DISPLAY_ORDER.get(display_c).copied().unwrap_or(0));
@@ -2172,7 +2188,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                                     let id = VIEW_PICKER_ORDER.get($picker_cursor).copied().unwrap_or(0);
                                     enter_view_id!(id);
                                     // The picker stays open over the list/single view; make room for it.
-                                    if id == 0 || id == 9 { ensure_dialog_space!((HELP_VIEWS.len() as u16) + 9); }
+                                    if id == 10 || id == 9 { ensure_dialog_space!((HELP_VIEWS.len() as u16) + 9); }
                                 }
                             }
                             match code {
@@ -2189,6 +2205,13 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                                     let c = *cursor;
                                     enter_view_at!(c);
                                 }
+                                KeyCode::Char('0') => {
+                                    let id = 10;
+                                    *cursor = VIEW_PICKER_ORDER.iter().position(|&i| i == id).unwrap_or(0);
+                                    enter_view_id!(id);
+                                    if id == 10 || id == 9 { ensure_dialog_space!((HELP_VIEWS.len() as u16) + 9); }
+                                    dialog = DialogMode::None;
+                                }
                                 KeyCode::Char(ch @ '1'..='9') => {
                                     // Digit shortcuts follow the global hotkey mapping (VIEW_DISPLAY_ORDER),
                                     // not the picker's on-screen order, so '1' still means "list" etc. here too.
@@ -2196,7 +2219,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                                     let id = VIEW_DISPLAY_ORDER.get(display_c).copied().unwrap_or(0);
                                     *cursor = VIEW_PICKER_ORDER.iter().position(|&i| i == id).unwrap_or(0);
                                     enter_view_id!(id);
-                                    if id == 0 || id == 9 { ensure_dialog_space!((HELP_VIEWS.len() as u16) + 9); }
+                                    if id == 10 || id == 9 { ensure_dialog_space!((HELP_VIEWS.len() as u16) + 9); }
                                     dialog = DialogMode::None;
                                 }
                                 _ => {}
@@ -2432,14 +2455,14 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                                 }
                                 KeyCode::Up | KeyCode::Down if fullscreen_view == FullscreenView::Single && target_count == 1 => {
                                     let disp: &[TargetState] = if frozen { &states_snapshot[..] } else { &states[..] };
-                                    let disp_col_widths = compute_col_widths(disp, args.is_window(), &args.extra_stats, &args.hidden_base_stats, args.ipv6, &args.column_vis);
+                                    let disp_col_widths = compute_col_widths(disp, args.is_window(), &args.extra_stats, &args.hidden_base_stats, args.ipv6, &args.column_vis, args.interval);
                                     let (term_w, term_h) = term_size();
                                     let full_area = ratatui::layout::Rect { x: 0, y: 0, width: term_w, height: term_h };
                                     let max_rows = (single_history_avail(full_area, disp, &args, &disp_col_widths) as u16).max(1);
                                     args.history_rows = if code == KeyCode::Up {
                                         (args.history_rows + 1).min(max_rows)
                                     } else {
-                                        args.history_rows.saturating_sub(1).max(1)
+                                        args.history_rows.saturating_sub(1)
                                     };
                                     // The inline viewport must be resized to make room for
                                     // (or reclaim) the scrolling history rows.
@@ -2506,7 +2529,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                                     };
                                     let sort_cli: &'static str = sort_mode.as_str();
                                     if !in_alternate_screen && !args.fullscreen && !args.worm && !args.radar {
-                                        ensure_dialog_space!(dialog_rows);
+                                        ensure_dialog_space!(crate::ui::dialogs::SAVE_DEFAULTS_DIALOG_H);
                                     }
                                     dialog = make_save_defaults_dialog(view_cli, args.theme.name, sort_cli, show_col_keys, args.window, &args.extra_stats);
                                 }
@@ -2524,6 +2547,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                                         };
                                     }
                                 }
+                                KeyCode::Char('0') if !states.is_empty() => { enter_view_id!(10); }
                                 KeyCode::Char(ch @ '1'..='9') if !states.is_empty() => {
                                     let display_c = (ch as u8 - b'1') as usize;
                                     enter_view_id!(VIEW_DISPLAY_ORDER.get(display_c).copied().unwrap_or(0));
@@ -3096,9 +3120,16 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
     // The frame that was just drawn, snapshotted from inside draw_frame! via the
     // CompletedFrame (NOT terminal.current_buffer_mut(), which ratatui has already reset).
     let saved_buf = captured_buf;
-    // The buffer's own area carries the viewport's absolute y-offset and exact size, so we
-    // derive both the inline cursor anchor and the visible content height from it.
-    let inline_viewport_top = if !in_alternate_screen && keep_display {
+    // A session that spent its whole life in the single-target view, never switching
+    // to any other view, gets a brief plain-English one-line summary in place of the
+    // full end-of-session table - see single_exit_summary_line. Single is always
+    // inline (never the alternate screen), so this overrides the alternate-screen/
+    // keep_display handling below rather than threading through it.
+    let single_only_session = fullscreen_view == FullscreenView::Single && !used_other_view;
+    // The buffer's own area carries the viewport's absolute y-offset, which the
+    // single-view-only exit path needs too (to anchor its one-line summary right
+    // after the command invocation, not just when keep_display is set).
+    let inline_viewport_top = if !in_alternate_screen && (keep_display || single_only_session) {
         saved_buf.as_ref().map(|b| b.area.y).unwrap_or(0)
     } else {
         0
@@ -3122,7 +3153,28 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
         // Ratatui hides the cursor during draw; restore it unconditionally since
         // process::exit() below skips destructors.
         let _ = execute!(out, cursor::Show);
-        if in_alternate_screen {
+        if single_only_session {
+            // Move to the actual top of the rendered content - the line right after the
+            // command invocation - and clear only from there down. An absolute move (not
+            // "N rows up" from wherever the cursor happens to be) so this can never eat
+            // into the invocation line or whatever was on screen before it, even if
+            // ensure_dialog_space! inflated viewport_h at some point this run. If the
+            // terminal has already scrolled that row off screen, this is best-effort -
+            // there's no ANSI escape that un-scrolls a terminal.
+            let _ = execute!(out, cursor::MoveTo(0, inline_viewport_top), terminal::Clear(terminal::ClearType::FromCursorDown));
+            // A colorful "vlat:" wordmark, then a brief plain-English final summary -
+            // not the live status line's text, which is meaningless once the run has
+            // actually ended (a newcomer wants sent/received/loss/time/latency, not
+            // "3 probes, 12s"). This is the last thing printed before the shell
+            // prompt returns.
+            for (i, ch) in "vlat:".chars().enumerate() {
+                let (r, g, b) = args.theme.target_color(i);
+                let _ = write!(out, "\x1b[38;2;{r};{g};{b}m{ch}");
+            }
+            let _ = write!(out, "\x1b[0m ");
+            let elapsed_secs = crate::session::epoch_ms().saturating_sub(session_ctx.started_at_ms) / 1000;
+            let _ = write!(out, "{}\r\n", single_exit_summary_line(&states[0], elapsed_secs, &args.theme, args.no_color));
+        } else if in_alternate_screen {
             // Leave alternate screen - restores the main buffer and the cursor to
             // the position saved when EnterAlternateScreen was called.
             let _ = execute!(out, terminal::LeaveAlternateScreen);
@@ -3156,10 +3208,12 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
         }
         out.flush().ok();
     }
-    println!();
-    let exec_cmd_strs: Vec<String> = exec_cmd_arcs.iter().map(|a| (**a).clone()).collect();
-    let elapsed_secs = crate::session::epoch_ms().saturating_sub(session_ctx.started_at_ms) / 1000;
-    print_summary(&states, &mode_labels, &exec_cmd_strs, &deleted_states, &deleted_mode_labels, &[], &args, elapsed_secs);
+    if !single_only_session {
+        println!();
+        let exec_cmd_strs: Vec<String> = exec_cmd_arcs.iter().map(|a| (**a).clone()).collect();
+        let elapsed_secs = crate::session::epoch_ms().saturating_sub(session_ctx.started_at_ms) / 1000;
+        print_summary(&states, &mode_labels, &exec_cmd_strs, &deleted_states, &deleted_mode_labels, &[], &args, elapsed_secs);
+    }
     crate::logfile::write(&format!(
         "stats (final): probes_sent={} packets_received={} bytes_sent={} bytes_received={} re_resolves={} ui_updates={}",
         session_probes_sent, session_packets_received, session_bytes_sent, session_bytes_received, session_re_resolves, session_ui_updates,
@@ -3256,6 +3310,19 @@ fn buffer_content_rows(buf: &ratatui::buffer::Buffer) -> u16 {
 /// Used by the Ctrl-C / Ctrl-Q "quit keeping display" path to print the last TUI frame
 /// to the main screen buffer after leaving the alternate screen.
 fn dump_buffer_ansi(buf: &ratatui::buffer::Buffer) {
+    // Trim trailing blank rows so the summary prints immediately below the visible
+    // content rather than after a band of empty lines (and so a short frame doesn't
+    // needlessly scroll the whole terminal on exit).
+    let bottom = buf.area.top() + buffer_content_rows(buf);
+    dump_buffer_ansi_rows(buf, buf.area.top(), bottom, buf.area.left());
+}
+
+/// Replay rows `[top, bottom)`, columns from `left` onward, of a ratatui buffer to
+/// stdout using raw ANSI escape codes, preserving each cell's exact fg/bg/style.
+/// Shared by `dump_buffer_ansi` (the whole frame, from its leftmost column) and the
+/// single-view-only exit path (just its last row, skipping the border glyph column
+/// so a colorful "vlat:" wordmark can take its place instead).
+fn dump_buffer_ansi_rows(buf: &ratatui::buffer::Buffer, top: u16, bottom: u16, left: u16) {
     use std::fmt::Write as FmtWrite;
     use std::io::Write;
     use ratatui::style::{Color, Modifier};
@@ -3264,13 +3331,9 @@ fn dump_buffer_ansi(buf: &ratatui::buffer::Buffer) {
     let area = buf.area;
     let mut line = String::with_capacity(area.width as usize * 20);
 
-    // Trim trailing blank rows so the summary prints immediately below the visible
-    // content rather than after a band of empty lines (and so a short frame doesn't
-    // needlessly scroll the whole terminal on exit).
-    let bottom = area.top() + buffer_content_rows(buf);
-    for y in area.top()..bottom {
+    for y in top..bottom {
         line.clear();
-        for x in area.left()..area.right() {
+        for x in left..area.right() {
             let Some(cell) = buf.cell((x, y)) else { continue };
             if cell.diff_option == ratatui::buffer::CellDiffOption::Skip { continue; }
             line.push_str("\x1b[0m");
@@ -3351,6 +3414,55 @@ fn fmt_recv(s: &TargetState) -> String {
     let received = s.total_sent.saturating_sub(s.drops as u64);
     let pct = received as f64 / s.total_sent as f64 * 100.0;
     format!("{} ({:.1}%)", fmt_thousands(received), pct)
+}
+
+/// Brief, plain-English final summary for the single-view-only exit path: sent,
+/// received, loss %, total time, and min/avg/max latency. Deliberately spelled out
+/// rather than using the live view's compact "N probes, elapsed" text, which reads
+/// as a snapshot mid-run and isn't self-explanatory once the run has actually ended.
+///
+/// Colored with the same themable properties as the live view and the wrapped
+/// summary table (`print_summary`), so the palette stays consistent end to end;
+/// `nc` (mirrors `args.no_color`) strips all ANSI for plain output.
+fn single_exit_summary_line(state: &TargetState, elapsed_secs: u64, theme: &crate::ui::Theme, nc: bool) -> String {
+    use ratatui::style::Color;
+    let color = |c: Color, s: &str| -> String {
+        if nc { return s.to_string(); }
+        let (r, g, b) = crate::ui::theme::color_to_rgb(c);
+        format!("\x1b[38;2;{r};{g};{b}m{s}\x1b[0m")
+    };
+    let dim = |s: &str| -> String { if nc { s.to_string() } else { format!("\x1b[2m{s}\x1b[0m") } };
+
+    let sent     = state.total_sent;
+    let received = sent.saturating_sub(state.drops as u64);
+    let loss_pct = if sent > 0 { state.drops as f64 / sent as f64 * 100.0 } else { 0.0 };
+    let all_lost = sent > 0 && state.drops as u64 == sent;
+
+    let host_txt     = color(theme.hostname, &state.host);
+    let received_txt = {
+        let txt = fmt_thousands(received);
+        if all_lost { color(theme.c(theme.drop_marker), &txt) } else { txt }
+    };
+    let loss_txt = {
+        let txt = format!("{:.1}%", loss_pct);
+        if state.drops > 0 { color(theme.c(theme.drop_marker), &txt) } else { dim(&txt) }
+    };
+    let latency_txt = |ms: f64| -> String {
+        let txt = crate::ui::fmt_rtt(ms);
+        if txt == "~" { dim(&txt) } else { color(theme.latency_threshold_color(ms), &txt) }
+    };
+
+    format!(
+        "{}: sent {}, received {}, {} loss, ran {}, latency min/avg/max {}/{}/{} ms",
+        host_txt,
+        fmt_thousands(sent),
+        received_txt,
+        loss_txt,
+        fmt_duration(elapsed_secs),
+        latency_txt(state.life_min()),
+        latency_txt(state.avg_latency()),
+        latency_txt(state.life_max()),
+    )
 }
 
 /// Print the end-of-session summary for a saved session file - the picker's
@@ -3513,12 +3625,7 @@ fn print_summary(states: &[TargetState], mode_labels: &[String], exec_cmds: &[St
     // Color an avg-latency value using the theme gradient.
     let latency_color = |ms: f64, text: &str| -> String {
         if nc || text == "—" { return text.to_string(); }
-        let (lr, lg, lb) = theme.grad_low;
-        let (mr, mg, mb) = theme.grad_mid;
-        let (hr, hg, hb) = theme.grad_high;
-        if      ms <  50.0 { rgb(lr, lg, lb, text) }
-        else if ms < 150.0 { rgb(mr, mg, mb, text) }
-        else               { rgb(hr, hg, hb, text) }
+        color_ansi(theme.latency_threshold_color(ms), text)
     };
 
     // Color a protocol mode string using theme mode colors - matches the live
@@ -3944,4 +4051,71 @@ fn print_summary(states: &[TargetState], mode_labels: &[String], exec_cmds: &[St
     // ── Total time running ───────────────────────────────────────────────
     println!();
     println!("  {}", dim(&format!("total time running: {}", fmt_duration(elapsed_secs))));
+}
+
+#[cfg(test)]
+mod exit_summary_tests {
+    use super::*;
+
+    fn theme() -> crate::ui::Theme { crate::ui::Theme::default() }
+
+    #[test]
+    fn reports_sent_received_loss_time_and_latency() {
+        let mut s = TargetState::new("example.org".to_string());
+        for i in 0..10usize {
+            s.record_sent(i);
+            if i == 3 { s.record_result(i, Err(()), 0, false); } else { s.record_result(i, Ok(10.0 + i as f64), 0, false); }
+        }
+        let line = single_exit_summary_line(&s, 125, &theme(), true); // 2m 05s
+
+        assert!(line.starts_with("example.org:"), "{line:?}");
+        assert!(line.contains("sent 10"), "{line:?}");
+        assert!(line.contains("received 9"), "{line:?}");
+        assert!(line.contains("10.0% loss"), "{line:?}");
+        assert!(line.contains("ran 2m 05s"), "{line:?}");
+        assert!(line.contains("latency min/avg/max"), "{line:?}");
+    }
+
+    #[test]
+    fn never_received_shows_placeholder_latency_not_a_panic() {
+        let mut s = TargetState::new("example.org".to_string());
+        s.record_sent(0);
+        s.record_result(0, Err(()), 0, false);
+        let line = single_exit_summary_line(&s, 5, &theme(), true);
+
+        assert!(line.contains("sent 1"), "{line:?}");
+        assert!(line.contains("received 0"), "{line:?}");
+        assert!(line.contains("100.0% loss"), "{line:?}");
+        assert!(line.contains("min/avg/max ~/~/~"), "no data should fall back to the \"~\" placeholder, not 0ms: {line:?}");
+    }
+
+    #[test]
+    fn zero_probes_sent_does_not_divide_by_zero() {
+        let s = TargetState::new("example.org".to_string());
+        let line = single_exit_summary_line(&s, 0, &theme(), true);
+        assert!(line.contains("sent 0"), "{line:?}");
+        assert!(line.contains("0.0% loss"), "{line:?}");
+    }
+
+    #[test]
+    fn no_color_flag_strips_all_ansi() {
+        let mut s = TargetState::new("example.org".to_string());
+        for i in 0..10usize {
+            s.record_sent(i);
+            if i == 3 { s.record_result(i, Err(()), 0, false); } else { s.record_result(i, Ok(10.0 + i as f64), 0, false); }
+        }
+        let line = single_exit_summary_line(&s, 125, &theme(), true);
+        assert!(!line.contains('\x1b'), "no_color should emit no ANSI escapes: {line:?}");
+    }
+
+    #[test]
+    fn colors_are_emitted_when_enabled() {
+        let mut s = TargetState::new("example.org".to_string());
+        for i in 0..10usize {
+            s.record_sent(i);
+            if i == 3 { s.record_result(i, Err(()), 0, false); } else { s.record_result(i, Ok(10.0 + i as f64), 0, false); }
+        }
+        let line = single_exit_summary_line(&s, 125, &theme(), false);
+        assert!(line.contains('\x1b'), "colors should be emitted when no_color is false: {line:?}");
+    }
 }

@@ -90,10 +90,12 @@ pub fn nav_skip(items: &[HelpItem], idx: usize, collapsed: &[bool; 3]) -> bool {
 }
 
 /// Keys reflect display order (see VIEW_DISPLAY_ORDER below), not array index.
-/// "list" and "single" have no jump-key - both are only reachable by navigating
-/// the picker; single is additionally only available when a single target is running.
+/// "list" and "single" share the '0' jump-key and a single picker slot - only
+/// one of them is ever shown/reachable at a time, chosen by target count (see
+/// the compact-section handling in the picker draw functions and the `_` arm
+/// of `enter_view_id!` in app.rs).
 pub const HELP_VIEWS: &[(&str, &str, &str)] = &[
-    ("",  "list",   "one line per target, no graph"),
+    ("0", "list",   "one line per target, no graph"),
     ("1", "graph",  "fullscreen area chart"),
     ("3", "worm",   "retro worm screensaver"),
     ("4", "radar",  "radar sweep"),
@@ -109,30 +111,33 @@ pub const HELP_VIEWS: &[(&str, &str, &str)] = &[
     // order arrays below, and bump the "ambient" count in VIEW_GROUPS, once
     // it's ready to ship.
     ("9", "pong",    "pong screensaver \u{2014} fast, jittery bounces mean rough latency; slow, steady ones mean a calm connection"),
-    ("",  "single",  "detailed view for one target (single target only)"),
+    ("0", "single",  "detailed view for one target (single target only)"),
 ];
 
 /// Maps a '1'..'9' hotkey position to a HELP_VIEWS index. This is the global
 /// jump-key order (unrelated to how the view picker lists things - see
-/// VIEW_PICKER_ORDER for that); list and single have no digit hotkey, and
-/// pong (index 9) is deliberately hidden (see the comment above HELP_VIEWS),
-/// so only 8 of the 11 views appear here.
+/// VIEW_PICKER_ORDER for that); list/single use '0' instead (handled
+/// separately - see enter_view_id! in app.rs), and pong (index 9) is
+/// deliberately hidden (see the comment above HELP_VIEWS), so only 8 of the
+/// 11 views appear here.
 /// Hotkey order: graph, ekg, worm, radar, bars, cards, bubble, scatter
 pub const VIEW_DISPLAY_ORDER: &[usize] = &[1, 4, 2, 3, 5, 6, 7, 8];
 
 /// Maps view-picker cursor index to HELP_VIEWS index. Same set of views as
-/// VIEW_DISPLAY_ORDER plus list/single, reordered for the picker's on-screen
-/// listing: single leads the compact section instead of getting its own
-/// trailing section. pong (index 9) is deliberately hidden (see the comment
-/// above HELP_VIEWS).
-/// Display order: single, list, graph, ekg, radar, bars, cards, scatter, worm, bubble
-pub const VIEW_PICKER_ORDER: &[usize] = &[10, 0, 1, 4, 3, 5, 6, 8, 2, 7];
+/// VIEW_DISPLAY_ORDER plus a single merged list/single slot, reordered for
+/// the picker's on-screen listing. The first (compact) slot holds index 10
+/// (single) as a sentinel meaning "list or single, whichever fits the
+/// current target count" - the draw functions and `enter_view_id!`'s `_` arm
+/// both resolve it that way, so it never needs its own list (index 0) slot.
+/// pong (index 9) is deliberately hidden (see the comment above HELP_VIEWS).
+/// Display order: list/single, graph, ekg, radar, bars, cards, scatter, worm, bubble
+pub const VIEW_PICKER_ORDER: &[usize] = &[10, 1, 4, 3, 5, 6, 8, 2, 7];
 
 /// Section layout: (name, picker-cursor start, item count)
 const VIEW_GROUPS: &[(&str, usize, usize)] = &[
-    ("compact",  0, 2),
-    ("timeline", 2, 2),
-    ("ambient",  4, 6),
+    ("compact",  0, 1),
+    ("timeline", 1, 2),
+    ("ambient",  3, 6),
 ];
 
 pub const HELP_SORTS: &[(&str, &str)] = &[
@@ -683,7 +688,6 @@ pub fn draw_view_picker_dialog(f: &mut Frame, area: Rect, ascii: bool, theme: &T
     };
 
     let cursor = cursor.min(VIEW_PICKER_ORDER.len().saturating_sub(1));
-    let single_disabled = target_count != 1;
 
     let mut body: Vec<Line> = vec![
         Line::raw(""),
@@ -699,18 +703,15 @@ pub fn draw_view_picker_dialog(f: &mut Frame, area: Rect, ascii: bool, theme: &T
         };
         body.push(Line::from(Span::styled(sep_str, hint)));
         for (display_idx, &help_idx) in VIEW_PICKER_ORDER.iter().enumerate().skip(start).take(count) {
-            let &(k, name, desc) = &HELP_VIEWS[help_idx];
+            // help_idx 10 is the merged list/single slot - show whichever
+            // applies to the current target count (see VIEW_PICKER_ORDER).
+            let &(k, name, desc) = if help_idx == 10 && target_count != 1 {
+                &HELP_VIEWS[0]
+            } else {
+                &HELP_VIEWS[help_idx]
+            };
             let is_sel = display_idx == cursor;
-            let disabled = single_disabled && help_idx == 10;
-            if disabled {
-                // "single" is only meaningful with exactly one target - show it dim
-                // and non-selectable regardless of cursor position.
-                body.push(Line::from(vec![
-                    Span::raw(pref_n),
-                    Span::styled(format!("{:<2} {:<6}", k, name), hint),
-                    Span::styled(format!("  {}", desc), hint),
-                ]));
-            } else if is_sel {
+            if is_sel {
                 body.push(Line::from(vec![
                     Span::styled(format!("{}{:<2} {:<6}", pref_s, k, name), sel_fg),
                     Span::styled(format!("  {}", desc), sel_fg),
@@ -1044,23 +1045,20 @@ pub fn draw_help_dialog(
         // View sub-menu: sectioned layout (compact / graph / compare)
         if let HelpSubMenu::View { cursor: sc } = sub {
             let sc = (*sc).min(VIEW_PICKER_ORDER.len().saturating_sub(1));
-            let single_disabled = target_count != 1;
             let mut body: Vec<Line> = vec![Line::raw(""), Line::from(Span::styled(nav_str.to_owned(), hint)), Line::raw("")];
             for &(sec_name, start, count) in VIEW_GROUPS {
-                let sep_str = if ascii { format!(" -- {} ", sec_name) } else { format!(" \u{2500}\u{2500} {} ", sec_name) };
-                body.push(Line::from(Span::styled(sep_str, hint)));
+                body.push(dialog_section_sep(sec_name, ascii, theme));
                 for (display_idx, &help_idx) in VIEW_PICKER_ORDER.iter().enumerate().skip(start).take(count) {
-                    let &(k, name, desc) = &HELP_VIEWS[help_idx];
+                    // help_idx 10 is the merged list/single slot - show whichever
+                    // applies to the current target count (see VIEW_PICKER_ORDER).
+                    let &(k, name, desc) = if help_idx == 10 && target_count != 1 {
+                        &HELP_VIEWS[0]
+                    } else {
+                        &HELP_VIEWS[help_idx]
+                    };
                     let is_sel = display_idx == sc;
-                    let disabled = single_disabled && help_idx == 10;
                     let pref = if is_sel { pref_s } else { pref_n };
-                    if disabled {
-                        body.push(Line::from(vec![
-                            Span::raw(pref_n),
-                            Span::styled(format!("{}  {:<5}", k, name), hint),
-                            Span::styled(format!("  {}", desc), hint),
-                        ]));
-                    } else if is_sel {
+                    if is_sel {
                         body.push(Line::from(vec![
                             Span::styled(format!("{}{}  {:<5}", pref, k, name), sel),
                             Span::styled(format!("  {}", desc), sel),
@@ -1176,67 +1174,94 @@ pub fn draw_help_dialog(
     let items           = help_menu_items(has_sort, has_headers, show_axis_menu);
     let cursor     = cursor.min(items.len().saturating_sub(1));
 
+    // Every row below shares one fixed column layout - key(10, right-aligned)
+    // | gap | checkbox(3) | gap | chevron(1) | gap | description - matching
+    // the sort/column dialogs' fixed mark/symbol columns, so rows line up
+    // whether or not they carry a checkbox, a chevron, both, or neither.
+    let mark_on        = if ascii { "x" } else { "\u{2713}" };
+    let mark_off       = " ";
+    // Matches the column dialog's "on" check color exactly.
+    let check_on_style = Style::default().fg(theme.rtt_good).add_modifier(Modifier::BOLD);
+    // Longest value-row label ("set window") - the others pad out to it so
+    // every "(value)" starts in the same column.
+    const VALUE_LABEL_W: usize = 10;
+    let value_desc = |lbl: &str, val: &str| -> String { format!("{:<w$} ({})", lbl, val, w = VALUE_LABEL_W) };
+
+    // `checkbox`: Some(on) draws a colored [x]/[ ] mark; None reserves the
+    // same width blank. `chevron`: draws the "opens a sub-dialog" indicator
+    // in its own fixed slot. `forced_dim` keeps hint/dim styling even while
+    // selected - used for the single-target sort row, which should still
+    // read as unavailable under the cursor.
+    let help_row = |is_sel: bool, k: &str, checkbox: Option<bool>, chevron: bool, desc: String, forced_dim: bool| -> Line<'static> {
+        let pref = if is_sel { pref_s } else { pref_n };
+        let box_str = match checkbox {
+            Some(true)  => format!("[{}]", mark_on),
+            Some(false) => format!("[{}]", mark_off),
+            None        => "   ".to_string(),
+        };
+        let chev_str = if chevron { sub_m } else { " " };
+        let ind = format!("{} {} ", box_str, chev_str);
+
+        let (key_sty, ind_sty, desc_sty) = if forced_dim {
+            (hint, hint, hint)
+        } else if is_sel {
+            (sel, sel, sel)
+        } else {
+            let ind_sty = match checkbox {
+                Some(true)  => check_on_style,
+                Some(false) => hint,
+                None        => hint,
+            };
+            (key, ind_sty, label)
+        };
+
+        let mut spans = vec![
+            Span::styled(format!("{}{:>10}", pref, k), key_sty),
+            Span::raw("  "),
+            Span::styled(ind, ind_sty),
+            Span::styled(desc, desc_sty),
+        ];
+        if is_sel { spans.push(Span::raw("  ")); }
+        Line::from(spans)
+    };
+
+    // Row index within `body` that the cursor lands on, so the dialog can
+    // scroll to keep it in view - `cursor` is an index into `items`, not
+    // `body` (separators fold and collapsed items disappear), so this has to
+    // be tracked as rows are actually emitted.
+    let mut sel_row: Option<u16> = None;
+
     let mut body: Vec<Line<'static>> = Vec::new();
     for (i, item) in items.iter().enumerate() {
         let is_sel = i == cursor;
-        let pref   = if is_sel { pref_s } else { pref_n };
-
-        macro_rules! simple {
-            ($k:expr, $desc:expr) => {
-                if is_sel {
-                    Line::from(vec![Span::styled(format!("{}{}", pref, $k), sel), Span::styled($desc, sel)])
-                } else {
-                    Line::from(vec![Span::raw(pref_n), Span::styled($k, key), Span::styled($desc, label)])
-                }
-            };
-        }
-        macro_rules! submenu {
-            ($k:expr, $desc:expr) => {
-                if is_sel {
-                    Line::from(vec![Span::styled(format!("{}{}", pref, $k), sel), Span::styled($desc, sel), Span::styled(format!("  {}", sub_m), sel)])
-                } else {
-                    Line::from(vec![Span::raw(pref_n), Span::styled($k, key), Span::styled($desc, label), Span::styled(format!("  {}", sub_m), hint)])
-                }
-            };
-        }
-        macro_rules! toggle {
-            ($k:expr, $desc:expr, $on:expr) => {{
-                let badge        = if $on { "  [on]" } else { "  [off]" };
-                let badge_style  = if $on { key } else { hint };
-                if is_sel {
-                    Line::from(vec![
-                        Span::styled(format!("{}{}", pref, $k), sel),
-                        Span::styled($desc, sel),
-                        Span::styled(badge, sel),
-                    ])
-                } else {
-                    Line::from(vec![
-                        Span::raw(pref_n),
-                        Span::styled($k, key),
-                        Span::styled($desc, label),
-                        Span::styled(badge, badge_style),
-                    ])
-                }
-            }};
-        }
 
         // ── Separator / section header ────────────────────────────────────────
         if let HelpItem::Separator { label, sec } = item {
             match sec {
                 None => {
-                    // Plain non-collapsible divider
-                    let div = if ascii { "  --------" } else { "  \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}" };
-                    body.push(Line::from(Span::styled(div, hint)));
+                    // Plain non-collapsible divider - same rule color and full
+                    // width as the named section separators below, so it reads
+                    // as part of the same visual family instead of a stray mark.
+                    let rule_sty = Style::default().fg(theme.c(theme.col_key_rule));
+                    let fill = if ascii { "-".repeat(55) } else { "\u{2500}".repeat(55) };
+                    body.push(Line::from(Span::styled(format!("  {}", fill), rule_sty)));
                 }
                 Some(s) => {
                     let is_collapsed = collapsed[*s as usize];
                     if is_collapsed {
-                        let open_icon  = if ascii { "> " } else { "\u{25b8} " };
-                        let expand_hint = if ascii { "  [+]" } else { "  \u{25b9}" };
+                        // Count the (visible) items this section is hiding, so
+                        // a collapsed header hints at what's inside it.
+                        let count = items.iter().skip(i + 1)
+                            .take_while(|it| !matches!(it, HelpItem::Separator { .. }))
+                            .count();
+                        let open_icon   = if ascii { "> " } else { "\u{25b8} " };
+                        let expand_hint = if ascii { format!("  [+{}]", count) } else { format!("  \u{25b9} ({})", count) };
                         if is_sel {
+                            sel_row = Some(body.len() as u16);
                             body.push(Line::from(vec![
                                 Span::styled(format!("{}{}", pref_s, label), sel),
                                 Span::styled(expand_hint, sel),
+                                Span::raw("  "),
                             ]).style(sel_bg));
                         } else {
                             body.push(Line::from(vec![
@@ -1245,12 +1270,7 @@ pub fn draw_help_dialog(
                             ]));
                         }
                     } else {
-                        let sep_str = if ascii {
-                            format!(" -- {} ", label)
-                        } else {
-                            format!(" \u{2500}\u{2500} {} ", label)
-                        };
-                        body.push(Line::from(Span::styled(sep_str, hint)));
+                        body.push(dialog_section_sep(label, ascii, theme));
                     }
                 }
             }
@@ -1260,134 +1280,37 @@ pub fn draw_help_dialog(
         // Skip items that belong to a collapsed section
         if nav_skip(&items, i, collapsed) { continue; }
 
+        if is_sel { sel_row = Some(body.len() as u16); }
+
         let line: Line<'static> = match item {
-            HelpItem::ToggleHelp      => simple!("h         ", "  toggle this help"),
-            HelpItem::Explain         => submenu!("e         ", "  explain output legend"),
-            HelpItem::ToggleColKeys   => toggle!("k         ", "  column keys", show_col_keys),
-            HelpItem::ToggleExtraStats => {
-                let badge       = if extra_cols_on { "  [on]" } else { "  [off]" };
-                let badge_style = if extra_cols_on { key } else { hint };
-                if is_sel {
-                    Line::from(vec![
-                        Span::styled(format!("{}c         ", pref), sel),
-                        Span::styled("  show / hide columns", sel),
-                        Span::styled(badge, sel),
-                        Span::styled(format!("  {}", sub_m), sel),
-                    ])
-                } else {
-                    Line::from(vec![
-                        Span::raw(pref_n),
-                        Span::styled("c         ", key),
-                        Span::styled("  show / hide columns", label),
-                        Span::styled(badge, badge_style),
-                        Span::styled(format!("  {}", sub_m), hint),
-                    ])
-                }
-            }
-            HelpItem::AxisMenu if is_worm => submenu!("a         ", "  pick worm metric"),
-            HelpItem::AxisMenu if is_radar => submenu!("a         ", "  pick radar metric"),
-            HelpItem::AxisMenu => submenu!("a         ", "  pick scatter axes / log scale"),
-            HelpItem::ToggleHeaders   => toggle!("i         ", "  per-target statistics", show_headers),
-            HelpItem::FreezeToggle    => toggle!("Space     ", "  freeze display", frozen),
-            HelpItem::ViewMenu => {
-                if is_sel {
-                    Line::from(vec![
-                        Span::styled(format!("{}v         ", pref), sel),
-                        Span::styled("  view (", sel),
-                        Span::styled(current_view.to_owned(), sel),
-                        Span::styled(format!(")  {}", sub_m), sel),
-                    ])
-                } else {
-                    Line::from(vec![
-                        Span::raw(pref_n),
-                        Span::styled("v         ", key),
-                        Span::styled("  view (", label),
-                        Span::styled(current_view.to_owned(), key),
-                        Span::styled(format!(")  {}", sub_m), hint),
-                    ])
-                }
-            }
+            HelpItem::ToggleHelp      => help_row(is_sel, "h", None, false, "toggle this help".into(), false),
+            HelpItem::Explain         => help_row(is_sel, "e", None, true,  "explain output legend".into(), false),
+            HelpItem::ToggleColKeys   => help_row(is_sel, "k", Some(show_col_keys), false, "column keys".into(), false),
+            HelpItem::ToggleExtraStats => help_row(is_sel, "c", Some(extra_cols_on), true, "show / hide columns".into(), false),
+            HelpItem::AxisMenu if is_worm  => help_row(is_sel, "a", None, true, "pick worm metric".into(), false),
+            HelpItem::AxisMenu if is_radar => help_row(is_sel, "a", None, true, "pick radar metric".into(), false),
+            HelpItem::AxisMenu             => help_row(is_sel, "a", None, true, "pick scatter axes / log scale".into(), false),
+            HelpItem::ToggleHeaders   => help_row(is_sel, "i", Some(show_headers), false, "per-target statistics".into(), false),
+            HelpItem::FreezeToggle    => help_row(is_sel, "Space", Some(frozen), false, "freeze display".into(), false),
+            HelpItem::ViewMenu        => help_row(is_sel, "v", None, true, value_desc("view", current_view), false),
             HelpItem::SortMenu if !has_sort => {
                 // Sort not available (single target): show dim with N/A note
-                if is_sel {
-                    Line::from(vec![
-                        Span::styled(format!("{}s         ", pref), hint),
-                        Span::styled("  sort  (N/A \u{2014} single target)", hint),
-                    ])
-                } else {
-                    Line::from(vec![
-                        Span::raw(pref_n),
-                        Span::styled("s         ", hint),
-                        Span::styled("  sort  (N/A \u{2014} single target)", hint),
-                    ])
-                }
+                help_row(is_sel, "s", None, false, value_desc("sort", "N/A \u{2014} single target"), true)
             }
-            HelpItem::SortMenu => {
-                if is_sel {
-                    Line::from(vec![
-                        Span::styled(format!("{}s         ", pref), sel),
-                        Span::styled("  sort (", sel),
-                        Span::styled(sort_name.to_owned(), sel),
-                        Span::styled(format!(")  {}", sub_m), sel),
-                    ])
-                } else {
-                    Line::from(vec![
-                        Span::raw(pref_n),
-                        Span::styled("s         ", key),
-                        Span::styled("  sort (", label),
-                        Span::styled(sort_name.to_owned(), key),
-                        Span::styled(format!(")  {}", sub_m), hint),
-                    ])
-                }
-            }
-            HelpItem::ThemeMenu => {
-                if is_sel {
-                    Line::from(vec![
-                        Span::styled(format!("{}t         ", pref), sel),
-                        Span::styled("  theme (", sel),
-                        Span::styled(theme.name.to_owned(), sel),
-                        Span::styled(format!(")  {}", sub_m), sel),
-                    ])
-                } else {
-                    Line::from(vec![
-                        Span::raw(pref_n),
-                        Span::styled("t         ", key),
-                        Span::styled("  theme (", label),
-                        Span::styled(theme.name, key),
-                        Span::styled(format!(")  {}", sub_m), hint),
-                    ])
-                }
-            }
-            HelpItem::SetWindow => {
-                if is_sel {
-                    Line::from(vec![
-                        Span::styled(format!("{}w         ", pref), sel),
-                        Span::styled("  set window (", sel),
-                        Span::styled(win_str.clone(), sel),
-                        Span::styled(format!(")  {}", sub_m), sel),
-                    ])
-                } else {
-                    Line::from(vec![
-                        Span::raw(pref_n),
-                        Span::styled("w         ", key),
-                        Span::styled("  set window (", label),
-                        Span::styled(win_str.clone(), key),
-                        Span::styled(format!(")  {}", sub_m), hint),
-                    ])
-                }
-            }
-            HelpItem::SaveDefaults => submenu!("d         ", "  save view / theme / sort defaults"),
-            HelpItem::ReResolve    => simple!("r         ", "  re-resolve DNS now"),
+            HelpItem::SortMenu        => help_row(is_sel, "s", None, true, value_desc("sort", sort_name), false),
+            HelpItem::ThemeMenu       => help_row(is_sel, "t", None, true, value_desc("theme", theme.name), false),
+            HelpItem::SetWindow       => help_row(is_sel, "w", None, true, value_desc("set window", &win_str), false),
+            HelpItem::SaveDefaults    => help_row(is_sel, "d", None, true, "save view / theme / sort defaults".into(), false),
+            HelpItem::ReResolve       => help_row(is_sel, "r", None, false, "re-resolve DNS now".into(), false),
             HelpItem::LoggingMenu => {
-                let log_desc: &'static str = if is_logging { "  stop logging  (active)" } else { "  start logging (CSV / JSON)" };
-                if !is_logging {
-                    submenu!("l         ", log_desc)
+                if is_logging {
+                    help_row(is_sel, "l", None, false, "stop logging  (active)".into(), false)
                 } else {
-                    simple!("l         ", log_desc)
+                    help_row(is_sel, "l", None, true, "start logging (CSV / JSON)".into(), false)
                 }
             }
-            HelpItem::Quit      => simple!("q  Ctrl-C ", "  quit"),
-            HelpItem::CloseHelp => simple!("Esc       ", "  close / return to normal view"),
+            HelpItem::Quit      => help_row(is_sel, "q", None, false, "quit".into(), false),
+            HelpItem::CloseHelp => help_row(is_sel, "Esc", None, false, "close / return to normal view".into(), false),
             HelpItem::Separator { .. } => unreachable!(),
         };
         body.push(if is_sel { line.style(sel_bg) } else { line });
@@ -1396,9 +1319,16 @@ pub fn draw_help_dialog(
     let content_h    = body.len() as u16;
     let ideal_h      = content_h + 2;
     let dialog_h     = ideal_h.min(area.height);
-    let dialog_w     = 54u16.min(area.width.saturating_sub(4));
+    let dialog_w     = 60u16.min(area.width.saturating_sub(4));
     let visible_rows = dialog_h.saturating_sub(2);
-    let scroll       = 0u16;
+    // Scroll just far enough to keep the selected row on screen - otherwise
+    // the cursor can land past the visible window (e.g. a short terminal)
+    // with no highlighted row anywhere in the dialog.
+    let max_scroll   = content_h.saturating_sub(visible_rows);
+    let scroll       = sel_row
+        .map(|r| (r + 1).saturating_sub(visible_rows))
+        .unwrap_or(0)
+        .min(max_scroll);
 
     let scroll_hint  = Style::default().fg(theme.c(theme.dlg_timer)).add_modifier(Modifier::DIM);
     let nav_hint_str = if ascii { "  Up/Down   Enter   </> collapse" } else { "  \u{2191}\u{2193}   Enter   \u{2190}\u{2192} collapse" };
@@ -1540,6 +1470,7 @@ pub fn explain_content_lines(ascii: bool) -> Vec<Line<'static>> {
             ("t", "srtt  ", "RFC 6298 smoothed RTT"),
             ("#", "streak", "consecutive drop streak count"),
             ("u", "last  ", "time since the last successful response"),
+            ("i", "status", "probe count + elapsed, plus down/last-drop once notable"),
         ] {
             lines.push(Line::from(vec![raw("    "), span(sym, bld), raw("  "), raw(name), raw("  "), raw(desc)]));
         }
@@ -1556,6 +1487,7 @@ pub fn explain_content_lines(ascii: bool) -> Vec<Line<'static>> {
             ("\u{03c4}", "srtt  ", "RFC 6298 smoothed RTT"),
             ("#",        "streak", "consecutive drop streak count"),
             ("\u{2191}", "last  ", "time since the last successful response"),
+            ("\u{2139}", "status", "probe count + elapsed, plus down/last-drop once notable"),
         ] {
             lines.push(Line::from(vec![raw("    "), span(sym, bld), raw("  "), raw(name), raw("  "), raw(desc)]));
         }
@@ -1875,6 +1807,14 @@ pub fn explain_content_lines(ascii: bool) -> Vec<Line<'static>> {
     lines
 }
 
+/// Full rendered height of the save-defaults dialog: nav hint, legend,
+/// config path, header, 6 setting rows, spacer and save button, plus
+/// surrounding blank lines and 2 border rows. Kept in sync with the body
+/// built in `draw_save_defaults_dialog` below - callers use this (instead of
+/// the generic `DIALOG_ROWS`) to reserve enough inline-viewport space before
+/// opening the dialog, so it isn't clipped in non-fullscreen views.
+pub const SAVE_DEFAULTS_DIALOG_H: u16 = 18;
+
 #[allow(clippy::too_many_arguments)]
 pub fn draw_save_defaults_dialog(
     f: &mut Frame,
@@ -2012,6 +1952,12 @@ pub fn draw_save_defaults_dialog(
         Line::from(Span::styled("  [ Save ]", key_sty))
     };
 
+    // Same full-width rule color as the main menu's plain divider, separating
+    // the settings rows from the save action instead of a bare blank line.
+    let rule_sty = Style::default().fg(theme.c(theme.col_key_rule));
+    let rule_fill = if ascii { "-".repeat(68) } else { "\u{2500}".repeat(68) };
+    let action_rule = Line::from(Span::styled(format!("  {}", rule_fill), rule_sty));
+
     // Header row: align "current" and "saved default" with data columns
     // 15 chars prefix (indent + check + gap + key), then CURR_W for current column
     let header_row = Line::from(vec![
@@ -2045,7 +1991,7 @@ pub fn draw_save_defaults_dialog(
         keys_row,
         window_row,
         cols_row,
-        Line::raw(""),
+        action_rule,
         save_row,
         Line::raw(""),
     ];
@@ -2137,12 +2083,33 @@ pub fn draw_explain_dialog(f: &mut Frame, area: Rect, scroll: u16, ascii: bool, 
     );
 }
 
-/// Number of items in the column toggle dialog (5 identity + 4 base + 12 extra).
-pub const STAT_TOGGLE_COUNT: usize = 22;
+/// Number of items in the column toggle dialog (5 identity + 4 base + 14 extra).
+pub const STAT_TOGGLE_COUNT: usize = 23;
 
 /// Full rendered height of the column toggle dialog: 3 header lines, the items,
-/// 3 group separators, 1 trailing blank, plus 2 border rows.
-pub const STAT_TOGGLE_DIALOG_H: u16 = 3 + STAT_TOGGLE_COUNT as u16 + 3 + 1 + 2;
+/// 4 group separators, 1 trailing blank, plus 2 border rows.
+pub const STAT_TOGGLE_DIALOG_H: u16 = 3 + STAT_TOGGLE_COUNT as u16 + 4 + 1 + 2;
+
+/// Named section-header separator shared by dialogs that group their rows, e.g.
+/// "  ─ identity ──────────────────────────────────". Rule chars use `col_key_rule`
+/// (the same accent used for the column-key rule in the main display); the label
+/// itself stays plain DIM rather than picking up that color, so it reads as text
+/// sitting on the rule instead of part of it.
+fn dialog_section_sep(label: &str, ascii: bool, theme: &Theme) -> Line<'static> {
+    let rule_sty  = Style::default().fg(theme.c(theme.col_key_rule));
+    let label_sty = Style::default().add_modifier(Modifier::DIM);
+    let n = 52usize.saturating_sub(label.chars().count());
+    let (lead, fill): (String, String) = if ascii {
+        ("  - ".into(), "-".repeat(n))
+    } else {
+        ("  \u{2500} ".into(), "\u{2500}".repeat(n))
+    };
+    Line::from(vec![
+        Span::styled(lead, rule_sty),
+        Span::styled(label.to_owned(), label_sty),
+        Span::styled(format!(" {}", fill), rule_sty),
+    ])
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn draw_stat_column_toggle_dialog(
@@ -2194,39 +2161,26 @@ pub fn draw_stat_column_toggle_dialog(
         [" ", " ", ":", " ", " ",
          "~", "r", "j", "x",
          "w", "s", "0", "1", "p", "5", "9", "%", "t", "#", "u",
-         "o", "|"]
+         "o", "|",
+         "i"]
     } else {
         [" ", " ", ":", " ", "\u{21bb}",
          "\u{2248}", "\u{21d5}", "\u{03b4}", "\u{2717}",
          "\u{03a9}", "\u{00b1}", "\u{2080}", "\u{2081}", "\u{00bd}", "\u{2085}", "\u{2089}", "%", "\u{03c4}", "#", "\u{2191}",
-         "\u{25cb}", "\u{258f}"]
+         "\u{25cb}", "\u{258f}",
+         "\u{2139}"]
     };
 
     // Named section separator — rule chars use col_key_rule, label uses plain DIM,
     // matching the column-key row and rule style in the main display.
-    let sep_rule_sty  = Style::default().fg(theme.c(theme.col_key_rule));
-    let sep_label_sty = Style::default().add_modifier(Modifier::DIM);
     macro_rules! section_sep {
-        ($label:expr) => {{
-            let lbl: &str = $label;
-            let n = 52usize.saturating_sub(lbl.chars().count());
-            let (lead, fill): (String, String) = if ascii {
-                ("  - ".into(), "-".repeat(n))
-            } else {
-                ("  \u{2500} ".into(), "\u{2500}".repeat(n))
-            };
-            Line::from(vec![
-                Span::styled(lead, sep_rule_sty),
-                Span::styled(lbl.to_owned(), sep_label_sty),
-                Span::styled(format!(" {}", fill), sep_rule_sty),
-            ])
-        }};
+        ($label:expr) => { dialog_section_sep($label, ascii, theme) };
     }
 
     // (name, description, is_enabled)
     // Indices 0-4:  identity columns (enabled = effective state from `identity`)
     // Indices 5-8:  base stats (enabled = NOT in hidden_base)
-    // Indices 9-21: extra stats (enabled = in extra_stats)
+    // Indices 9-22: extra stats (enabled = in extra_stats)
     let rows: [(&str, &str, bool); STAT_TOGGLE_COUNT] = [
         ("mode  ", "probe-type badge  (auto: mixed modes)",   identity[0]),
         ("name  ", "custom label or hostname",                identity[1]),
@@ -2250,6 +2204,7 @@ pub fn draw_stat_column_toggle_dialog(
         ("last  ", "time since last successful response",   extra_stats.contains(&ExtraStat::Last)),
         ("recent", "per-probe sparkline on target row",     extra_stats.contains(&ExtraStat::Recent)),
         ("bar   ", "inline range bar on target row",        extra_stats.contains(&ExtraStat::Bar)),
+        ("status", "probe count + elapsed, plus down/last-drop", extra_stats.contains(&ExtraStat::Status)),
     ];
 
     let mut body: Vec<Line> = vec![
@@ -2262,6 +2217,7 @@ pub fn draw_stat_column_toggle_dialog(
         if i == 5  { body.push(section_sep!("base stats")); }
         if i == 9  { body.push(section_sep!("extra stats")); }
         if i == 20 { body.push(section_sep!("visual")); }
+        if i == 22 { body.push(section_sep!("text")); }
 
         let is_cursor  = i == cursor;
         let is_narrow  = *enabled && (space_hidden >> i) & 1 == 1;

@@ -44,7 +44,7 @@ use super::{
         build_current_rtt_spans, build_header_line,
         build_range_bar_spans,
         build_status_badge_spans, build_stats_line,
-        build_target_sparkline_spans, TARGET_SPARK_W, TARGET_SPARK_MIN,
+        build_target_sparkline_spans, TARGET_SPARK_W, TARGET_SPARK_MIN, SINGLE_RECENT_MAX_W,
         inline_range_key,
         render_area_graph, render_area_graph_multi,
         trend_spark_span,
@@ -388,6 +388,7 @@ fn render_single_target_history(
     chunks:       &[Rect],
     offset:       usize,
     n_hist:       usize,
+    since:        usize,
     max_bar_w:    usize,
     state:        &TargetState,
     args:         &Args,
@@ -396,9 +397,13 @@ fn render_single_target_history(
 ) {
     let border_ch = if args.ascii { "|" } else { "\u{258c}" };
 
+    // `since` (the first successful reply's index) keeps a long pre-success drop
+    // backlog out of the block: with `n_hist` now reserved at its final size (see
+    // draw_single_ui), taking the last `n_hist` non-pending samples unrestricted
+    // would reach back past the first success into that backlog to pad itself out.
     let mut recent: Vec<(Sample, u8)> = state.history.iter().enumerate()
         .rev()
-        .filter(|(_, s)| !s.is_pending())
+        .filter(|(i, s)| *i >= since && !s.is_pending())
         .take(n_hist)
         .map(|(i, s)| (s.clone(), state.circle_history.get(i).copied().unwrap_or(1)))
         .collect();
@@ -724,7 +729,7 @@ pub fn draw_list_ui(f: &mut Frame, states: &[TargetState], ctx: &ViewCtx) {
         let mut post_badge: Vec<Span<'static>> = build_current_rtt_spans(state, &effective_cw, &args.theme);
         if circles_w > 0 {
             post_badge.push(Span::raw(" "));
-            post_badge.extend(build_target_sparkline_spans(state, args, circles_w, shared_scale, show_col_keys));
+            post_badge.extend(build_target_sparkline_spans(state, args, circles_w, shared_scale));
         }
         if bar_w > 0 {
             post_badge.push(Span::raw(" "));
@@ -806,29 +811,23 @@ struct SingleLayout {
     content_w: usize,
     show_drp: bool,
     show_dup: bool,
-    bar_w: usize,
-    bar_row_h: u16,
-    circles_w: usize,
+    recent_w: usize,
+    recent_row_h: u16,
     stat_pages: Vec<Vec<StatItem>>,
-    n_stats_rows: usize,
-    /// Rows available for scrolling history once the name row, range bar, stat
+    /// Rows available for scrolling history once the name row, recent bar, stat
     /// row(s), and status line have each claimed their space.
     avail: usize,
 }
 
 fn compute_single_layout(area: Rect, states: &[TargetState], args: &Args, col_widths: &super::ColWidths) -> SingleLayout {
     const INDENT_W: usize = 2;
-    const SINGLE_SPARK_MAX: usize = 30; // wider cap than the list/fullscreen sparkline
-    const BAR_MIN: usize = 30;
-    const BAR_MAX: usize = 50;
-    const FIXED_ROWS: usize = 2; // name/address row + status line (stats/bar rows counted separately)
+    const FIXED_ROWS: usize = 1; // combined name/address + status line (stats/recent-bar rows counted separately)
 
     let show_drp   = true;
     let show_dup   = show_dups_any(states, args);
     let content_w  = (area.width as usize).saturating_sub(1); // accent border (name/address, history)
-    let content_w2 = (area.width as usize).saturating_sub(INDENT_W); // 2-space indent (status, bar, stats)
+    let content_w2 = (area.width as usize).saturating_sub(INDENT_W); // 2-space indent (status, recent bar, stats)
     let show_recent = args.extra_stats.contains(&ExtraStat::Recent);
-    let show_bar    = args.extra_stats.contains(&ExtraStat::Bar);
 
     // The stats line gets the full row width; compensate for the status-badge + rtt
     // slot it doesn't render itself (the avg column reuses cw.rtt's width, so that
@@ -857,6 +856,7 @@ fn compute_single_layout(area: Rect, states: &[TargetState], args: &Args, col_wi
             StatItem::Extra(ExtraStat::Srtt)   => (5, effective_cw.srtt.as_ref().map_or(0, |c| c.active_w())),
             StatItem::Extra(ExtraStat::Streak) => (7, effective_cw.streak.unwrap_or(0)),
             StatItem::Extra(ExtraStat::Last)   => (5, effective_cw.last.unwrap_or(0)),
+            StatItem::Extra(ExtraStat::Status) => (7, effective_cw.status.unwrap_or(0)), // "status "
             StatItem::Extra(_) => (0, 0),
         };
         if label_w == 0 && val_w == 0 { 0 } else { gap + label_w + val_w }
@@ -888,23 +888,16 @@ fn compute_single_layout(area: Rect, states: &[TargetState], args: &Args, col_wi
     }
     let n_stats_rows = stat_pages.len();
 
-    let rtt_w   = effective_cw.rtt.active_w();
-    let prefix2 = super::STATUS_BADGE_W + 1 + rtt_w; // status ' ' rtt
-    let extra2  = content_w2.saturating_sub(prefix2);
-    let circles_w = if show_recent {
-        let b = extra2.saturating_sub(1);
-        if b >= TARGET_SPARK_MIN { b.min(SINGLE_SPARK_MAX) } else { 0 }
-    } else { 0 };
-    // The range bar has its own full-width row now, so it no longer competes with
-    // the status line's badge/rtt/sparkline for space.
-    let bar_w = if show_bar && content_w2 >= BAR_MIN { content_w2.min(BAR_MAX) } else { 0 };
-    let bar_row_h: u16 = if bar_w > 0 { 1 } else { 0 };
+    // The recent-trend bar gets its own row, capped at SINGLE_RECENT_MAX_W rather
+    // than stretching to fill a wide terminal - see that constant's doc comment.
+    let recent_w = if show_recent && content_w2 >= TARGET_SPARK_MIN { content_w2.min(SINGLE_RECENT_MAX_W) } else { 0 };
+    let recent_row_h: u16 = if recent_w > 0 { 1 } else { 0 };
 
     let avail = area.height.saturating_sub(FIXED_ROWS as u16)
-        .saturating_sub(bar_row_h)
+        .saturating_sub(recent_row_h)
         .saturating_sub(n_stats_rows as u16) as usize;
 
-    SingleLayout { effective_cw, gap, content_w, show_drp, show_dup, bar_w, bar_row_h, circles_w, stat_pages, n_stats_rows, avail }
+    SingleLayout { effective_cw, gap, content_w, show_drp, show_dup, recent_w, recent_row_h, stat_pages, avail }
 }
 
 /// Max `--history-rows` the single-target view can actually display given the
@@ -917,11 +910,12 @@ pub fn single_history_avail(area: Rect, states: &[TargetState], args: &Args, col
 /// Detailed single-target view. Only ever invoked with exactly one target.
 ///
 /// Layout: a name/address row, a scrolling per-return history (height set by
-/// `--history-rows`), a range-history bar on its own row, a line of whichever
+/// `--history-rows`), a large recent-trend bar on its own row, a line of whichever
 /// stat columns are enabled (labelled with words rather than the single-char
 /// glyphs used elsewhere, since there's no column-key legend row here to
-/// define them), and a compact status line (up/down badge, current RTT,
-/// recent sparkline). The data lines share a 2-space indent.
+/// define them), and a compact status line (up/down badge, total probes sent,
+/// elapsed time) - the same style used for the pre-first-reply waiting line.
+/// The data lines share a 2-space indent.
 /// The column-key legend used by `draw_list_ui` is not shown here - there is only
 /// ever one target, so there is nothing to disambiguate.
 pub fn draw_single_ui(f: &mut Frame, states: &[TargetState], ctx: &ViewCtx) {
@@ -943,36 +937,112 @@ pub fn draw_single_ui(f: &mut Frame, states: &[TargetState], ctx: &ViewCtx) {
     let border_ch  = if args.ascii { "|" } else { "\u{258c}" }; // ▌
     const INDENT_W: usize = 2;
 
-    let SingleLayout { effective_cw, gap, content_w, show_drp, show_dup, bar_w, bar_row_h, circles_w, stat_pages, n_stats_rows, avail } =
+    let SingleLayout { effective_cw, gap, content_w, show_drp, show_dup, recent_w, recent_row_h, stat_pages, avail } =
         compute_single_layout(area, states, args, col_widths);
+
+    // Until the first successful reply comes back, skip the full row layout
+    // (history/bar/stats/status) entirely and show one line: name/address, a
+    // spinner (or DOWN once a probe has timed out), the probe counter, and the
+    // total elapsed wait time. This avoids reserving a tall block of blank
+    // history rows before there's anything real to show in them.
+    if state.last_up.is_none() {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(area);
+        let horiz = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(chunks[0]);
+        f.render_widget(Paragraph::new(Line::from(Span::styled(border_ch, Style::default().fg(ac)))), horiz[0]);
+
+        let show_mode_badge = super::mode_badge_visible(args.column_vis.mode, std::slice::from_ref(mode_label));
+        let badge_pad_w = if show_mode_badge { mode_label.len() } else { 0 };
+        let mut line = build_header_line(
+            state, args, false, mode_label, log_fmt, tick,
+            None, show_mode_badge, badge_pad_w, horiz[1].width, None, false,
+        );
+
+        if state.current_ip.is_some() {
+            let is_down = state.is_currently_down();
+            line.spans.push(Span::raw("  "));
+            if is_down {
+                line.spans.push(Span::styled(
+                    "DOWN",
+                    Style::default().fg(args.theme.drop_color).add_modifier(Modifier::BOLD),
+                ));
+            } else {
+                let spin_tick = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| (d.as_millis() / 100) as usize)
+                    .unwrap_or(tick as usize);
+                let frame_str = if args.ascii {
+                    ["|", "/", "-", "\\"][spin_tick % 4].to_string()
+                } else {
+                    // 3-dot blob tracing the 12-position perimeter of the 4×4 braille grid CW -
+                    // matches the "waiting for first probe result" spinner used elsewhere.
+                    const FRAMES: &[&str] = &[
+                        "\u{2809}\u{2801}", "\u{2808}\u{2809}", "\u{2800}\u{2819}", "\u{2800}\u{2838}",
+                        "\u{2800}\u{28b0}", "\u{2800}\u{28e0}", "\u{2880}\u{28c0}", "\u{28c0}\u{2840}",
+                        "\u{28c4}\u{2800}", "\u{2846}\u{2800}", "\u{2807}\u{2800}", "\u{280b}\u{2800}",
+                    ];
+                    FRAMES[spin_tick % FRAMES.len()].to_string()
+                };
+                line.spans.push(Span::styled(frame_str, Style::default().fg(Color::Gray)));
+            }
+
+            line.spans.push(Span::raw("  "));
+            line.spans.push(Span::raw(super::probe_status_text(state, Instant::now(), args.interval)));
+        }
+
+        let w = horiz[1].width as usize;
+        f.render_widget(Paragraph::new(truncate_line(line, w)), horiz[1]);
+
+        let space_hidden = super::compute_space_hidden(&effective_cw, false, 0, usize::MAX, gap, show_drp, show_dup);
+        let no_data = compute_no_data(states, &args.extra_stats, &args.hidden_base_stats);
+        render_dialogs(f, area, args, dialog, frozen, sort_mode, states.len(), "single", tick, !log_fmt.is_empty(), space_hidden, no_data, false, false);
+        return;
+    }
+
+    // Reserve the history block at its eventual full size (bounded by the terminal
+    // and --history-rows) the instant nominal view is entered, rather than growing
+    // it one row at a time as replies arrive. Growing it used to push the recent-
+    // bar/stats/status block down the screen a little further on every reply until
+    // the history block filled up, which read as the terminal scrolling. Reserving
+    // the final size up front means that block paints once, in its final spot, and
+    // stays there; `render_single_target_history` already leaves not-yet-filled
+    // rows blank (see its `row >= recent.len()` check) so the real rows it does
+    // have just fill in from the top, immediately above the pinned block below,
+    // with no repositioning of anything already on screen.
     let n_hist: usize = (args.history_rows as usize).min(avail);
 
+    // A trend bar/jitter/std built from a single sample is meaningless, so its
+    // content doesn't appear until the second reply - but the rows below still
+    // reserve their eventual space (via recent_row_h/stat_pages, computed above
+    // for the final layout) so the status line never has to jump when that
+    // content does appear; only its rendering is gated on `reveal_extra` below.
+    let filled_hist = match state.first_success_idx {
+        Some(start) => state.history[start..].iter().filter(|s| !s.is_pending()).count(),
+        None => 0, // unreachable here - last_up.is_some() (checked above) implies this is Some too
+    };
+    let reveal_extra = filled_hist >= 2;
+    let n_stats_rows = stat_pages.len();
+
     let mut constraints: Vec<Constraint> = Vec::new();
-    constraints.push(Constraint::Length(1)); // name / address
     for _ in 0..n_hist {
         constraints.push(Constraint::Length(1));
     }
-    constraints.push(Constraint::Length(bar_row_h)); // range bar, own row (above stats)
+    constraints.push(Constraint::Length(1));         // name/address + status badge + probe summary, combined
     for _ in 0..n_stats_rows {
         constraints.push(Constraint::Length(1));     // remaining enabled stat columns (as many rows as needed)
     }
-    constraints.push(Constraint::Length(1));         // status badge / rtt / recent sparkline
+    constraints.push(Constraint::Length(recent_row_h)); // large recent-trend bar, own row (closes out the block)
     constraints.push(Constraint::Min(0));
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(constraints)
         .split(area);
 
-    let border = |f: &mut Frame, area: Rect| {
-        f.render_widget(Paragraph::new(Line::from(Span::styled(border_ch, Style::default().fg(ac)))), area);
-    };
-    let split_row = |chunk: Rect| -> (Rect, Rect) {
-        let horiz = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(1), Constraint::Min(0)])
-            .split(chunk);
-        (horiz[0], horiz[1])
-    };
     let indent_row = |chunk: Rect| -> Rect {
         let horiz = Layout::default()
             .direction(Direction::Horizontal)
@@ -981,79 +1051,91 @@ pub fn draw_single_ui(f: &mut Frame, states: &[TargetState], ctx: &ViewCtx) {
         horiz[1]
     };
 
-    // ── Line: name / network address ─────────────────────────────────────────
-    {
-        let (border_area, content_area) = split_row(chunks[0]);
-        border(f, border_area);
-
-        let show_mode_badge = super::mode_badge_visible(args.column_vis.mode, std::slice::from_ref(mode_label));
-        let badge_pad_w = if show_mode_badge { mode_label.len() } else { 0 };
-        let header = build_header_line(
-            state, args, false, mode_label, log_fmt, tick,
-            None, show_mode_badge, badge_pad_w, content_area.width, None, false,
-        );
-        let w = content_area.width as usize;
-        f.render_widget(Paragraph::new(truncate_line(header, w)), content_area);
-    }
-
     if n_hist > 0 {
         const HIST_LINE_MAX_W: usize = 80; // border + RTT label + gap + bar
         let hist_content_w = content_w.min(HIST_LINE_MAX_W - 1);
         let hist_max_bar_w = hist_content_w.saturating_sub(6); // 5 RTT label + 1 gap
-        render_single_target_history(f, &chunks, 1, n_hist, hist_max_bar_w, state, args, shared_scale, ac);
+        let since = state.first_success_idx.unwrap_or(0);
+        render_single_target_history(f, &chunks, 0, n_hist, since, hist_max_bar_w, state, args, shared_scale, ac);
     }
 
-    // ── Line: range bar (own row, above the stats line) ───────────────────────
-    if bar_w > 0 {
-        let content_area = indent_row(chunks[1 + n_hist]);
-        let spans = trim_range_bar(build_range_bar_spans(state, args.ascii, shared_scale, &args.theme, bar_w, false));
-        let w = content_area.width as usize;
-        f.render_widget(Paragraph::new(truncate_line(Line::from(spans), w)), content_area);
+    // ── Line: name/address · up/down status badge · probe summary ──────────────
+    // Leads the block below the history rows - border, header, badge, probe/uptime
+    // text - the same shape as the pre-first-reply waiting line, whether or not a
+    // reply has ever come back.
+    {
+        let horiz = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(chunks[n_hist]);
+        f.render_widget(Paragraph::new(Line::from(Span::styled(border_ch, Style::default().fg(ac)))), horiz[0]);
+
+        let show_mode_badge = super::mode_badge_visible(args.column_vis.mode, std::slice::from_ref(mode_label));
+        let badge_pad_w = if show_mode_badge { mode_label.len() } else { 0 };
+        let mut line = build_header_line(
+            state, args, false, mode_label, log_fmt, tick,
+            None, show_mode_badge, badge_pad_w, horiz[1].width, None, false,
+        );
+
+        // Currently down reads as the same bold "DOWN" word used by the pre-first-reply
+        // line, rather than the compact "XX"/"✗✗" badge used elsewhere - it reads better
+        // paired with the probe-status text than the 3-char badge does.
+        line.spans.push(Span::raw("  "));
+        if state.is_currently_down() {
+            line.spans.push(Span::styled("DOWN", Style::default().fg(args.theme.drop_color).add_modifier(Modifier::BOLD)));
+        } else {
+            line.spans.extend(build_status_badge_spans(state, tick, &args.theme, args.ascii));
+        }
+        line.spans.push(Span::raw("  "));
+        line.spans.push(Span::raw(super::probe_status_text(state, Instant::now(), args.interval)));
+
+        let w = horiz[1].width as usize;
+        f.render_widget(Paragraph::new(truncate_line(line, w)), horiz[1]);
     }
 
     // ── Lines: remaining enabled statistic columns (wrapped across rows as needed) ──
-    for (i, page) in stat_pages.iter().enumerate() {
-        let page_present_bases: Vec<BaseStat> = page.iter().filter_map(StatItem::base).collect();
-        let mut page_hidden = vec![BaseStat::Avg, BaseStat::Range, BaseStat::Jitter, BaseStat::Drops];
-        page_hidden.retain(|b| !page_present_bases.contains(b));
-        let page_stat_order: Vec<ExtraStat> = page.iter()
-            .filter_map(|it| if let StatItem::Extra(e) = it { Some(e.clone()) } else { None })
-            .collect();
-        let page_show_drp = page.iter().any(|it| matches!(it, StatItem::Drops));
-        let page_show_dup = page.iter().any(|it| matches!(it, StatItem::Dup));
+    // Same reasoning as the recent-trend bar below: the rows are always reserved,
+    // content is gated on `reveal_extra`.
+    if reveal_extra {
+        for (i, page) in stat_pages.iter().enumerate() {
+            let page_present_bases: Vec<BaseStat> = page.iter().filter_map(StatItem::base).collect();
+            let mut page_hidden = vec![BaseStat::Avg, BaseStat::Range, BaseStat::Jitter, BaseStat::Drops];
+            page_hidden.retain(|b| !page_present_bases.contains(b));
+            let page_stat_order: Vec<ExtraStat> = page.iter()
+                .filter_map(|it| if let StatItem::Extra(e) = it { Some(e.clone()) } else { None })
+                .collect();
+            let page_show_drp = page.iter().any(|it| matches!(it, StatItem::Drops));
+            let page_show_dup = page.iter().any(|it| matches!(it, StatItem::Dup));
 
-        let mut page_cw = effective_cw.clone();
-        page_cw.hidden_base_stats = page_hidden;
-        page_cw.stat_order = page_stat_order;
+            let mut page_cw = effective_cw.clone();
+            page_cw.hidden_base_stats = page_hidden;
+            page_cw.stat_order = page_stat_order;
 
-        // build_stats_line always leads with a `gap`-wide separator (meant to follow
-        // the rtt column it doesn't render here); fold that into the indent so the
-        // rendered text lines up flush with the status line's 2-space indent.
-        let stats_indent = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(INDENT_W.saturating_sub(gap) as u16), Constraint::Min(0)])
-            .split(chunks[2 + n_hist + i]);
-        let content_area = stats_indent[1];
+            // build_stats_line always leads with a `gap`-wide separator (meant to follow
+            // the rtt column it doesn't render here); fold that into the indent so the
+            // rendered text lines up flush with the status line's 2-space indent.
+            let stats_indent = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Length(INDENT_W.saturating_sub(gap) as u16), Constraint::Min(0)])
+                .split(chunks[1 + n_hist + i]);
+            let content_area = stats_indent[1];
 
-        let line = build_stats_line(
-            state, args.ascii, args.is_window(), shared_scale, &page_cw,
-            false, false, false, &args.theme, page_show_drp, page_show_dup, tick, gap, true,
-        );
-        let w = content_area.width as usize;
-        f.render_widget(Paragraph::new(truncate_line(line, w)), content_area);
+            let line = build_stats_line(
+                state, args.ascii, args.is_window(), shared_scale, &page_cw,
+                false, false, false, &args.theme, page_show_drp, page_show_dup, tick, gap, true,
+                args.interval,
+            );
+            let w = content_area.width as usize;
+            f.render_widget(Paragraph::new(truncate_line(line, w)), content_area);
+        }
     }
 
-    // ── Line: up/down status · rtt · recent sparkline ─────────────────────────
-    {
-        let content_area = indent_row(chunks[2 + n_hist + n_stats_rows]);
-
-        let mut spans: Vec<Span<'static>> = build_status_badge_spans(state, tick, &args.theme, args.ascii);
-        spans.push(Span::raw(" "));
-        spans.extend(build_current_rtt_spans(state, &effective_cw, &args.theme));
-        if circles_w > 0 {
-            spans.push(Span::raw(" "));
-            spans.extend(build_target_sparkline_spans(state, args, circles_w, shared_scale, false));
-        }
+    // ── Line: large recent-trend bar (own row, closes out the block) ──────────
+    // The row is reserved as soon as it's enabled (folded into `avail` above)
+    // regardless of `reveal_extra`; only its content waits for the second reply.
+    if recent_w > 0 && reveal_extra {
+        let content_area = indent_row(chunks[n_hist + 1 + n_stats_rows]);
+        let spans = build_target_sparkline_spans(state, args, recent_w, shared_scale);
         let w = content_area.width as usize;
         f.render_widget(Paragraph::new(truncate_line(Line::from(spans), w)), content_area);
     }
@@ -1177,7 +1259,7 @@ pub fn draw_fullscreen_ui(f: &mut Frame, s: &TargetState, mode_label: &str, ctx:
         let mut post_badge = build_current_rtt_spans(s, &effective_cw, &args.theme);
         if circles_w > 0 {
             post_badge.push(Span::raw(" "));
-            post_badge.extend(build_target_sparkline_spans(s, args, circles_w, shared_scale, show_col_keys));
+            post_badge.extend(build_target_sparkline_spans(s, args, circles_w, shared_scale));
         }
         if bar_w > 0 {
             post_badge.push(Span::raw(" "));
@@ -1392,7 +1474,7 @@ pub fn draw_fullscreen_multi_ui(f: &mut Frame, states: &[TargetState], ctx: &Vie
         let mut post_badge = build_current_rtt_spans(state, &effective_cw, &args.theme);
         if circles_w > 0 {
             post_badge.push(Span::raw(" "));
-            post_badge.extend(build_target_sparkline_spans(state, args, circles_w, shared_scale, show_col_keys));
+            post_badge.extend(build_target_sparkline_spans(state, args, circles_w, shared_scale));
         }
         if bar_w > 0 {
             post_badge.push(Span::raw(" "));
@@ -1680,6 +1762,7 @@ mod single_view_layout_tests {
     use crate::cli::Args;
     use clap::Parser;
     use ratatui::{backend::TestBackend, Terminal};
+    use std::time::Duration;
 
     fn render_single_with_args(width: u16, height: u16, extra: &[&str]) -> String {
         let mut argv = vec!["vlat", "127.0.0.1", "-v", "single"];
@@ -1698,7 +1781,7 @@ mod single_view_layout_tests {
 
         let states = vec![state];
         let col_widths = super::super::compute_col_widths(
-            &states, args.is_window(), &args.extra_stats, &args.hidden_base_stats, args.ipv6, &args.column_vis,
+            &states, args.is_window(), &args.extra_stats, &args.hidden_base_stats, args.ipv6, &args.column_vis, args.interval,
         );
         let mode_labels = vec!["tcp".to_string()];
         let sort_order = vec![0usize];
@@ -1737,30 +1820,318 @@ mod single_view_layout_tests {
         out
     }
 
-    fn render_single(width: u16, height: u16) -> String {
-        render_single_with_args(width, height, &[])
+    /// Like `render_single_with_args`, but the caller builds the target's history
+    /// itself instead of getting the fixed 6-hit fixture - needed for the
+    /// pre-first-reply / gradual-growth tests below.
+    fn render_single_state(width: u16, height: u16, extra: &[&str], state: TargetState) -> String {
+        let mut argv = vec!["vlat", "127.0.0.1", "-v", "single"];
+        argv.extend_from_slice(extra);
+        let mut args = Args::parse_from(argv);
+        args.theme = args.theme_name.to_theme();
+        let (stats, vis) = crate::cli::resolve_columns(&args.extra_stats).unwrap();
+        args.extra_stats = stats;
+        args.column_vis = vis;
+
+        let states = vec![state];
+        let col_widths = super::super::compute_col_widths(
+            &states, args.is_window(), &args.extra_stats, &args.hidden_base_stats, args.ipv6, &args.column_vis, args.interval,
+        );
+        let mode_labels = vec!["tcp".to_string()];
+        let sort_order = vec![0usize];
+        let sort_arrows: Vec<Option<(Instant, bool)>> = vec![None];
+        let dialog = super::super::DialogMode::None;
+
+        let ctx = super::super::ViewCtx {
+            args:              &args,
+            mode_labels:       &mode_labels,
+            col_widths:        &col_widths,
+            shared_scale:      50.0,
+            log_fmt:           "",
+            tick:              0,
+            dialog:            &dialog,
+            sort_order:        &sort_order,
+            sort_arrows:       &sort_arrows,
+            sort_mode:         &args.sort,
+            sort_mode_changed: None,
+            frozen:            false,
+            show_headers:      false,
+            show_col_keys:     false,
+        };
+
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw_single_ui(f, &states, &ctx)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+
+        let mut out = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    fn bordered_row_count(out: &str, width: u16) -> usize {
+        let border = '\u{258c}';
+        out.lines().filter(|l| l.starts_with(border)).count().min(width as usize)
     }
 
     #[test]
-    fn name_line_comes_first_and_data_lines_share_indent() {
-        let out = render_single(100, 20);
+    fn waiting_for_first_reply_renders_a_single_compact_line() {
+        let mut state = TargetState::new("127.0.0.1".to_string());
+        state.current_ip = Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)));
+        // Three probes in flight, none resolved yet - last_up is still None.
+        state.record_sent(0);
+        state.record_sent(1);
+        state.record_sent(2);
+
+        let out = render_single_state(100, 20, &[], state);
+        let non_blank: Vec<&str> = out.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(non_blank.len(), 1, "only one line should render while waiting for the first reply: {non_blank:?}");
+        assert!(non_blank[0].contains("3 probes"), "should show the in-flight probe count: {:?}", non_blank[0]);
+        assert!(!non_blank[0].contains("DOWN"), "should not claim DOWN before any probe has timed out: {:?}", non_blank[0]);
+    }
+
+    #[test]
+    fn timed_out_probe_before_first_reply_shows_down() {
+        let mut state = TargetState::new("127.0.0.1".to_string());
+        state.current_ip = Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)));
+        state.record_sent(0);
+        state.record_result(0, Err(()), 0, false); // times out - still never had a successful reply
+
+        let out = render_single_state(100, 20, &[], state);
+        let non_blank: Vec<&str> = out.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(non_blank.len(), 1, "still just one compact line once down, not the full row layout: {non_blank:?}");
+        assert!(non_blank[0].contains("DOWN"), "should show DOWN once a probe has timed out with no reply ever: {:?}", non_blank[0]);
+        assert!(non_blank[0].contains("no reply, 1 probe, "), "should read as \"no reply, N probes, <elapsed>\": {:?}", non_blank[0]);
+    }
+
+    #[test]
+    fn history_rows_grow_one_at_a_time_after_first_reply() {
+        let mut state = TargetState::new("127.0.0.1".to_string());
+        state.current_ip = Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)));
+        state.record_sent(0);
+        state.record_result(0, Ok(12.3), 0, false); // one real sample - last_up now Some
+
+        let extra = ["--history-rows", "10"];
+        let (width, height) = (100u16, 20u16);
+        let out = render_single_state(width, height, &extra, state.clone());
+        assert_eq!(bordered_row_count(&out, width), 2, "1 history row + the name/address row above it, not the full 10");
+
+        state.record_sent(1);
+        state.record_result(1, Ok(13.0), 0, false);
+        let out2 = render_single_state(width, height, &extra, state);
+        assert_eq!(bordered_row_count(&out2, width), 3, "a second real sample should grow the block by exactly one row");
+    }
+
+    #[test]
+    fn history_still_grows_gradually_after_a_long_down_backlog() {
+        // A target that was down for a while before finally answering already has
+        // a pile of resolved (Drop) samples in history by the time the first Hit
+        // lands. n_hist must not count that backlog - it should grow exactly the
+        // same way as history_rows_grow_one_at_a_time_after_first_reply, not jump
+        // straight to the full --history-rows count the instant it answers.
+        let mut state = TargetState::new("127.0.0.1".to_string());
+        state.current_ip = Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)));
+        for seq in 0..30usize {
+            state.record_sent(seq);
+            state.record_result(seq, Err(()), 0, false);
+        }
+        state.record_sent(30);
+        state.record_result(30, Ok(12.3), 0, false); // finally answers
+
+        let extra = ["--history-rows", "10"];
+        let (width, height) = (100u16, 20u16);
+        let out = render_single_state(width, height, &extra, state.clone());
+        assert_eq!(bordered_row_count(&out, width), 2, "should still start at 1 history row despite the 30-drop backlog, not jump to 10: {out:?}");
+
+        state.record_sent(31);
+        state.record_result(31, Ok(13.0), 0, false);
+        let out2 = render_single_state(width, height, &extra, state);
+        assert_eq!(bordered_row_count(&out2, width), 3, "a second reply since answering should grow the block by exactly one row");
+    }
+
+    #[test]
+    fn status_line_does_not_shift_as_history_fills_in() {
+        // The recent-bar/stats/status block must paint at its final row position
+        // the moment nominal view is entered (the first reply), and stay there -
+        // not migrate down the screen reply by reply as the history block above it
+        // fills in, which would read as the terminal scrolling.
+        let mut state = TargetState::new("127.0.0.1".to_string());
+        state.current_ip = Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)));
+        state.record_sent(0);
+        state.record_result(0, Ok(12.3), 0, false);
+
+        let extra = ["--history-rows", "10"];
+        let (width, height) = (100u16, 20u16);
+        let status_row = |out: &str| out.lines().position(|l| l.contains(" probe")).expect("status line present");
+
+        let out = render_single_state(width, height, &extra, state.clone());
+        let first_row = status_row(&out);
+
+        state.record_sent(1);
+        state.record_result(1, Ok(13.0), 0, false);
+        let out2 = render_single_state(width, height, &extra, state.clone());
+        assert_eq!(status_row(&out2), first_row, "status line moved after the second reply: {out2:?}");
+
+        for seq in 2..8usize {
+            state.record_sent(seq);
+            state.record_result(seq, Ok(12.0 + seq as f64), 0, false);
+        }
+        let out3 = render_single_state(width, height, &extra, state);
+        assert_eq!(status_row(&out3), first_row, "status line moved while the history block kept filling in: {out3:?}");
+    }
+
+    #[test]
+    fn bar_and_stats_rows_wait_for_a_second_sample() {
+        // The default columns include the range bar and the base stats (avg/range/
+        // jitter/loss), which are meaningless (or literally just one flat point)
+        // with a single sample - they should stay off screen until reply #2 so the
+        // transition out of the compact waiting-line isn't 1 line -> everything at once.
+        let mut state = TargetState::new("127.0.0.1".to_string());
+        state.current_ip = Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)));
+        state.record_sent(0);
+        state.record_result(0, Ok(12.3), 0, false);
+
+        let (width, height) = (100u16, 20u16);
+        let out = render_single_state(width, height, &[], state.clone());
+        assert!(!out.contains("avg"), "stats row shouldn't render from a single sample: {out:?}");
+
+        state.record_sent(1);
+        state.record_result(1, Ok(13.0), 0, false);
+        let out2 = render_single_state(width, height, &[], state);
+        assert!(out2.contains("avg"), "stats row should appear once a second sample lands: {out2:?}");
+    }
+
+    #[test]
+    fn no_return_line_reads_no_response_once_down() {
+        // Never had a successful reply, so there's no "last seen" reference point -
+        // the text should read "no reply, N probes, <elapsed>" instead.
+        let mut state = TargetState::new("127.0.0.1".to_string());
+        state.current_ip = Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)));
+        state.record_sent(0);
+        state.record_result(0, Err(()), 0, false);
+
+        let out = render_single_state(100, 20, &[], state);
+        let non_blank: Vec<&str> = out.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(non_blank.len(), 1);
+        assert!(non_blank[0].contains("no reply, 1 probe, "), "should read \"no reply, N probes, <elapsed>\": {:?}", non_blank[0]);
+        assert!(!non_blank[0].contains("last seen"), "never having been up, must not say \"last seen\": {:?}", non_blank[0]);
+    }
+
+    #[test]
+    fn nominal_status_line_shows_down_note_once_past_the_threshold() {
+        // Had a successful reply before, then dropped - "down" measures time since
+        // that last successful reply. Suppressed until the drop is old enough to be
+        // worth a note (backdate last_up here to get past that threshold).
+        let mut state = TargetState::new("127.0.0.1".to_string());
+        state.current_ip = Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)));
+        state.record_sent(0);
+        state.record_result(0, Ok(12.3), 0, false);
+        state.record_sent(1);
+        state.record_result(1, Ok(13.0), 0, false);
+        state.record_sent(2);
+        state.record_result(2, Err(()), 0, false); // now down, having been up before
+        state.last_up = state.last_up.map(|t| t - Duration::from_secs(30));
+
+        let out = render_single_state(100, 20, &[], state);
+        assert!(out.contains("down 30s"), "should append a \"down <elapsed>\" note once down long enough: {out:?}");
+        assert!(!out.contains("last seen") && !out.contains("last down"), "{out:?}");
+    }
+
+    #[test]
+    fn nominal_status_line_suppresses_fresh_down_note() {
+        let mut state = TargetState::new("127.0.0.1".to_string());
+        state.current_ip = Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)));
+        state.record_sent(0);
+        state.record_result(0, Ok(12.3), 0, false);
+        state.record_sent(1);
+        state.record_result(1, Err(()), 0, false); // just went down
+
+        let out = render_single_state(100, 20, &[], state);
+        assert!(!out.contains("down "), "a drop that just happened shouldn't get a \"down\" callout yet: {out:?}");
+    }
+
+    #[test]
+    fn nominal_status_line_shows_down_word_not_the_xx_badge() {
+        let mut state = TargetState::new("127.0.0.1".to_string());
+        state.current_ip = Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)));
+        state.record_sent(0);
+        state.record_result(0, Ok(12.3), 0, false);
+        state.record_sent(1);
+        state.record_result(1, Err(()), 0, false); // now down
+
+        let out = render_single_state(100, 20, &[], state);
+        let status_line = out.lines().find(|l| l.contains("2 probes,")).expect("status line present");
+        assert!(status_line.contains("DOWN"), "should show the \"DOWN\" word, matching the pre-first-reply line: {status_line:?}");
+        assert!(!status_line.contains('\u{2717}'), "should not also show the compact \u{2717}\u{2717} badge: {status_line:?}");
+    }
+
+    #[test]
+    fn nominal_status_line_omits_down_suffix_while_up() {
+        let mut state = TargetState::new("127.0.0.1".to_string());
+        state.current_ip = Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)));
+        state.record_sent(0);
+        state.record_result(0, Ok(12.3), 0, false);
+        state.record_sent(1);
+        state.record_result(1, Ok(13.0), 0, false);
+
+        let out = render_single_state(100, 20, &[], state);
+        assert!(!out.contains("last seen") && !out.contains("last down"), "no down suffix while currently up: {out:?}");
+    }
+
+    #[test]
+    fn status_column_is_opt_in_and_shares_the_status_line_text() {
+        let mut state = TargetState::new("127.0.0.1".to_string());
+        state.current_ip = Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)));
+        state.record_sent(0);
+        state.record_result(0, Ok(12.3), 0, false);
+        state.record_sent(1);
+        state.record_result(1, Ok(13.0), 0, false);
+
+        // Disabled by default - "N probes," should appear exactly once, from the
+        // dedicated status line, not a second time from a `status` stats row.
+        let out_default = render_single_state(100, 20, &[], state.clone());
+        assert_eq!(out_default.matches("2 probes,").count(), 1, "status column must be off by default: {out_default:?}");
+
+        // Explicitly enabled ("default" composes in the base set + status): a
+        // second "N probes, <elapsed>" now also appears in the stats row.
+        let out_on = render_single_state(100, 20, &["--columns", "default,status"], state);
+        assert_eq!(out_on.matches("2 probes,").count(), 2, "enabling --columns status should add a second copy in the stats row: {out_on:?}");
+        assert!(out_on.contains("status"), "the stats-row word label should read \"status\": {out_on:?}");
+    }
+
+    #[test]
+    fn history_leads_status_then_stats_then_the_recent_bar_closes_it_out() {
+        // --history-rows defaults to 0 now (adjustable via Up/Down), so this
+        // test - specifically about history-row/status/stats/bar ordering -
+        // asks for some history rows explicitly rather than relying on render_single.
+        // The recent-trend bar is already in the default --columns set.
+        let out = render_single_with_args(100, 20, &["--history-rows", "10"]);
         let lines: Vec<&str> = out.lines().collect();
 
-        // First line is the name/address row (starts with the accent border, no indent).
-        assert!(lines[0].starts_with('\u{258c}'), "first line should be name/address: {:?}", lines[0]);
+        // First line is now a history row (no separate name/address row above it).
+        assert!(lines[0].starts_with('\u{258c}'), "first line should be a history row: {:?}", lines[0]);
 
         let non_blank: Vec<&str> = out.lines().filter(|l| !l.trim().is_empty()).collect();
-        // Bottom three rows are, in order: the range bar, the stats line, then the status line.
-        let bar    = non_blank[non_blank.len() - 3];
+        // Bottom three rows are, in order: the combined name/address + status line,
+        // the stats line, then the large recent-trend bar (swapped from the old
+        // bar/stats/status order so the name/status line follows straight after
+        // the history rows).
+        let status = non_blank[non_blank.len() - 3];
         let stats  = non_blank[non_blank.len() - 2];
-        let status = non_blank[non_blank.len() - 1];
-        assert!(!bar.contains("avg"), "third-to-last line should be the range bar: {:?}", bar);
+        let bar    = non_blank[non_blank.len() - 1];
+        assert!(!status.contains("avg"), "third-to-last line should be the combined name/status line: {:?}", status);
         assert!(stats.contains("avg"), "second-to-last line should be the stats line: {:?}", stats);
-        assert!(!status.contains("avg"), "last line should be the status line: {:?}", status);
+        assert!(!bar.contains("avg"), "last line should be the recent-trend bar: {:?}", bar);
+        assert!(status.contains("probe"), "name/status line should be the probe-summary line: {:?}", status);
+        assert!(status.contains("tcp"), "name/status line should also carry the name/address header (mode badge here): {:?}", status);
         let lead = |s: &str| s.chars().take_while(|c| *c == ' ').count();
-        assert_eq!(lead(bar), 2, "range bar indent: {:?}", bar);
+        assert_eq!(lead(bar), 2, "recent bar indent: {:?}", bar);
         assert_eq!(lead(stats), 2, "stats line indent: {:?}", stats);
-        assert_eq!(lead(status), 2, "status line indent: {:?}", status);
+        assert!(status.starts_with('\u{258c}'), "combined name/status line starts right at the border, not indented: {:?}", status);
     }
 
     #[test]
@@ -1817,7 +2188,7 @@ mod single_view_layout_tests {
         }
         let states = vec![state];
         let col_widths = super::super::compute_col_widths(
-            &states, args.is_window(), &args.extra_stats, &args.hidden_base_stats, args.ipv6, &args.column_vis,
+            &states, args.is_window(), &args.extra_stats, &args.hidden_base_stats, args.ipv6, &args.column_vis, args.interval,
         );
         let area = Rect { x: 0, y: 0, width, height };
         let avail = single_history_avail(area, &states, &args, &col_widths);

@@ -73,9 +73,10 @@ fn view_help_id(view: &ViewMode) -> usize {
     }
 }
 
-/// `None` for id 10 (single) - the demo always runs multiple targets, so single
-/// view (one-target-only in the native app) has nothing to switch to, exactly
-/// like `enter_view_id!`'s fallback arm.
+/// id 10 is the merged list/single slot (see VIEW_PICKER_ORDER in
+/// ui/dialogs.rs) and resolves to List here - the demo always runs multiple
+/// targets, so single view (one-target-only in the native app) has nothing
+/// to switch to, exactly like `enter_view_id!`'s fallback arm.
 fn view_from_help_id(id: usize) -> Option<ViewMode> {
     match id {
         0 => Some(ViewMode::List),
@@ -88,6 +89,7 @@ fn view_from_help_id(id: usize) -> Option<ViewMode> {
         7 => Some(ViewMode::Bubble),
         8 => Some(ViewMode::Scatter),
         9 => Some(ViewMode::Pong),
+        10 => Some(ViewMode::List),
         _ => None,
     }
 }
@@ -397,8 +399,9 @@ fn main() -> io::Result<()> {
             let dialog = std::mem::replace(&mut d.dialog, DialogMode::None);
             d.dialog = match dialog {
                 DialogMode::None => match code {
-                    KeyCode::Char(ch @ '1'..='9') => {
+                    KeyCode::Char(ch @ '0'..='9') => {
                         d.view = match ch {
+                            '0' => ViewMode::List,
                             '1' => ViewMode::Graph,
                             '2' => ViewMode::Ekg,
                             '3' => ViewMode::Worm,
@@ -563,6 +566,10 @@ fn main() -> io::Result<()> {
                             cursor = (cursor + 1) % n;
                             if let Some(v) = view_from_help_id(VIEW_PICKER_ORDER.get(cursor).copied().unwrap_or(0)) { d.view = v; }
                             DialogMode::ViewPicker { cursor }
+                        }
+                        KeyCode::Char('0') => {
+                            if let Some(v) = view_from_help_id(10) { d.view = v; }
+                            DialogMode::None
                         }
                         KeyCode::Char(ch @ '1'..='9') => {
                             let display_c = (ch as u8 - b'1') as usize;
@@ -819,7 +826,7 @@ fn main() -> io::Result<()> {
         let sort_arrows = vec![None; n];
         let col_widths  = d.col_widths.apply(compute_col_widths(
             &d.states, d.args.is_window(), &d.args.extra_stats, &d.args.hidden_base_stats,
-            false, &d.args.column_vis,
+            false, &d.args.column_vis, d.args.interval,
         ));
         let shared_scale = d.shared_scale();
 

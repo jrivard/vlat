@@ -27,7 +27,7 @@ use crate::cli::{Args, BaseStat, ExtraStat};
 use crate::constants::{BAR_ANIM_SECS, GRAPH_ANIM_SECS, TIER_FAST_PCT, TIER_HIGH_PCT};
 use crate::state::{GraphColCache, MtrTrend, SparklineColCache, TargetState};
 use crate::types::Sample;
-use super::{ColWidths, RttColWidth, fmt_count, fmt_cv, fmt_last_up, fmt_rtt, fmt_rtt_nodec, Theme};
+use super::{ColWidths, RttColWidth, fmt_count, fmt_cv, fmt_last_up, fmt_rtt, fmt_rtt_nodec, probe_status_text, Theme};
 
 pub fn trend_spark_span(trend: MtrTrend, ascii: bool, theme: &Theme) -> Span<'static> {
     let (ch, style) = if ascii {
@@ -615,6 +615,7 @@ pub fn build_stats_keys_line(
             ExtraStat::Srtt   => if let Some(ref col) = cw.srtt   { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "srtt",   w = 1 + col.active_w()), dim)); }
             ExtraStat::Streak => if let Some(stk_w)  = cw.streak  { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "streak", w = 1 + stk_w),          dim)); }
             ExtraStat::Last   => if let Some(last_w) = cw.last    { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "last",   w = 1 + last_w),         dim)); }
+            ExtraStat::Status => if let Some(status_w) = cw.status { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "status", w = 1 + status_w),      dim)); }
             _ => {}
         }
     }
@@ -647,6 +648,7 @@ pub fn build_stats_line<'a>(
     tick: u64,
     gap: usize,
     verbose_labels: bool,
+    interval_ms: u64,
 ) -> Line<'a> {
     let is_drop    = s.history.iter().rev().find(|s| !s.is_pending())
                        .map(|s| s.is_drop()).unwrap_or(false);
@@ -745,6 +747,7 @@ pub fn build_stats_line<'a>(
                 ExtraStat::Srtt   => if let Some(ref col) = cw.srtt   { spans.push(Span::raw(sp.clone())); spans.push(Span::styled(sym("t", "\u{03c4}", "srtt"), dim)); push_mtr_placeholder(&mut spans, d, dim, col); }
                 ExtraStat::Streak => if let Some(stk_w) = cw.streak   { spans.push(Span::raw(sp.clone())); spans.push(Span::styled(sym("#", "#", "streak"), dim)); spans.push(Span::styled(format!("{:>w$}", d, w = stk_w), dim)); }
                 ExtraStat::Last   => if let Some(last_w) = cw.last    { spans.push(Span::raw(sp.clone())); if verbose_labels { spans.push(Span::styled("last ", dim)); } spans.push(Span::styled(format!("{:>w$}", d, w = last_w), dim)); }
+                ExtraStat::Status => if let Some(status_w) = cw.status { spans.push(Span::raw(sp.clone())); if verbose_labels { spans.push(Span::styled("status ", dim)); } spans.push(Span::styled(format!("{:<w$}", d, w = status_w), dim)); }
                 _ => {}
             }
         }
@@ -912,6 +915,14 @@ pub fn build_stats_line<'a>(
                     spans.push(Span::styled(format!("{:>w$}", d, w = last_w), dim));
                 }
             }
+            ExtraStat::Status => if let Some(status_w) = cw.status {
+                // No compact glyph (self-explanatory text, e.g. "31 probes, 30s") -
+                // only the single-target verbose view gets a word label. Left-aligned,
+                // unlike the numeric columns, since it's free text.
+                if verbose_labels { spans.push(Span::styled("status ", dim)); }
+                let text = probe_status_text(s, Instant::now(), interval_ms);
+                spans.push(Span::styled(format!("{:<w$}", text, w = status_w), bright));
+            }
             _ => { spans.pop(); } // remove the gap we pushed for unrecognised/pseudo variants
         }
     }
@@ -1067,7 +1078,7 @@ pub fn build_combined_row_line<'a>(
     if !post_badge_spans.is_empty() {
         spans.extend(post_badge_spans);
     }
-    spans.extend(build_stats_line(s, args.ascii, args.is_window(), shared_scale, col_widths, false, false, !skip_current_rtt, &args.theme, show_drp, show_dup, tick, gap, false).spans);
+    spans.extend(build_stats_line(s, args.ascii, args.is_window(), shared_scale, col_widths, false, false, !skip_current_rtt, &args.theme, show_drp, show_dup, tick, gap, false, args.interval).spans);
 
     if !log_fmt.is_empty() {
         let tag = if args.ascii {
@@ -1442,6 +1453,14 @@ pub fn build_range_bar_spans(s: &TargetState, ascii: bool, scale_max: f64, theme
 pub const TARGET_SPARK_W:   usize = 10;
 pub const TARGET_SPARK_MIN: usize = 5;
 
+/// Cap on the single-target view's large recent-trend bar. Unlike
+/// `TARGET_SPARK_W` (the compact per-row sparkline column), this row gets a
+/// full row to itself, but a very wide terminal would otherwise stretch it
+/// out to dozens of probes that are mostly at the same fully-faded age
+/// brightness (see `brightness_for` below) - stretching it wider stops
+/// adding useful signal past this point.
+pub const SINGLE_RECENT_MAX_W: usize = 60;
+
 /// Animated spans for the inline range-bar column-key slot during a scale transition.
 pub fn build_key_scale_anim_spans(
     s:          &crate::state::TargetState,
@@ -1533,8 +1552,7 @@ pub fn inline_range_key(
 }
 
 fn render_target_sparkline_with_scale(slice: &[Sample], scale: f64, width: usize, args: &Args) -> Vec<Span<'static>> {
-    let pending_ch    = if args.ascii { "." } else { "\u{2581}" };
-    let pending_style = Style::default().fg(Color::Rgb(35, 35, 35)).add_modifier(Modifier::DIM);
+    let pending_style = Style::default();
     let (gr, gg, gb)  = args.theme.grad_low;
     let (dr, dg, db)  = args.theme.drop_color_rgb();
     let bars_u = ["\u{2581}", "\u{2582}", "\u{2583}", "\u{2584}",
@@ -1553,7 +1571,7 @@ fn render_target_sparkline_with_scale(slice: &[Sample], scale: f64, width: usize
     for (age, sample) in slice.iter().rev().enumerate() {
         let br = brightness_for(age);
         match sample {
-            Sample::Pending => spans.push(Span::styled(pending_ch, pending_style)),
+            Sample::Pending => spans.push(Span::styled(" ", pending_style)),
             Sample::Drop    => {
                 let color = Color::Rgb(
                     (dr as f64 * br).round() as u8,
@@ -1575,7 +1593,7 @@ fn render_target_sparkline_with_scale(slice: &[Sample], scale: f64, width: usize
         }
     }
     for _ in 0..width.saturating_sub(data_len) {
-        spans.push(Span::styled(pending_ch, pending_style));
+        spans.push(Span::styled(" ", pending_style));
     }
     spans
 }
@@ -1584,23 +1602,19 @@ fn render_target_sparkline_with_scale(slice: &[Sample], scale: f64, width: usize
 /// Each column = one raw probe; newest is leftmost and fully bright, older probes fade
 /// steeply so the just-arrived probe always pops visually ("phosphor decay").
 /// Height = RTT on the shared scale, enabling direct cross-target comparison.
-/// Drops render as a fading "x" in the drop color; pending slots as dim hairs.
-///
-/// When `show_col_keys` is false, a sweep animation mirrors the range-bar rescale
-/// transition so the scale change is visible even without the column-key header.
-pub fn build_target_sparkline_spans(s: &TargetState, args: &Args, width: usize, shared_scale: f64, show_col_keys: bool) -> Vec<Span<'static>> {
-    let pending_ch    = if args.ascii { "." } else { "\u{2581}" };
-    let pending_style = Style::default().fg(Color::Rgb(35, 35, 35)).add_modifier(Modifier::DIM);
+/// Drops render as a fading "x" in the drop color; pending/unpainted slots are blank.
+pub fn build_target_sparkline_spans(s: &TargetState, args: &Args, width: usize, shared_scale: f64) -> Vec<Span<'static>> {
+    let pending_style = Style::default();
 
     if width == 0 { return vec![]; }
 
     let history = &s.history;
     if history.is_empty() || s.waiting {
-        return (0..width).map(|_| Span::styled(pending_ch, pending_style)).collect();
+        return (0..width).map(|_| Span::styled(" ", pending_style)).collect();
     }
     let n = history.len();
     let Some(newest) = history[..n].iter().rposition(|h| !h.is_pending()) else {
-        return (0..width).map(|_| Span::styled(pending_ch, pending_style)).collect();
+        return (0..width).map(|_| Span::styled(" ", pending_style)).collect();
     };
     let end   = newest + 1;
     let start = end.saturating_sub(width);
@@ -1609,40 +1623,70 @@ pub fn build_target_sparkline_spans(s: &TargetState, args: &Args, width: usize, 
     let scale = if shared_scale > 0.0 { shared_scale }
                 else { slice.iter().filter_map(|h| h.rtt()).fold(0.0_f64, f64::max).max(1.0) };
 
-    let mut spans = render_target_sparkline_with_scale(slice, scale, width, args);
+    render_target_sparkline_with_scale(slice, scale, width, args)
+}
 
-    // When col-key header is hidden, animate the sparkline during a scale transition
-    // to give visual feedback that the scale changed.
-    if !show_col_keys {
-        if let Some(start_t) = s.bar_anim_start {
-            let elapsed = start_t.elapsed().as_secs_f64();
-            if elapsed < BAR_ANIM_SECS && s.scale_anim_old > 0.0 {
-                let old_spans = render_target_sparkline_with_scale(slice, s.scale_anim_old, width, args);
-                let chars = spans.len();
-                if chars > 0 {
-                    let frac = (elapsed / BAR_ANIM_SECS).clamp(0.0, 1.0);
-                    let pos = if s.scale_anim_up {
-                        ((frac * chars as f64) as usize).min(chars - 1)
-                    } else {
-                        chars.saturating_sub(1 + (frac * chars as f64) as usize)
-                    };
-                    if s.scale_anim_up {
-                        for (dst, sp) in spans.iter_mut().zip(&old_spans).take(chars).skip(pos + 1) { *dst = sp.clone(); }
-                    } else {
-                        for (dst, sp) in spans.iter_mut().zip(&old_spans).take(pos) { *dst = sp.clone(); }
-                    }
-                    let arrow = if s.scale_anim_up {
-                        if args.ascii { "v" } else { "\u{25BC}" }
-                    } else {
-                        if args.ascii { "^" } else { "\u{25B2}" }
-                    };
-                    spans[pos] = Span::styled(arrow, Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
-                }
-            }
+#[cfg(test)]
+mod recent_sparkline_tests {
+    use super::*;
+    use crate::cli::Args;
+    use clap::Parser;
+    use std::time::Duration;
+
+    fn test_args() -> Args {
+        let mut args = Args::parse_from(["vlat", "127.0.0.1"]);
+        args.theme = args.theme_name.to_theme();
+        args
+    }
+
+    #[test]
+    fn unpainted_columns_are_blank_not_underlined() {
+        let args = test_args();
+        let s = TargetState::new("127.0.0.1".to_string());
+        // No history at all - every column is unpainted.
+        let spans = build_target_sparkline_spans(&s, &args, 10, 50.0);
+        assert_eq!(spans.len(), 10);
+        for span in &spans {
+            assert_eq!(span.content.as_ref(), " ", "unpainted column should be blank, not an underline glyph: {span:?}");
         }
     }
 
-    spans
+    #[test]
+    fn unfilled_padding_past_the_data_is_blank() {
+        let args = test_args();
+        let mut s = TargetState::new("127.0.0.1".to_string());
+        s.record_sent(0);
+        s.record_result(0, Ok(10.0), 0, false);
+        // Ask for a wider sparkline than there is data for - the padding columns
+        // (not just a fully-empty sparkline) must also be blank. Data renders
+        // newest-first, so the one real sample is spans[0] and padding trails it.
+        let spans = build_target_sparkline_spans(&s, &args, 5, 50.0);
+        assert_eq!(spans.len(), 5);
+        for span in &spans[1..] {
+            assert_eq!(span.content.as_ref(), " ", "padding past the one real sample should be blank: {spans:?}");
+        }
+    }
+
+    #[test]
+    fn no_rescale_animation_arrow_is_injected() {
+        let args = test_args();
+        let mut s = TargetState::new("127.0.0.1".to_string());
+        for i in 0..8usize {
+            s.record_sent(i);
+            s.record_result(i, Ok(10.0 + i as f64), 0, false);
+        }
+        // Simulate an in-flight rescale animation exactly as trigger_scale_anim would.
+        s.bar_anim_start  = Some(crate::time::Instant::now() - Duration::from_millis(50));
+        s.scale_anim_old  = 20.0;
+        s.scale_anim_new  = 50.0;
+        s.scale_anim_up   = true;
+
+        let spans = build_target_sparkline_spans(&s, &args, 8, 50.0);
+        for span in &spans {
+            let c = span.content.as_ref();
+            assert!(c != "\u{25BC}" && c != "\u{25B2}", "no sweep-animation arrow should appear: {spans:?}");
+        }
+    }
 }
 
 #[allow(dead_code)]

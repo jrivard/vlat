@@ -158,6 +158,16 @@ impl Theme {
         }
     }
 
+    /// Threshold-based latency color shared by the end-of-run summaries (the
+    /// wrapped stats table and the single-view-only exit line): green under
+    /// 50ms, yellow under 150ms, red at or above. Distinct from the smooth
+    /// two-stop `gradient_color` used by the live sparkline/timeline.
+    pub fn latency_threshold_color(&self, ms: f64) -> Color {
+        if      ms <  50.0 { self.c(self.grad_low) }
+        else if ms < 150.0 { self.c(self.grad_mid) }
+        else                { self.c(self.grad_high) }
+    }
+
     /// Color for multi-target slot `idx` (wraps through the 8-color palette).
     pub fn target_color(&self, idx: usize) -> (u8,u8,u8) {
         self.targets[idx % self.targets.len()]

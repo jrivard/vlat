@@ -171,7 +171,7 @@ LIVE KEYS (while running):
   e         explain output legend
   t         change color theme (picker)
   v         change view (picker): list  single  graph  ekg  radar  bars  cards  scatter  worm  bubble
-  1-8       jump to view: 1=graph 2=ekg 3=worm 4=radar 5=bars 6=cards 7=bubble 8=scatter
+  0,1-8     jump to view: 0=list/single 1=graph 2=ekg 3=worm 4=radar 5=bars 6=cards 7=bubble 8=scatter
   i         toggle target headers  (graph / worm / radar / ekg / bubble views)
   k         toggle column key header
   x         show / hide columns (dialog)
@@ -654,7 +654,7 @@ pub struct Args {
 
     /// Columns and visual elements to display. Default set includes the recent sparkline
     /// and range bar; numeric extras are off by default. Stat values: mtr std p01 p10
-    /// p50 p95 p99 cv srtt streak last recent bar.
+    /// p50 p95 p99 cv srtt streak last recent bar status.
     /// Identity values (auto-shown unless overridden): mode name port addr resolve.
     /// Pseudo-values: all (all columns), none (reset to empty), default (default set).
     /// 'none' may be combined: --columns none,mtr shows only mtr; 'all' is exclusive.
@@ -688,7 +688,7 @@ pub struct Args {
     #[arg(long, value_parser = parse_nonzero_window_secs)]
     pub span: Option<u64>,
 
-    /// Number of per-return history rows shown above the stats line in single view (default: 10)
+    /// Number of per-return history rows shown above the stats line in single view (default: 0; adjust with Up/Down)
     #[arg(long, default_value_t = crate::constants::SINGLE_HISTORY_ROWS)]
     pub history_rows: u16,
 
@@ -1007,15 +1007,24 @@ pub enum ExtraStat {
     Recent,
     /// Show the inline range bar on every target row (on by default)
     Bar,
+    /// Probe/uptime summary: probe count and elapsed time, plus a note once it's
+    /// worth mentioning - "down" while down, or "last drop" if up but has dropped
+    /// before. Same text shared with the single-target view's status line;
+    /// excludes the up/down badge itself.
+    Status,
 }
 
 /// Canonical display order of the stat columns used by 'all' and the 'x' dialog.
 /// Identity columns (mode/name/port/addr/resolve) are handled via ColumnVis, not this list.
+/// `Status` is appended last (rather than grouped with the other time-based stats
+/// next to `Last`) so its bit/index position never shifts the ones already assigned
+/// to `Recent`/`Bar` in the toggle dialog and the space_hidden/no_data bitmasks.
 pub const EXTRA_STAT_ALL: &[ExtraStat] = &[
     ExtraStat::Mtr, ExtraStat::Std,
     ExtraStat::P01, ExtraStat::P10, ExtraStat::P50, ExtraStat::P95, ExtraStat::P99,
     ExtraStat::Cv, ExtraStat::Srtt, ExtraStat::Streak, ExtraStat::Last,
     ExtraStat::Recent, ExtraStat::Bar,
+    ExtraStat::Status,
 ];
 
 /// The default set: sparkline and range bar are on; numeric extras are off.

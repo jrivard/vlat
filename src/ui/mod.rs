@@ -205,7 +205,7 @@ pub fn render_screensaver_headers(
         let mut post_badge = widgets::build_current_rtt_spans(state, &effective_cw, &args.theme);
         if circles_w > 0 {
             post_badge.push(Span::raw(" "));
-            post_badge.extend(widgets::build_target_sparkline_spans(state, args, circles_w, shared_scale, col_keys.is_some()));
+            post_badge.extend(widgets::build_target_sparkline_spans(state, args, circles_w, shared_scale));
         }
         if bar_w > 0 {
             post_badge.push(Span::raw(" "));
@@ -314,7 +314,7 @@ pub fn render_screensaver_headers(
         let mut post_badge = widgets::build_current_rtt_spans(state, &effective_cw, &args.theme);
         if circles_w > 0 {
             post_badge.push(Span::raw(" "));
-            post_badge.extend(widgets::build_target_sparkline_spans(state, args, circles_w, shared_scale, col_keys.is_some()));
+            post_badge.extend(widgets::build_target_sparkline_spans(state, args, circles_w, shared_scale));
         }
         if bar_w > 0 {
             post_badge.push(Span::raw(" "));
@@ -378,7 +378,7 @@ pub fn render_screensaver_headers(
                 let mut spans: Vec<Span<'static>> = Vec::new();
                 spans.extend(widgets::build_status_badge_spans(state, tick, &args.theme, args.ascii));
                 spans.extend(post_badge);
-                let tail = widgets::build_stats_line(state, args.ascii, args.is_window(), shared_scale, &effective_cw, false, false, false, &args.theme, show_drp, show_dup, tick, gap, false);
+                let tail = widgets::build_stats_line(state, args.ascii, args.is_window(), shared_scale, &effective_cw, false, false, false, &args.theme, show_drp, show_dup, tick, gap, false, args.interval);
                 spans.extend(tail.spans);
                 Line::from(spans)
             };
@@ -426,6 +426,7 @@ pub struct ColWidths {
     pub srtt:   Option<RttColWidth>,
     pub streak: Option<usize>,      // max digit count of cur_drop_streak
     pub last:   Option<usize>,      // max width of fmt_last_up() string, e.g. "12m"
+    pub status: Option<usize>,      // max width of probe_status_text(), e.g. "sent 31 probes in 30.3s"
     pub stat_order: Vec<ExtraStat>, // display order of active extra stat columns
     pub hidden_base_stats: Vec<BaseStat>, // base stats the user has hidden at runtime
 }
@@ -455,7 +456,8 @@ impl ColWidths {
             + self.cv.map_or(0,              |w| w + gap + 1)
             + self.srtt.as_ref().map_or(0,   |c| c.active_w() + gap + 1)
             + self.streak.map_or(0,          |w| w + gap + 1)
-            + self.last.map_or(0,            |w| w + gap + 1);
+            + self.last.map_or(0,            |w| w + gap + 1)
+            + self.status.map_or(0,          |w| w + gap + 1);
         let show_drops = show_drp && !hide(BaseStat::Drops);
         base + extras
             + if show_drops { self.drp + gap + 1 } else { 0 }
@@ -521,12 +523,14 @@ pub fn mode_badge_visible(vis: Option<bool>, mode_labels: &[String]) -> bool {
     vis.unwrap_or_else(|| !mode_labels.iter().all(|m| m == "icmp"))
 }
 
-/// Returns a bitmask (one bit per dialog row index 0–21) where a set bit means
+/// Returns a bitmask (one bit per dialog row index 0–22) where a set bit means
 /// the column is enabled but not currently rendered because the terminal is too narrow.
 /// Bits 0–4 (identity) are always 0 after the min_size check.
 /// Bits 5–8 = base stats; 9–19 = extra numerical stats (18 = streak, 19 = last).
 /// Bit 20 = recent sparkline (set when `show_recent && circles_w == 0`).
 /// Bit 21 = bar (always 0; bar gets its own allocation before `stats_avail`).
+/// Bit 22 = status (the probe/uptime summary text column - appended last in
+/// `EXTRA_STAT_ALL` so it doesn't renumber 20/21 above).
 ///
 /// Pass `effective_cw` (after `with_budget`) and the same `gap` and `show_*` flags
 /// used when rendering, so the simulation matches the actual render path.
@@ -569,6 +573,7 @@ pub fn compute_space_hidden(
             ExtraStat::Srtt   => (17, cw.srtt.as_ref().map(|c| gap + 1 + c.active_w())),
             ExtraStat::Streak => (18, cw.streak.map(|w| gap + 1 + w)),
             ExtraStat::Last   => (19, cw.last.map(|w| gap + 1 + w)),
+            ExtraStat::Status => (22, cw.status.map(|w| gap + 1 + w)),
             _ => continue,
         };
         if let Some(w) = w_opt {
@@ -632,7 +637,7 @@ pub fn compute_no_data(states: &[TargetState], extras: &[ExtraStat], hidden_base
     mask
 }
 
-pub fn compute_col_widths(states: &[TargetState], stats_window: bool, extras: &[ExtraStat], hidden_base: &[BaseStat], prefer_v6: bool, vis: &crate::cli::ColumnVis) -> ColWidths {
+pub fn compute_col_widths(states: &[TargetState], stats_window: bool, extras: &[ExtraStat], hidden_base: &[BaseStat], prefer_v6: bool, vis: &crate::cli::ColumnVis, interval_ms: u64) -> ColWidths {
     let want = |e: &ExtraStat| extras.contains(e);
     let show_name = vis.name != Some(false);
     let show_addr = vis.addr != Some(false);
@@ -655,6 +660,7 @@ pub fn compute_col_widths(states: &[TargetState], stats_window: bool, extras: &[
     let mut cv_w     = 4usize;   // min: "0.0%"
     let mut streak_w = 1usize;
     let mut last_w   = 1usize;   // min: "~" placeholder
+    let mut status_w = 1usize;
     let now = Instant::now();
     for s in states {
         // name column: custom label, or hostname (non-IP host string), or blank for pure IP targets
@@ -765,6 +771,9 @@ pub fn compute_col_widths(states: &[TargetState], stats_window: bool, extras: &[
         if want(&ExtraStat::Last) {
             last_w = last_w.max(fmt_last_up(s.last_up, now).len());
         }
+        if want(&ExtraStat::Status) {
+            status_w = status_w.max(probe_status_text(s, now, interval_ms).chars().count());
+        }
     }
     ColWidths {
         name_w,
@@ -785,6 +794,7 @@ pub fn compute_col_widths(states: &[TargetState], stats_window: bool, extras: &[
         srtt:       if want(&ExtraStat::Srtt)   { Some(RttColWidth { compact: srt_c, int_w: srt_i, frac_w: srt_f }) } else { None },
         streak:     if want(&ExtraStat::Streak) { Some(streak_w) } else { None },
         last:       if want(&ExtraStat::Last)   { Some(last_w) }   else { None },
+        status:     if want(&ExtraStat::Status) { Some(status_w) } else { None },
         stat_order: extras.to_vec(),
         hidden_base_stats: hidden_base.to_vec(),
     }
@@ -811,7 +821,7 @@ pub fn min_size(
 
     let min_h: u16 = match view {
         "list"  => n16 + col_keys_h,
-        "single" => 4, // blank spacer + name/address + status line + stats line (history rows self-adjust)
+        "single" => 3, // blank spacer + combined name/address+status line + stats line (history rows self-adjust)
         "graph" => col_keys_h + n16 * graph_rpt + 6,
         "worm"  => col_keys_h + n16 * saver_rpt + 4,
         "radar" => col_keys_h + n16 * saver_rpt + 4,
@@ -833,11 +843,10 @@ pub fn min_size(
     } else if view == "cards" {
         base_min_w.max(cards::MIN_PANEL_W)
     } else if view == "single" {
-        // Widest of: name/address row (border + arrow-slot + name + addr) and
-        // status row (border + status badge + rtt).
-        let name_row_w = (1 + 2 + name_part_w + cw.label) as u16;
-        let status_row_w = (1 + STATUS_BADGE_W + 1 + cw.rtt.active_w()) as u16;
-        name_row_w.max(status_row_w)
+        // Name/address header and the up/down badge now share one bottom line
+        // (border + arrow-slot + name + addr + gap + badge); the probe/uptime
+        // text past that just truncates, so it isn't part of this floor.
+        (1 + 2 + name_part_w + cw.label + 2 + STATUS_BADGE_W) as u16
     } else {
         base_min_w
     };
@@ -871,6 +880,7 @@ fn col_widths_max(a: &ColWidths, b: &ColWidths) -> ColWidths {
         srtt:          ormax(&a.srtt, &b.srtt),
         streak:        match (a.streak, b.streak) { (Some(x), Some(y)) => Some(x.max(y)), (x, y) => x.or(y) },
         last:          match (a.last, b.last) { (Some(x), Some(y)) => Some(x.max(y)), (x, y) => x.or(y) },
+        status:        match (a.status, b.status) { (Some(x), Some(y)) => Some(x.max(y)), (x, y) => x.or(y) },
         // Visibility/order reflect the user's current toggle state and shouldn't be
         // held back by the width hysteresis below - only numeric widths get that.
         stat_order:    b.stat_order.clone(),
@@ -953,6 +963,79 @@ pub fn fmt_last_up(last: Option<Instant>, now: Instant) -> String {
     }
 }
 
+/// Human-friendly duration for the probe/uptime summary text: more precision for
+/// small values, progressively coarser as the value grows, so a long-running
+/// target never reports something silly like "waiting 47m12.0s". At each unit
+/// tier, the smaller sub-unit is dropped once the larger unit's count reaches 4 -
+/// by then the sub-unit is noise, not information.
+fn format_elapsed(elapsed_secs: f64) -> String {
+    let secs = elapsed_secs.max(0.0);
+    if secs < 10.0 { return format!("{:.1}s", secs); } // sub-precision matters at this scale
+    let secs = secs.round() as u64;
+    if secs < 60 { return format!("{}s", secs); } // whole seconds - a decimal adds nothing here
+
+    let (mins, secs) = (secs / 60, secs % 60);
+    if mins < 60 { return if mins < 4 { format!("{}m{}s", mins, secs) } else { format!("{}m", mins) }; }
+
+    let (hours, mins) = (mins / 60, mins % 60);
+    if hours < 24 { return if hours < 4 { format!("{}h{}m", hours, mins) } else { format!("{}h", hours) }; }
+
+    let (days, hours) = (hours / 24, hours % 24);
+    if days < 4 { format!("{}d{}h", days, hours) } else { format!("{}d", days) }
+}
+
+/// Minimum age (seconds) before a "down"/"last drop" note is worth showing at all -
+/// below this it's just noise flickering in and out on every probe, since the
+/// event only just happened and the badge elsewhere already reflects it. Scales
+/// with the probe interval (a slow poller shouldn't get a callout after what is,
+/// for it, a single probe's worth of time) but never drops below 10s (a fast
+/// poller doesn't need a callout for something that happened one eyeblink ago).
+fn drop_note_threshold_secs(interval_ms: u64) -> f64 {
+    (interval_ms as f64 / 1000.0 * 2.0).max(10.0)
+}
+
+/// Shared probe/uptime summary text - the single source of the text used by the
+/// single-target view's status line and, as the opt-in `status` column, every
+/// other view. Excludes the up/down badge itself - callers show that separately.
+/// Kept terse (no verbs) since this is a column value, not a sentence; every
+/// fragment is comma-separated.
+///
+/// Before any reply has ever come back: "no reply, N probes, <elapsed>" - there's
+/// no last-contact reference point yet, so the phrasing doesn't pretend there is
+/// one. Once at least one reply has arrived: "N probes, <elapsed>", plus one of:
+/// - ", down <elapsed>" once currently down for at least `drop_note_threshold_secs`
+/// - ", last drop <elapsed>" if currently up but has dropped before, again only
+///   once that drop is at least `drop_note_threshold_secs` old
+pub fn probe_status_text(state: &TargetState, now: Instant, interval_ms: u64) -> String {
+    let n_probes = state.history.len();
+    let plural = if n_probes == 1 { "" } else { "s" };
+    let n_probes_str = fmt_count(n_probes as u64); // abbreviates long-running counts, e.g. "259k"
+    let elapsed_secs = state.first_sent_at.map(|t| now.saturating_duration_since(t).as_secs_f64()).unwrap_or(0.0);
+
+    let Some(last_up) = state.last_up else {
+        return format!("no reply, {} probe{}, {}", n_probes_str, plural, format_elapsed(elapsed_secs));
+    };
+
+    let mut text = format!("{} probe{}, {}", n_probes_str, plural, format_elapsed(elapsed_secs));
+    let threshold = drop_note_threshold_secs(interval_ms);
+    if state.is_currently_down() {
+        let since = now.saturating_duration_since(last_up).as_secs_f64();
+        if since >= threshold {
+            text.push_str(&format!(", down {}", format_elapsed(since)));
+        }
+    } else if state.drops > 0 {
+        // Currently up, but it has dropped before at some point - worth a note even
+        // though we're not down right now, once that drop has aged past the threshold.
+        if let Some(t) = state.last_drop_at {
+            let since = now.saturating_duration_since(t).as_secs_f64();
+            if since >= threshold {
+                text.push_str(&format!(", last drop {}", format_elapsed(since)));
+            }
+        }
+    }
+    text
+}
+
 pub fn fmt_rtt_nodec(ms: f64) -> String {
     if ms <= 0.0 || ms == f64::MAX || ms == f64::MIN { "~".into() }
     else { format!("{:.0}", ms) }
@@ -977,6 +1060,153 @@ pub fn lerp_rgb(r0: u8, g0: u8, b0: u8, r1: u8, g1: u8, b1: u8, t: f64) -> (u8, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::TargetState;
+    use std::time::Duration;
+
+    // --- format_elapsed ---
+
+    #[test]
+    fn format_elapsed_sub_ten_seconds_keeps_a_decimal() {
+        assert_eq!(format_elapsed(3.4), "3.4s");
+        assert_eq!(format_elapsed(0.0), "0.0s");
+        assert_eq!(format_elapsed(9.99), "10.0s"); // rounds up to the next tier's boundary text, still 1 decimal here
+    }
+
+    #[test]
+    fn format_elapsed_ten_to_sixty_seconds_drops_the_decimal() {
+        assert_eq!(format_elapsed(10.0), "10s");
+        assert_eq!(format_elapsed(45.6), "46s");
+        assert_eq!(format_elapsed(59.4), "59s"); // rounds within the seconds tier
+    }
+
+    #[test]
+    fn format_elapsed_minutes_under_four_keep_seconds() {
+        assert_eq!(format_elapsed(60.0), "1m0s");
+        assert_eq!(format_elapsed(135.0), "2m15s");
+        assert_eq!(format_elapsed(239.0), "3m59s");
+    }
+
+    #[test]
+    fn format_elapsed_four_minutes_and_up_drops_seconds() {
+        assert_eq!(format_elapsed(240.0), "4m");
+        assert_eq!(format_elapsed(299.0), "4m");
+        assert_eq!(format_elapsed(3599.0), "59m");
+    }
+
+    #[test]
+    fn format_elapsed_hours_under_four_keep_minutes() {
+        assert_eq!(format_elapsed(3600.0), "1h0m");
+        assert_eq!(format_elapsed(3660.0), "1h1m");
+        assert_eq!(format_elapsed(3600.0 * 3.5), "3h30m");
+    }
+
+    #[test]
+    fn format_elapsed_four_hours_and_up_drops_minutes() {
+        assert_eq!(format_elapsed(3600.0 * 4.0), "4h");
+        assert_eq!(format_elapsed(3600.0 * 23.0), "23h");
+    }
+
+    #[test]
+    fn format_elapsed_days_under_four_keep_hours() {
+        assert_eq!(format_elapsed(86400.0), "1d0h");
+        assert_eq!(format_elapsed(86400.0 + 3600.0 * 5.0), "1d5h");
+    }
+
+    #[test]
+    fn format_elapsed_four_days_and_up_drops_hours() {
+        assert_eq!(format_elapsed(86400.0 * 4.0), "4d");
+        assert_eq!(format_elapsed(86400.0 * 10.0), "10d");
+    }
+
+    // --- drop_note_threshold_secs ---
+
+    #[test]
+    fn drop_note_threshold_scales_with_interval_but_floors_at_ten_seconds() {
+        assert_eq!(drop_note_threshold_secs(1_000), 10.0);   // 1s interval: 2s < 10s floor
+        assert_eq!(drop_note_threshold_secs(3_000), 10.0);   // 3s interval: 6s < 10s floor
+        assert_eq!(drop_note_threshold_secs(8_000), 16.0);   // 8s interval: 16s > floor
+        assert_eq!(drop_note_threshold_secs(30_000), 60.0);  // 30s interval: 60s > floor
+    }
+
+    // --- probe_status_text ---
+
+    #[test]
+    fn probe_status_text_abbreviates_large_probe_counts() {
+        let mut s = TargetState::new("127.0.0.1".to_string());
+        for i in 0..1_500usize {
+            s.record_sent(i);
+            s.record_result(i, Ok(10.0), 0, false);
+        }
+        let text = probe_status_text(&s, Instant::now(), 1_000);
+        assert!(text.starts_with("1k probes, "), "large counts should abbreviate like other columns: {text:?}");
+    }
+
+    #[test]
+    fn probe_status_text_never_seen_up_says_no_reply() {
+        let mut s = TargetState::new("127.0.0.1".to_string());
+        s.record_sent(0);
+        s.record_result(0, Err(()), 0, false);
+        let text = probe_status_text(&s, Instant::now(), 1_000);
+        assert!(text.starts_with("no reply, 1 probe, "), "{text:?}");
+        assert!(!text.contains("last seen") && !text.contains("down "), "{text:?}");
+    }
+
+    #[test]
+    fn probe_status_text_down_note_suppressed_until_threshold_then_shown() {
+        let mut s = TargetState::new("127.0.0.1".to_string());
+        s.record_sent(0);
+        s.record_result(0, Ok(10.0), 0, false);
+        s.record_sent(1);
+        s.record_result(1, Err(()), 0, false); // now down, having been up before
+        let last_up = s.last_up.unwrap();
+
+        let just_happened = last_up + Duration::from_secs(1);
+        let text = probe_status_text(&s, just_happened, 1_000);
+        assert!(!text.contains("down "), "a 1s-old drop shouldn't get a callout yet: {text:?}");
+
+        let aged = last_up + Duration::from_secs(30);
+        let text = probe_status_text(&s, aged, 1_000);
+        assert!(text.contains("down 30s"), "a 30s-old drop should show the note: {text:?}");
+    }
+
+    #[test]
+    fn probe_status_text_omits_down_suffix_while_up() {
+        let mut s = TargetState::new("127.0.0.1".to_string());
+        s.record_sent(0);
+        s.record_result(0, Ok(10.0), 0, false);
+        let text = probe_status_text(&s, Instant::now(), 1_000);
+        assert!(!text.contains("down ") && !text.contains("last drop"), "{text:?}");
+    }
+
+    #[test]
+    fn probe_status_text_last_drop_note_suppressed_until_threshold_then_shown() {
+        let mut s = TargetState::new("127.0.0.1".to_string());
+        s.record_sent(0);
+        s.record_result(0, Err(()), 0, false); // a drop in the past
+        s.record_sent(1);
+        s.record_result(1, Ok(10.0), 0, false); // back up now
+        let last_drop = s.last_drop_at.unwrap();
+
+        let just_happened = last_drop + Duration::from_secs(1);
+        let text = probe_status_text(&s, just_happened, 1_000);
+        assert!(!text.contains("last drop"), "a 1s-old drop shouldn't get a callout yet: {text:?}");
+
+        let aged = last_drop + Duration::from_secs(30);
+        let text = probe_status_text(&s, aged, 1_000);
+        assert!(text.contains("last drop 30s"), "a 30s-old drop should show the note: {text:?}");
+        assert!(!text.contains("down "), "{text:?}");
+    }
+
+    #[test]
+    fn probe_status_text_no_last_drop_note_when_never_dropped() {
+        let mut s = TargetState::new("127.0.0.1".to_string());
+        s.record_sent(0);
+        s.record_result(0, Ok(10.0), 0, false);
+        s.record_sent(1);
+        s.record_result(1, Ok(11.0), 0, false);
+        let text = probe_status_text(&s, Instant::now(), 1_000);
+        assert!(!text.contains("last drop"), "no drops ever recorded, nothing to note: {text:?}");
+    }
 
     // --- fmt_count ---
 
