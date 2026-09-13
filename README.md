@@ -1,6 +1,11 @@
 # vlat
- 
-A creamy and modern ping tool.  A pretty console utility for measuring latency of all kinds.  For latency measurement enthusiasts.
+
+Two reasons to use vlat:
+
+1) modern replacement for ping that doesn't infinitely scroll your terminal
+2) beautiful full screen visualizations for monitoring latency 
+
+Built for latency measurement enthusiasts.
 
 ![single view animated demo](screens/vlat-screen-single.gif)
 
