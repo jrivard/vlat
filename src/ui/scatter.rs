@@ -140,9 +140,7 @@ impl ScatterState {
             log_x:       false,
             history:     Vec::new(),
             // Backdate so the first step() call samples immediately instead of waiting
-            // a full interval. checked_sub guards wasm32, where Instant is backed by
-            // Performance.now() and can be well under TRAIL_SAMPLE_INTERVAL at startup -
-            // std::time::Instant on native targets never underflows here in practice.
+            // a full interval.
             last_sample: Instant::now().checked_sub(TRAIL_SAMPLE_INTERVAL).unwrap_or_else(Instant::now),
         }
     }

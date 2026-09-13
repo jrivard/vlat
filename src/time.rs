@@ -14,12 +14,4 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-// std::time::Instant/SystemTime::now() panic ("time not implemented on this
-// platform") on wasm32-unknown-unknown - std has no JS binding to read the
-// clock there. web-time is a drop-in replacement backed by Performance.now()
-// via web-sys, so every other module imports Instant/SystemTime from here
-// instead of std::time directly, keeping both targets on the same API.
-#[cfg(target_arch = "wasm32")]
-pub use web_time::{Instant, SystemTime, UNIX_EPOCH};
-#[cfg(not(target_arch = "wasm32"))]
 pub use std::time::{Instant, SystemTime, UNIX_EPOCH};

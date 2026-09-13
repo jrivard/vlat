@@ -21,8 +21,8 @@
 //! `ui/dialogs.rs`) while it's rough around the edges. The view itself is
 //! fully implemented and still reachable directly via `--view pong` (kept
 //! out of `--help` via `#[value(hide = true)]` in `cli.rs`) - do not delete
-//! this module or its wiring in `app.rs` / `bin/vlat_web.rs`; re-add it to
-//! the picker/hotkey order arrays once it's polished.
+//! this module or its wiring in `app.rs`; re-add it to the picker/hotkey
+//! order arrays once it's polished.
 //!
 //! All targets share one field - no lane subdivision.  Each ball bounces
 //! left↔right and top↔bottom.  The period of one full horizontal bounce

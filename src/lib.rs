@@ -15,9 +15,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 // Platform-independent: rendering, view state, CLI types, shared constants.
-// These have no networking/OS dependencies and compile for wasm32 as well
-// as native targets, so the browser demo (src/bin/vlat_web.rs) can reuse
-// the exact same view code as the native TUI.
+// These have no networking/OS dependencies.
 pub mod cli;
 pub mod constants;
 pub mod demo;
@@ -27,7 +25,7 @@ pub mod types;
 pub mod ui;
 
 // Native-only: real probing, DNS resolution, session persistence, log
-// files, and the crossterm/tokio event loop. None of this targets wasm32.
+// files, and the crossterm/tokio event loop.
 #[cfg(feature = "native")]
 pub mod app;
 #[cfg(feature = "native")]

@@ -15,11 +15,8 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 //! Synthetic probe data - stands in for a real probe when there's no network
-//! to measure, or none is wanted. Shared by the native `--demo` flag
-//! (`probe::spawn_demo_task`) and the browser demo (`src/bin/vlat_web.rs`),
-//! so both present the same tuned behavior and any future retuning only
-//! happens in one place. Platform-independent (no tokio, no sockets) so it
-//! compiles for wasm32 as well as native.
+//! to measure, or none is wanted. Used by the native `--demo` flag
+//! (`probe::spawn_demo_task`).
 
 use crate::time::{SystemTime, UNIX_EPOCH};
 
@@ -41,13 +38,12 @@ pub struct Profile {
     pub outage_max:    u32, // longest outage, in consecutive dropped probes
 }
 
-/// Tiny xorshift64 PRNG - avoids pulling in `rand`/`getrandom`, which need
-/// extra wasm32 wiring (a `getrandom_backend` cfg) that synthetic data
-/// doesn't warrant.
+/// Tiny xorshift64 PRNG - avoids pulling in `rand`/`getrandom` for synthetic
+/// data that doesn't warrant it.
 pub struct Rng(u64);
 
 impl Rng {
-    /// Seed from wall-clock time via the wasm-safe `crate::time` shim.
+    /// Seed from wall-clock time via the `crate::time` shim.
     pub fn seeded() -> Self {
         Self::seeded_with(0)
     }
