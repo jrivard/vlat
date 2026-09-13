@@ -55,6 +55,12 @@ cargo build --release
 
 The binary will be at `target/release/vlat`.
 
+Alternatively, install directly from crates.io:
+
+```sh
+cargo install vlat
+```
+
 \* On Linux, `cap_net_raw` capability is needed for ICMP. If ICMP is unavailable and no
 explicit `--mode` was set, vlat falls back to UDP.
 
