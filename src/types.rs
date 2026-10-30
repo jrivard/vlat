@@ -16,6 +16,10 @@
 
 use crate::cli::PingMode;
 
+/// Per-target address family from the `ip=4|6` override.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IpVersion { V4, V6 }
+
 pub struct ResolvedTarget {
     pub ip:               std::net::IpAddr,
     pub label:            String,
@@ -28,6 +32,7 @@ pub struct ResolvedTarget {
     pub resolve_interval: Option<u64>,
     pub http_path:        Option<String>,
     pub exec_cmd:         Option<String>,
+    pub ip_version:       Option<IpVersion>,
 }
 
 /// One slot in the probe history timeline.

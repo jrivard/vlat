@@ -135,7 +135,7 @@ vlat "8.8.8.8,interval=200ms,label=google" "1.1.1.1,interval=2s,label=cloudflare
 vlat "example.org:tcp:443,interval=500ms,timeout=2s,hpath=/status"
 ```
 
-Supported keys: `interval`, `timeout`, `resolve` (DNS interval), `label`, `hpath` (HTTP path), `exec` (command).
+Supported keys: `interval`, `timeout`, `resolve` (DNS interval), `label`, `hpath` (HTTP path), `exec` (command), `ip` (`4` or `6`, address family).
 
 Targets also accept a URI form as an alternative to `host:mode:port`:
 
@@ -146,6 +146,24 @@ vlat tcp://10.0.0.1:2222 ssh://build.example.org
 ```
 
 Any mode with a natural URI scheme works (`http`, `https`, `tcp`, `udp`, `dns`, `tls`, `ntp`, `ssh`, `smtp`, `smtps`, `quic`). `icmp` and `exec` have no URI form. IPv6 hosts must be bracketed, e.g. `https://[::1]:8443/health`.
+
+### IPv4 and IPv6
+
+`-4` / `-6` choose the address family for every target. To choose it per target, add `ip=4` or `ip=6`;
+this works in the URI form too:
+
+```sh
+vlat "https://www.google.com,ip=4" "https://www.google.com,ip=6"
+```
+
+`--dual-stack` does the same for every hostname target, giving one IPv4 row and one IPv6 row each
+(IP literals and exec targets are left as they are):
+
+```sh
+vlat --dual-stack https://www.google.com example.net
+```
+
+Hostnames stay hostnames, so TLS certificate checks and periodic DNS re-resolution keep working.
 
 ## Sessions
 

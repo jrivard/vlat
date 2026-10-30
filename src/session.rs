@@ -364,6 +364,7 @@ fn settings_tokens(args: &Args, rt: &RuntimeSettings) -> Vec<Vec<String>> {
     flag!("--ascii", args.ascii);
     flag!("-4", args.ipv4);
     flag!("-6", args.ipv6);
+    flag!("--dual-stack", args.dual_stack);
     opt!("--bind", args.bind_addr.as_ref());
     val_ne!("--resolve-interval", args.resolve_interval, 300, format!("{}s", args.resolve_interval));
     opt!("--dns-server", args.dns_server.as_ref());

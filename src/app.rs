@@ -54,7 +54,7 @@ use crate::{
     constants::{DIALOG_ROWS, FAST_TICK_MS, FREEZE_NOTICE_SECS, HELP_DISMISS_SECS, SCALE_DECREASE_HOLD_SECS, SORT_NOTICE_SECS, THEME_NOTICE_SECS, VIEW_NOTICE_SECS, UI_TICK_MS, WARNING_DISMISS_SECS},
     output::{detect_format, open_csv, open_json, write_summary_json_snapshot, OutputFile},
     probe::{setup_ping_mode, spawn_demo_task, spawn_probe_task, IcmpDupTracker, TlsConfig, TlsVerify, TlsVersion},
-    resolver::{parse_and_resolve, parse_target_spec, expand_target_specs, fire_resolve, build_dns_resolver, resolve_ip, DnsResolver},
+    resolver::{parse_and_resolve, parse_target_spec, expand_target_specs, expand_dual_stack, fire_resolve, build_dns_resolver, resolve_ip, ip_prefs, DnsResolver},
     state::TargetState,
     types::{InitResolveResult, ProbeResult, ProbeStarted, ResolveResult},
     ui::{compute_col_widths, compute_scale, draw_bars, draw_bubble, draw_ekg, draw_fullscreen_multi_ui, draw_fullscreen_ui, draw_cards, draw_pong, draw_radar, draw_list_ui, draw_single_ui, draw_scatter, draw_worm, explain_max_scroll, help_dialog_ideal_height, help_menu_items, min_size, pong_left_margin, render_ambient_logo, single_history_avail, AxisField, AxisMetric, BarsState, BubbleState, ColWidthsStabilizer, DialogMode, EkgState, HelpItem, HelpSubMenu, LogoAnim, CardsState, PongState, RadarState, ScatterState, WormState, ViewCtx, HELP_SORTS, HELP_THEMES, HELP_VIEWS, VIEW_DISPLAY_ORDER, VIEW_PICKER_ORDER},
@@ -436,6 +436,9 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
     // Expand any IP range (`192.168.1.1-20`) or CIDR (`192.168.1.0/24`) target specs
     // into their individual hosts before anything else looks at args.targets.
     args.targets = expand_target_specs(&args.targets).map_err(|e| format!("error: {}", e))?;
+    if args.dual_stack {
+        args.targets = expand_dual_stack(&args.targets, &args).map_err(|e| format!("error: {}", e))?;
+    }
     if args.targets.len() > crate::constants::MAX_TARGETS {
         eprintln!("error: {} targets requested, vlat allows at most {}", args.targets.len(), crate::constants::MAX_TARGETS);
         eprintln!("  narrow the range/CIDR block or split targets across multiple runs");
@@ -502,6 +505,8 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
     let mut target_resolve_intervals: Vec<u64>          = Vec::with_capacity(target_count);
     let mut http_path_arcs:           Vec<Arc<String>>  = Vec::with_capacity(target_count);
     let mut exec_cmd_arcs:            Vec<Arc<String>>  = Vec::with_capacity(target_count);
+    // Per-target (prefer_v4, prefer_v6) from the ip= override or the global -4/-6.
+    let mut target_ip_prefs:          Vec<(bool, bool)> = Vec::with_capacity(target_count);
 
     // Targets removed at runtime - kept for the end-of-session summary.
     let deleted_states:      Vec<TargetState> = Vec::new();
@@ -622,6 +627,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
             target_intervals.push(args.interval);
             target_timeouts.push(args.timeout);
             target_resolve_intervals.push(0);
+            target_ip_prefs.push((false, false));
             http_path_arcs.push(Arc::new(String::new()));
             exec_cmd_arcs.push(Arc::new(String::new()));
 
@@ -697,6 +703,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
         target_intervals.push(eff_interval(rt.interval, args.interval));
         target_timeouts.push(eff_timeout(rt.timeout, args.timeout));
         target_resolve_intervals.push(eff_resolve(args.no_dns_refresh, rt.resolve_interval, args.resolve_interval));
+        target_ip_prefs.push(ip_prefs(rt.ip_version, &args));
         http_path_arcs.push(Arc::new(rt.http_path.unwrap_or_else(|| args.http_path.clone())));
         exec_cmd_arcs.push(Arc::new(exec_cmd_str));
 
@@ -723,6 +730,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
             target_intervals.push(eff_interval(parsed.overrides.interval, args.interval));
             target_timeouts.push(eff_timeout(parsed.overrides.timeout, args.timeout));
             target_resolve_intervals.push(eff_resolve(args.no_dns_refresh, parsed.overrides.resolve_interval, args.resolve_interval));
+            target_ip_prefs.push(ip_prefs(parsed.overrides.ip_version, &args));
             http_path_arcs.push(Arc::new(http_path_str));
             exec_cmd_arcs.push(Arc::new(exec_cmd_str.clone()));
             let eff_mode = match mode {
@@ -773,18 +781,18 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
             }
         }
 
-        // Group hostname slots by their hostname string, then fire one DNS lookup per group.
-        let mut hostname_groups: HashMap<String, Vec<usize>> = HashMap::new();
+        // Group hostname slots by hostname and address family, then fire one DNS lookup
+        // per group - the family is part of the key so ip=4 and ip=6 copies of the same
+        // name each get their own address.
+        let mut hostname_groups: HashMap<(String, (bool, bool)), Vec<usize>> = HashMap::new();
         for (slot, hostname) in hostnames.iter().enumerate() {
             if effective[slot].0 == PingMode::Exec { continue; }
             if let Some(h) = hostname {
-                hostname_groups.entry(h.clone()).or_default().push(slot);
+                hostname_groups.entry((h.clone(), target_ip_prefs[slot])).or_default().push(slot);
             }
         }
-        for (host_str, slots) in hostname_groups {
+        for ((host_str, (prefer_v4, prefer_v6)), slots) in hostname_groups {
             let tx2          = init_resolve_tx.clone();
-            let prefer_v4    = args.ipv4;
-            let prefer_v6    = args.ipv6;
             let dns_resolver = custom_dns_resolver.clone();
             tokio::spawn(async move {
                 match resolve_ip(&host_str, prefer_v4, prefer_v6, dns_resolver.as_ref()).await {
@@ -1311,16 +1319,16 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
     macro_rules! fire_due_resolves {
         ($force:expr) => {{
             let now = std::time::Instant::now();
-            // Group slots by hostname so each unique name gets one DNS query.
-            let mut hostname_groups: HashMap<String, Vec<usize>> = HashMap::new();
+            // Group slots by hostname and address family so each unique pair gets one DNS query.
+            let mut hostname_groups: HashMap<(String, (bool, bool)), Vec<usize>> = HashMap::new();
             for i in 0..hostnames.len() {
                 if effective[i].0 == PingMode::Exec { continue; }
                 let Some(ref host) = hostnames[i] else { continue };
                 let ri = target_resolve_intervals.get(i).copied().unwrap_or(0);
                 if ri == 0 { continue; }
-                hostname_groups.entry(host.clone()).or_default().push(i);
+                hostname_groups.entry((host.clone(), target_ip_prefs[i])).or_default().push(i);
             }
-            for (host, indices) in hostname_groups {
+            for ((host, (prefer_v4, prefer_v6)), indices) in hostname_groups {
                 // Fire if forced or any slot in the group is past its resolve interval.
                 let any_due = $force || indices.iter().any(|&i| {
                     if states[i].resolving { return false; }
@@ -1333,7 +1341,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                     states[i].resolving = true;
                     states[i].resolve_error = None;
                 }
-                fire_resolve(indices, host, args.ipv4, args.ipv6, resolve_tx.clone(), custom_dns_resolver.clone());
+                fire_resolve(indices, host, prefer_v4, prefer_v6, resolve_tx.clone(), custom_dns_resolver.clone());
             }
         }}
     }

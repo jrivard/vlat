@@ -30,6 +30,7 @@ EXAMPLES:
     vlat 192.168.1.0/24:tcp:443            # CIDR block - expands to every host in the /24
     vlat -4 example.net                    # force IPv4 resolution
     vlat -6 example.net                    # force IPv6 resolution
+    vlat --dual-stack example.net          # one IPv4 row and one IPv6 row
     vlat example.net 2001:db8::1           # IPv4 and IPv6 target together
     vlat example.net -m tcp --tcp-port 443 # global TCP mode
     vlat example.net -c 10                 # stop after 10 probes
@@ -48,6 +49,7 @@ EXAMPLES:
     vlat https://example.org                                                # URI form, mode+port from scheme
     vlat https://example.org:8443/health                                    # URI path becomes the hpath override
     vlat tcp://10.0.0.1:2222 ssh://build.example.org                        # URI form for other modes
+    vlat https://example.org,ip=4 https://example.org,ip=6                  # same URL over IPv4 and IPv6
 
 TARGET SPEC FORMAT:
   host[:mode[:port]][,key=val...]
@@ -80,11 +82,13 @@ TARGET SPEC FORMAT:
                           (e.g. /health, /status?check=1)
     exec=<cmd>            shell command for exec probes - overrides --exec-cmd
                           (command must not contain commas; use --exec-cmd for complex commands)
+    ip=<4|6>              address family to resolve the hostname to - overrides -4 / -6
 
   Standard form examples:
     example.net:tcp:443,interval=500ms,timeout=2s
     192.168.1.1,interval=200ms
     host.internal,resolve=30
+    example.net,ip=6,label=v6-path
     10.0.0.1,label=gateway
     prod.example.org:tcp:443,label=prod-lb
     api.example.org:http:8080,hpath=/health,label=api-health
@@ -705,6 +709,10 @@ pub struct Args {
     #[arg(short = '6', group = "ip_version")]
     pub ipv6: bool,
 
+    /// Probe each hostname target over both IPv4 and IPv6, one row per address family
+    #[arg(long = "dual-stack", conflicts_with = "ip_version")]
+    pub dual_stack: bool,
+
     /// Source IP address to bind probes to - use when the host has multiple network interfaces
     #[arg(long = "bind", value_name = "ADDR")]
     pub bind_addr: Option<String>,
@@ -904,8 +912,8 @@ impl Args {
                 self.span.map(format_window_hms).unwrap_or_else(|| "auto".to_string()),
                 self.graph_interval,
                 stats.join(",")),
-            format!("config: ipv4={} ipv6={} bind={} resolve-interval={}s dns-server={} no-dns-refresh={}",
-                self.ipv4, self.ipv6,
+            format!("config: ipv4={} ipv6={} dual-stack={} bind={} resolve-interval={}s dns-server={} no-dns-refresh={}",
+                self.ipv4, self.ipv6, self.dual_stack,
                 self.bind_addr.as_deref().unwrap_or("-"),
                 self.resolve_interval,
                 self.dns_server.as_deref().unwrap_or("-"),

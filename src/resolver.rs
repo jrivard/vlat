@@ -22,7 +22,7 @@ use hickory_resolver::{
     Resolver, TokioResolver,
 };
 use crate::cli::{Args, PingMode, parse_interval};
-use crate::types::ResolvedTarget;
+use crate::types::{IpVersion, ResolvedTarget};
 
 pub type DnsResolver = Arc<TokioResolver>;
 
@@ -33,6 +33,7 @@ pub struct TargetOverrides {
     pub label:            Option<String>,
     pub http_path:        Option<String>,
     pub exec_cmd:         Option<String>,
+    pub ip_version:       Option<IpVersion>,
 }
 
 pub struct ParsedSpec<'a> {
@@ -147,6 +148,16 @@ pub async fn resolve_ip(
     }
 }
 
+/// The (prefer_v4, prefer_v6) pair to hand to [`resolve_ip`] for one target:
+/// its own `ip=` override if set, otherwise the global `-4` / `-6` flags.
+pub fn ip_prefs(ip_version: Option<IpVersion>, args: &Args) -> (bool, bool) {
+    match ip_version {
+        Some(IpVersion::V4) => (true, false),
+        Some(IpVersion::V6) => (false, true),
+        None                => (args.ipv4, args.ipv6),
+    }
+}
+
 /// Normalise a bare HTTP path: ensure it starts with `/`.
 fn normalise_http_path(path: &str) -> String {
     if path.starts_with('/') { path.to_string() } else { format!("/{}", path) }
@@ -187,10 +198,12 @@ pub async fn parse_and_resolve(
             resolve_interval: parsed.overrides.resolve_interval,
             http_path:        parsed.overrides.http_path,
             exec_cmd:         parsed.overrides.exec_cmd,
+            ip_version:       None,
         });
     }
 
-    let ip = resolve_ip(host_part, args.ipv4, args.ipv6, dns_resolver).await
+    let (prefer_v4, prefer_v6) = ip_prefs(parsed.overrides.ip_version, args);
+    let ip = resolve_ip(host_part, prefer_v4, prefer_v6, dns_resolver).await
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     let input_is_ip = host_part.parse::<std::net::IpAddr>().is_ok();
     let auto_label = if input_is_ip {
@@ -215,6 +228,7 @@ pub async fn parse_and_resolve(
         resolve_interval: parsed.overrides.resolve_interval,
         http_path:        parsed.overrides.http_path,
         exec_cmd:         parsed.overrides.exec_cmd,
+        ip_version:       parsed.overrides.ip_version,
     })
 }
 
@@ -351,6 +365,7 @@ pub fn parse_target_spec<'a>(spec: &'a str, args: &Args) -> Result<ParsedSpec<'a
     let mut ov_label:            Option<String> = None;
     let mut ov_http_path:        Option<String> = None;
     let mut ov_exec_cmd:         Option<String> = None;
+    let mut ov_ip_version:       Option<IpVersion> = None;
 
     if !kv_part.is_empty() {
         for pair in kv_part.split(',') {
@@ -388,6 +403,15 @@ pub fn parse_target_spec<'a>(spec: &'a str, args: &Args) -> Result<ParsedSpec<'a
                         ov_exec_cmd = Some(val.to_string());
                     }
                 }
+                // Rejected rather than ignored when invalid: silently falling back
+                // to the other address family would defeat the point of asking.
+                "ip" => {
+                    ov_ip_version = Some(match val.to_lowercase().as_str() {
+                        "4" | "v4" | "ipv4" => IpVersion::V4,
+                        "6" | "v6" | "ipv6" => IpVersion::V6,
+                        _ => return Err(format!("invalid ip='{}' in '{}' (use ip=4 or ip=6)", val, spec)),
+                    });
+                }
                 _ => {}
             }
         }
@@ -396,6 +420,12 @@ pub fn parse_target_spec<'a>(spec: &'a str, args: &Args) -> Result<ParsedSpec<'a
     let (host, mode, port, uri_path) = parse_base_spec(base, args)?;
     if ov_http_path.is_none() {
         ov_http_path = uri_path;
+    }
+    if let (Some(want), Some(ip)) = (ov_ip_version, ip_literal(host)) {
+        if ip.is_ipv4() != (want == IpVersion::V4) {
+            return Err(format!("'{}' is an IP{} address but ip={} was requested",
+                host, if ip.is_ipv4() { "v4" } else { "v6" }, if want == IpVersion::V4 { 4 } else { 6 }));
+        }
     }
 
     Ok(ParsedSpec {
@@ -409,8 +439,38 @@ pub fn parse_target_spec<'a>(spec: &'a str, args: &Args) -> Result<ParsedSpec<'a
             label:            ov_label,
             http_path:        ov_http_path,
             exec_cmd:         ov_exec_cmd,
+            ip_version:       ov_ip_version,
         },
     })
+}
+
+/// Parse `host` as an IP address, accepting the bracketed IPv6 form (`[::1]`).
+fn ip_literal(host: &str) -> Option<IpAddr> {
+    host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host).parse().ok()
+}
+
+/// `--dual-stack`: replace each hostname target with an `ip=4` and an `ip=6` copy.
+/// IP literals, exec targets and specs that already carry `ip=` pass through
+/// unchanged, which also makes re-expanding a saved session's targets a no-op.
+/// A custom `label=` gets a ` v4` / ` v6` suffix so the two rows stay distinct.
+pub fn expand_dual_stack(specs: &[String], args: &Args) -> Result<Vec<String>, String> {
+    let mut out = Vec::with_capacity(specs.len() * 2);
+    for spec in specs {
+        let parsed = parse_target_spec(spec, args)?;
+        if parsed.mode == PingMode::Exec || parsed.overrides.ip_version.is_some() || ip_literal(parsed.host).is_some() {
+            out.push(spec.clone());
+            continue;
+        }
+        for (n, v) in [("4", "v4"), ("6", "v6")] {
+            // Later keys win in parse_target_spec, so appending overrides is enough.
+            let mut s = format!("{},ip={}", spec, n);
+            if let Some(label) = &parsed.overrides.label {
+                s.push_str(&format!(",label={} {}", label, v));
+            }
+            out.push(s);
+        }
+    }
+    Ok(out)
 }
 
 /// Map a URI scheme to its probe mode. Only schemes with a natural URI form are
@@ -1006,5 +1066,88 @@ mod tests {
     fn range_expand_target_specs_multiple() {
         let out = expand_target_specs(&["192.168.1.1-2".to_string(), "example.org".to_string()]).unwrap();
         assert_eq!(out, vec!["192.168.1.1", "192.168.1.2", "example.org"]);
+    }
+
+    // --- ip= override / --dual-stack ---
+
+    fn ip_of(spec: &str) -> Option<IpVersion> {
+        parse_target_spec(spec, &default_args()).unwrap().overrides.ip_version
+    }
+
+    fn specs(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn ip_override_accepts_4_and_6_spellings() {
+        assert_eq!(ip_of("example.org,ip=4"), Some(IpVersion::V4));
+        assert_eq!(ip_of("example.org,ip=v6"), Some(IpVersion::V6));
+        assert_eq!(ip_of("example.org,ip=IPv6"), Some(IpVersion::V6));
+        assert_eq!(ip_of("example.org"), None);
+    }
+
+    #[test]
+    fn ip_override_works_on_uri_targets() {
+        let p = parse_target_spec("https://www.google.com/health,ip=6", &default_args()).unwrap();
+        assert_eq!(p.host, "www.google.com");
+        assert_eq!(p.mode, PingMode::Https);
+        assert_eq!(p.overrides.http_path.as_deref(), Some("/health"));
+        assert_eq!(p.overrides.ip_version, Some(IpVersion::V6));
+    }
+
+    #[test]
+    fn ip_override_invalid_value_is_error() {
+        assert!(parse_target_spec("example.org,ip=5", &default_args()).is_err());
+        assert!(parse_target_spec("example.org,ip=", &default_args()).is_err());
+    }
+
+    #[test]
+    fn ip_override_mismatched_literal_is_error() {
+        let args = default_args();
+        assert!(parse_target_spec("1.1.1.1,ip=6", &args).is_err());
+        assert!(parse_target_spec("[::1]:tcp:443,ip=4", &args).is_err());
+        assert!(parse_target_spec("2001:db8::1,ip=6", &args).is_ok());
+        assert!(parse_target_spec("tcp://[::1]:22,ip=6", &args).is_ok());
+    }
+
+    #[test]
+    fn ip_prefs_override_beats_global_flag() {
+        let args = Args::try_parse_from(["vlat", "-4", "dummy"]).unwrap();
+        assert_eq!(ip_prefs(None, &args), (true, false));
+        assert_eq!(ip_prefs(Some(IpVersion::V6), &args), (false, true));
+    }
+
+    #[test]
+    fn dual_stack_expands_hostnames_and_uris() {
+        let out = expand_dual_stack(&specs(&["example.org:tcp:443", "https://www.google.com"]), &default_args()).unwrap();
+        assert_eq!(out, vec![
+            "example.org:tcp:443,ip=4", "example.org:tcp:443,ip=6",
+            "https://www.google.com,ip=4", "https://www.google.com,ip=6",
+        ]);
+    }
+
+    #[test]
+    fn dual_stack_suffixes_custom_label() {
+        let out = expand_dual_stack(&specs(&["example.org,label=web"]), &default_args()).unwrap();
+        let labels: Vec<_> = out.iter()
+            .map(|s| parse_target_spec(s, &default_args()).unwrap().overrides.label.unwrap())
+            .collect();
+        assert_eq!(labels, vec!["web v4", "web v6"]);
+    }
+
+    #[test]
+    fn dual_stack_leaves_literals_exec_and_explicit_ip_alone() {
+        let input = specs(&["10.0.0.1", "[::1]:tcp:22", "box:exec,exec=true", "example.org,ip=6"]);
+        let out = expand_dual_stack(&input, &default_args()).unwrap();
+        assert_eq!(out, input);
+        // Re-expanding already-expanded specs (e.g. a restarted session) is a no-op.
+        let once = expand_dual_stack(&specs(&["example.org"]), &default_args()).unwrap();
+        assert_eq!(expand_dual_stack(&once, &default_args()).unwrap(), once);
+    }
+
+    #[test]
+    fn dual_stack_conflicts_with_ip_version_flags() {
+        assert!(Args::try_parse_from(["vlat", "--dual-stack", "-4", "x"]).is_err());
+        assert!(Args::try_parse_from(["vlat", "--dual-stack", "-6", "x"]).is_err());
     }
 }
