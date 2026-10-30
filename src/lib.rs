@@ -40,3 +40,5 @@ pub mod probe;
 pub mod resolver;
 #[cfg(feature = "native")]
 pub mod session;
+#[cfg(feature = "native")]
+pub mod signals;

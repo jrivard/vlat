@@ -949,6 +949,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
     // cursor position) is preserved and restored when returning to list.
     if args.fullscreen || args.worm || args.radar || args.ekg || args.bars || args.cards || args.pong || args.bubble || args.scatter {
         execute!(io::stdout(), terminal::EnterAlternateScreen)?;
+        crate::signals::set_alt_screen(true);
     }
     // include_hist is only true for single mode - list no longer shows scrolling history rows.
     let list_viewport_h = |n_targets: usize, col_keys: bool, hist_rows: u16, include_hist: bool| -> u16 {
@@ -1071,6 +1072,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
             drop(terminal);
             execute!(io::stdout(), terminal::EnterAlternateScreen)?;
             in_alternate_screen = true;
+            crate::signals::set_alt_screen(true);
             let backend = CrosstermBackend::new(io::stdout());
             terminal = Terminal::with_options(backend, TerminalOptions {
                 viewport: Viewport::Fullscreen,
@@ -1187,6 +1189,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
             if was_alt {
                 let _ = execute!(io::stdout(), terminal::LeaveAlternateScreen);
                 in_alternate_screen = false;
+                crate::signals::set_alt_screen(false);
             }
             fullscreen_target = None;
             fullscreen_all    = false;
@@ -1225,6 +1228,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
             if was_alt {
                 let _ = execute!(io::stdout(), terminal::LeaveAlternateScreen);
                 in_alternate_screen = false;
+                crate::signals::set_alt_screen(false);
             }
             fullscreen_target = None;
             fullscreen_all    = false;
@@ -1583,8 +1587,21 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
         }};
     }
 
+    // SIGINT/SIGTERM/SIGHUP quit through the normal exit path below (see signals.rs).
+    let mut signal_rx = crate::signals::claim();
+    let mut exit_signal: Option<crate::signals::Signal> = None;
+
     loop {
         tokio::select! {
+            // External signal: quit like the matching key - SIGINT keeps the view on
+            // screen like Ctrl-C, SIGTERM/SIGHUP clear it like 'q'.
+            Some(sig) = signal_rx.recv() => {
+                crate::logfile::write(&format!("{} received, shutting down", sig.name()));
+                keep_display = sig == crate::signals::Signal::Int;
+                exit_signal  = Some(sig);
+                break;
+            }
+
             // --duration deadline reached
             _ = &mut deadline_sleep, if probe_deadline.is_some() && !deadline_passed => {
                 deadline_passed = true;
@@ -3142,6 +3159,9 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
         }
     }
 
+    // From here on a signal (e.g. a second Ctrl-C from `timeout`) exits immediately.
+    crate::signals::release();
+
     // Final session snapshot so the run is restartable up to the moment it ended.
     save_session!();
     // Final --summary-json snapshot with the run's last-known stats.
@@ -3149,6 +3169,14 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
 
     for (_, tx) in &task_cancels { let _ = tx.send(true); }
     drop(probe_tx); // now let rx drain
+
+    // SIGHUP: the terminal is usually gone - restore what we can, print nothing.
+    if let Some(sig @ crate::signals::Signal::Hup) = exit_signal {
+        drop(terminal);
+        crate::signals::restore_terminal();
+        crate::logfile::write("vlat stopped (terminal hung up)");
+        process::exit(sig.exit_code());
+    }
     // Close any open dialog and do one final draw so the screen is clean, and so the
     // frame we are about to snapshot/preserve matches whatever the user was just looking at.
     dialog = DialogMode::None;
@@ -3226,6 +3254,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
             // Leave alternate screen - restores the main buffer and the cursor to
             // the position saved when EnterAlternateScreen was called.
             let _ = execute!(out, terminal::LeaveAlternateScreen);
+            crate::signals::set_alt_screen(false);
             if keep_display {
                 if let Some(buf) = saved_buf {
                     // Clear the restored main buffer and replay the last frame so the
@@ -3267,7 +3296,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
         session_probes_sent, session_packets_received, session_bytes_sent, session_bytes_received, session_re_resolves, session_ui_updates,
     ));
     crate::logfile::write("vlat stopped, cya on the flip side");
-    process::exit(0);
+    process::exit(exit_signal.map_or(0, |s| s.exit_code()));
 }
 
 

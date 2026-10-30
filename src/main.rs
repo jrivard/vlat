@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use vlat::{app, cli, constants, logfile, session};
+use vlat::{app, cli, constants, logfile, session, signals};
 
 use cli::Args;
 use std::process;
@@ -387,6 +387,7 @@ fn enable_vt_processing() {
 async fn main() {
     #[cfg(target_os = "windows")]
     enable_vt_processing();
+    signals::install();
 
     if std::env::args().any(|a| a == "-xk2") {
         println!("amb is my hero");
