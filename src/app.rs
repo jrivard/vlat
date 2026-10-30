@@ -1917,7 +1917,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                                                 }
                                                 HelpItem::ToggleExtraStats => {
                                                     if !in_alternate_screen && !args.fullscreen && !args.worm && !args.radar {
-                                                        ensure_dialog_space!(crate::ui::dialogs::STAT_TOGGLE_DIALOG_H);
+                                                        ensure_dialog_space!(crate::ui::dialogs::STAT_TOGGLE_DIALOG_H + if args.single { 2 } else { 0 });
                                                     }
                                                     dialog = DialogMode::StatColumnToggle {
                                                         cursor: 0,
@@ -2513,7 +2513,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                                 }
                                 KeyCode::Char('c') => {
                                     if !in_alternate_screen && !args.fullscreen && !args.worm && !args.radar {
-                                        ensure_dialog_space!(crate::ui::dialogs::STAT_TOGGLE_DIALOG_H);
+                                        ensure_dialog_space!(crate::ui::dialogs::STAT_TOGGLE_DIALOG_H + if args.single { 2 } else { 0 });
                                     }
                                     dialog = DialogMode::StatColumnToggle {
                                         cursor: 0,

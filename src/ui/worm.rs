@@ -461,7 +461,10 @@ pub fn draw_worm(
         }
         DialogMode::StatColumnToggle { cursor, identity } => {
             let no_data = compute_no_data(states, &args.extra_stats, &args.hidden_base_stats);
-            super::dialogs::draw_stat_column_toggle_dialog(frame, area, *cursor, identity, &args.extra_stats, &args.hidden_base_stats, 0, no_data, args.ascii, &args.theme);
+            super::dialogs::draw_stat_column_toggle_dialog(frame, area, *cursor, identity, &args.extra_stats, &args.hidden_base_stats, 0, no_data,
+                super::dialogs::stat_toggles_not_in_view("worm"),
+                super::dialogs::columns_hidden_by_headers("worm", show_headers),
+                args.ascii, &args.theme);
         }
         DialogMode::SortPicker { cursor, .. } => {
             draw_sort_picker_dialog(frame, area, args.ascii, &args.theme, *cursor, args.reverse_sort);

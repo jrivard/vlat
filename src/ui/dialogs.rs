@@ -2090,6 +2090,20 @@ pub const STAT_TOGGLE_COUNT: usize = 23;
 /// 4 group separators, 1 trailing blank, plus 2 border rows.
 pub const STAT_TOGGLE_DIALOG_H: u16 = 3 + STAT_TOGGLE_COUNT as u16 + 4 + 1 + 2;
 
+/// Row index of `bar` in the column dialog - the single view never draws the range bar.
+pub const STAT_TOGGLE_BAR_ROW: usize = 21;
+
+/// Rows of the column dialog that `view` can't display (bit i = row i).
+pub fn stat_toggles_not_in_view(view: &str) -> u32 {
+    if view == "single" { 1 << STAT_TOGGLE_BAR_ROW } else { 0 }
+}
+
+/// True when `view` puts its columns in per-target header rows that 'i' can hide.
+/// List and single always show theirs; cards keep their stats inside each card.
+pub fn columns_hidden_by_headers(view: &str, show_headers: bool) -> bool {
+    !show_headers && !matches!(view, "list" | "single" | "cards")
+}
+
 /// Named section-header separator shared by dialogs that group their rows, e.g.
 /// "  ─ identity ──────────────────────────────────". Rule chars use `col_key_rule`
 /// (the same accent used for the column-key rule in the main display); the label
@@ -2121,6 +2135,8 @@ pub fn draw_stat_column_toggle_dialog(
     hidden_base: &[BaseStat],
     space_hidden: u32,
     no_data: u32,
+    not_in_view: u32,
+    headers_hidden: bool,
     ascii: bool,
     theme: &Theme,
 ) {
@@ -2143,6 +2159,8 @@ pub fn draw_stat_column_toggle_dialog(
     let narrow_sym    = if ascii { "!" } else { "\u{2194}" }; // ↔ — 1 terminal col
     let no_data_style = Style::default().fg(theme.dlg_warning).add_modifier(Modifier::DIM);
     let no_data_sym   = if ascii { "?" } else { "\u{00d8}" }; // Ø — 1 terminal col
+    let not_in_view_style = no_data_style;
+    let not_in_view_sym   = if ascii { "-" } else { "\u{2013}" }; // – — 1 terminal col
 
     // enabled row: green check, bright bold name, normal-weight description
     let check_on_style = Style::default().fg(theme.rtt_good).add_modifier(Modifier::BOLD);
@@ -2210,8 +2228,17 @@ pub fn draw_stat_column_toggle_dialog(
     let mut body: Vec<Line> = vec![
         Line::raw(""),
         Line::from(Span::styled(nav_hint.to_owned(), hint_style)),
-        section_sep!("identity"),
     ];
+    // Headers hidden ('i') means none of these toggles are visible right now -
+    // say so up front rather than letting every toggle look broken.
+    if headers_hidden {
+        let dash = if ascii { "-" } else { "\u{2014}" };
+        body.push(Line::from(Span::styled(
+            format!("  headers are hidden {} press i to show columns", dash),
+            Style::default().fg(theme.dlg_warning).add_modifier(Modifier::BOLD),
+        )));
+    }
+    body.push(section_sep!("identity"));
 
     for (i, (name, desc, enabled)) in rows.iter().enumerate() {
         if i == 5  { body.push(section_sep!("base stats")); }
@@ -2224,8 +2251,11 @@ pub fn draw_stat_column_toggle_dialog(
         // Row 4 (resolve): no_data fires when auto-show condition isn't met (ip_changes <= 1),
         // same moment identity[4]=false; || i==4 lets Ø appear on the auto-hidden row.
         let is_no_data = (no_data >> i) & 1 == 1 && (*enabled || i == 4);
+        let is_not_in_view = (not_in_view >> i) & 1 == 1;
         let sym = symbols[i];
-        let (row_prefix, pfx_sty_normal) = if is_narrow {
+        let (row_prefix, pfx_sty_normal) = if is_not_in_view {
+            (not_in_view_sym, not_in_view_style)
+        } else if is_narrow {
             (narrow_sym, narrow_style)
         } else if is_no_data {
             (no_data_sym, no_data_style)
@@ -2234,7 +2264,7 @@ pub fn draw_stat_column_toggle_dialog(
         };
 
         if is_cursor {
-            let pfx_fg = if is_narrow || is_no_data { sel_fg.fg(theme.dlg_warning) } else { sel_fg };
+            let pfx_fg = if is_narrow || is_no_data || is_not_in_view { sel_fg.fg(theme.dlg_warning) } else { sel_fg };
             body.push(Line::from(vec![
                 Span::styled(row_prefix.to_owned(), pfx_fg),
                 Span::styled(" [", sel_fg),
@@ -2248,7 +2278,9 @@ pub fn draw_stat_column_toggle_dialog(
                 Span::raw("  "),
             ]).style(sel_bg));
         } else {
-            let (mark_sty, nm_sty, dsc_sty) = if *enabled {
+            // Rows this view can't show are muted even when enabled; the mark still
+            // reflects the setting, which carries over to views that do show it.
+            let (mark_sty, nm_sty, dsc_sty) = if *enabled && !is_not_in_view {
                 (check_on_style, name_on_style, desc_on_style)
             } else {
                 (dim_style, dim_style, desc_off_style)
@@ -2274,6 +2306,14 @@ pub fn draw_stat_column_toggle_dialog(
             Span::styled("  ".to_owned(), hint_style),
             Span::styled(narrow_sym.to_owned(), narrow_style),
             Span::styled(" = enabled but not shown (terminal too narrow)".to_owned(), hint_style),
+        ]));
+    }
+    if not_in_view != 0 {
+        body.push(Line::raw(""));
+        body.push(Line::from(vec![
+            Span::styled("  ".to_owned(), hint_style),
+            Span::styled(not_in_view_sym.to_owned(), not_in_view_style),
+            Span::styled(" = not shown in this view".to_owned(), hint_style),
         ]));
     }
     if no_data != 0 {

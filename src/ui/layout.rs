@@ -286,7 +286,10 @@ pub fn render_dialogs(
                                       args.ascii, &args.theme);
         }
         DialogMode::StatColumnToggle { cursor, identity } => {
-            draw_stat_column_toggle_dialog(f, area, *cursor, identity, &args.extra_stats, &args.hidden_base_stats, space_hidden, no_data, args.ascii, &args.theme);
+            draw_stat_column_toggle_dialog(f, area, *cursor, identity, &args.extra_stats, &args.hidden_base_stats, space_hidden, no_data,
+                super::dialogs::stat_toggles_not_in_view(current_view),
+                super::dialogs::columns_hidden_by_headers(current_view, show_headers),
+                args.ascii, &args.theme);
         }
         DialogMode::SortPicker { cursor, .. } => {
             draw_sort_picker_dialog(f, area, args.ascii, &args.theme, *cursor, args.reverse_sort);
