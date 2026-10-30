@@ -569,6 +569,9 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
     let mut task_id_to_state: HashMap<usize, usize> = HashMap::new();
     let mut task_cancels: Vec<(usize, watch::Sender<bool>)> = Vec::new(); // (task_id, cancel_tx)
 
+    // --duration deadline, shared by every probe task and the main loop.
+    let probe_deadline = args.duration.map(|ms| time::Instant::now() + Duration::from_millis(ms));
+
     // Allocate a task id and cancel channel, spawn the probe task for `slot`,
     // and register both in the bookkeeping maps.
     macro_rules! start_probe {
@@ -598,6 +601,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                 start_delay: $start_delay,
                 dup_tracker: dup_tracker.clone(),
                 max_probes:  args.count,
+                stop_at:     probe_deadline,
             });
             task_id_to_state.insert(tid, slot);
             task_cancels.push((tid, per_cancel_tx));
@@ -639,7 +643,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                 tid, dt.profile, target_intervals[slot],
                 probe_tx.clone(), start_tx.clone(), per_cancel_rx,
                 Duration::from_millis(stagger_ms * slot as u64),
-                args.count,
+                args.count, probe_deadline,
             );
             task_id_to_state.insert(tid, slot);
             task_cancels.push((tid, per_cancel_tx));
@@ -1561,8 +1565,34 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
         }}
     }
 
+    // --duration: once the deadline passes no new probes are sent; exit as soon as
+    // every probe already in flight has reported (bounded by --timeout).
+    let deadline_sleep = time::sleep_until(probe_deadline.unwrap_or_else(time::Instant::now));
+    tokio::pin!(deadline_sleep);
+    let mut deadline_passed = false;
+    macro_rules! in_flight_drained {
+        () => { states.iter().all(|s| s.pending_map.is_empty()) };
+    }
+    macro_rules! on_probe_started {
+        ($started:expr) => {{
+            let started = $started;
+            if let Some(&slot) = task_id_to_state.get(&started.task_id) {
+                states[slot].record_sent(started.seq);
+                session_probes_sent += 1;
+            }
+        }};
+    }
+
     loop {
         tokio::select! {
+            // --duration deadline reached
+            _ = &mut deadline_sleep, if probe_deadline.is_some() && !deadline_passed => {
+                deadline_passed = true;
+                // Record probes sent just before the deadline so they count as in flight.
+                while let Ok(started) = start_rx.try_recv() { on_probe_started!(started); }
+                if in_flight_drained!() { break; }
+            }
+
             // Keyboard / resize
             key_event = key_stream.next() => {
                 let Some(Ok(event)) = key_event else { continue };
@@ -2590,9 +2620,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
             // Probe sent - advance the timeline immediately
             started = start_rx.recv() => {
                 let Some(started) = started else { break };
-                let Some(&slot) = task_id_to_state.get(&started.task_id) else { continue };
-                states[slot].record_sent(started.seq);
-                session_probes_sent += 1;
+                on_probe_started!(started);
             }
 
             // Probe result
@@ -2644,6 +2672,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                 }
 
                 if count_reached!() { break; }
+                if deadline_passed && in_flight_drained!() { break; }
             }
 
             // Initial async resolve result (multi-target startup)

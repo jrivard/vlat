@@ -34,6 +34,7 @@ EXAMPLES:
     vlat example.net 2001:db8::1           # IPv4 and IPv6 target together
     vlat example.net -m tcp --tcp-port 443 # global TCP mode
     vlat example.net -c 10                 # stop after 10 probes
+    vlat example.net -d 5m                 # stop after 5 minutes
     vlat example.net --warn-rtt 100        # bell + flash when RTT exceeds 100ms
     vlat --bind 192.168.1.5 example.net    # bind probes to a specific local address
     vlat example.net --max-range 200       # fix chart scale to 200ms
@@ -228,6 +229,14 @@ pub fn parse_duration_ms(s: &str) -> Result<u64, String> {
 
 /// Returns whole seconds (u64) - used for --window.
 pub fn parse_interval(s: &str) -> Result<u64, String> { parse_duration_ms(s) }
+
+/// Returns milliseconds (u64), must be non-zero - used for --duration.
+fn parse_duration_limit(s: &str) -> Result<u64, String> {
+    match parse_duration_ms(s)? {
+        0  => Err("must be greater than 0".to_string()),
+        ms => Ok(ms),
+    }
+}
 
 /// Returns whole seconds (u64); 0 is allowed (means lifetime mode) - used for --window.
 fn parse_window_secs(s: &str) -> Result<u64, String> {
@@ -595,6 +604,10 @@ pub struct Args {
     #[arg(short, long)]
     pub count: Option<u64>,
 
+    /// Stop sending probes after this long, then exit once in-flight probes finish (see TIME FORMAT)
+    #[arg(short, long, value_parser = parse_duration_limit)]
+    pub duration: Option<u64>,
+
     /// Probe timeout - max 60s; probes (including exec) are killed on expiry (see TIME FORMAT)
     #[arg(short, long, default_value = "10s", value_parser = parse_timeout_secs)]
     pub timeout: f64,
@@ -885,6 +898,7 @@ impl Args {
             .map(|m| format!("{:?}", m).to_lowercase())
             .unwrap_or_else(|| "auto".to_string());
         let count = self.count.map(|c| c.to_string()).unwrap_or_else(|| "unlimited".to_string());
+        let duration = self.duration.map(|ms| format!("{}ms", ms)).unwrap_or_else(|| "unlimited".to_string());
         let mut stats: Vec<String> = self.extra_stats.iter()
             .map(|s| format!("{:?}", s).to_lowercase()).collect();
         let vis_str = |v: Option<bool>| match v { Some(true) => "on", Some(false) => "off", None => "auto" };
@@ -899,8 +913,8 @@ impl Args {
             TlsVersionArg::V13 => "1.3",
         };
         vec![
-            format!("config: targets=[{}] mode={} interval={}ms timeout={:.2}s count={} window={}",
-                self.targets.join(", "), mode, self.interval, self.timeout, count,
+            format!("config: targets=[{}] mode={} interval={}ms timeout={:.2}s count={} duration={} window={}",
+                self.targets.join(", "), mode, self.interval, self.timeout, count, duration,
                 format_window_hms(self.window)),
             format!("config: view={} theme={} ascii={} keys={} no-color={} sort={} reverse-sort={} max-range={} span={} graph-interval={}ms columns=[{}]",
                 format!("{:?}", self.view).to_lowercase(),
@@ -1098,7 +1112,19 @@ fn parse_tls_version(s: &str) -> Result<TlsVersionArg, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_interval;
+    use super::{parse_interval, parse_duration_limit};
+
+    #[test]
+    fn duration_limit_parses_time_format() {
+        assert_eq!(parse_duration_limit("5m"), Ok(300_000));
+        assert_eq!(parse_duration_limit("30"), Ok(30_000));
+    }
+
+    #[test]
+    fn duration_limit_rejects_zero() {
+        assert!(parse_duration_limit("0").is_err());
+        assert!(parse_duration_limit("0s").is_err());
+    }
 
     #[test]
     fn plain_number_as_seconds() {

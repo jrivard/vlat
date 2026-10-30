@@ -230,13 +230,15 @@ pub struct ProbeTask {
     pub dup_tracker: Option<Arc<IcmpDupTracker>>,
     /// Stop sending after this many probes (`--count`); in-flight probes still report.
     pub max_probes:  Option<u64>,
+    /// Stop sending at this instant (`--duration`); in-flight probes still report.
+    pub stop_at:     Option<time::Instant>,
 }
 
 pub fn spawn_probe_task(task: ProbeTask) {
     let ProbeTask {
         task_id, ip_shared, interval, timeout, mode, port,
         icmp4: icmp4_arc, icmp6: icmp6_arc, bind_ip, hostname, dns_query,
-        tls_config, http_path, exec_cmd, tx, start_tx, mut cancel, start_delay, dup_tracker, max_probes,
+        tls_config, http_path, exec_cmd, tx, start_tx, mut cancel, start_delay, dup_tracker, max_probes, stop_at,
     } = task;
     let mode_tag: u8 = match mode {
         PingMode::Icmp  => 0,
@@ -266,6 +268,7 @@ pub fn spawn_probe_task(task: ProbeTask) {
                 _ = cancel.changed() => { break; }
             }
             if *cancel.borrow() { break; }
+            if stop_at.is_some_and(|t| time::Instant::now() >= t) { break; }
 
             let current_seq = seq;
             seq = seq.wrapping_add(1);
@@ -408,6 +411,7 @@ pub fn spawn_demo_task(
     mut cancel:  watch::Receiver<bool>,
     start_delay: Duration,
     max_probes:  Option<u64>,
+    stop_at:     Option<time::Instant>,
 ) {
     tokio::spawn(async move {
         let mut rng            = crate::demo::Rng::seeded_with(task_id as u64);
@@ -424,6 +428,7 @@ pub fn spawn_demo_task(
                 _ = cancel.changed() => { break; }
             }
             if *cancel.borrow() { break; }
+            if stop_at.is_some_and(|t| time::Instant::now() >= t) { break; }
 
             let current_seq = seq;
             seq = seq.wrapping_add(1);
