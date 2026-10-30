@@ -424,8 +424,8 @@ pub struct ColWidths {
     pub p99:    Option<RttColWidth>,
     pub cv:     Option<usize>,      // max width of fmt_cv() string, e.g. "12.3%"
     pub srtt:   Option<RttColWidth>,
-    pub streak: Option<usize>,      // max digit count of cur_drop_streak
-    pub last:   Option<usize>,      // max width of fmt_last_up() string, e.g. "12m"
+    pub seen:   Option<usize>,      // max width of fmt_since(last_up), e.g. "12m"
+    pub lost:   Option<usize>,      // max width of fmt_since(last_drop_at), e.g. "3h"
     pub status: Option<usize>,      // max width of probe_status_text(), e.g. "sent 31 probes in 30.3s"
     pub stat_order: Vec<ExtraStat>, // display order of active extra stat columns
     pub hidden_base_stats: Vec<BaseStat>, // base stats the user has hidden at runtime
@@ -455,8 +455,8 @@ impl ColWidths {
             + self.p99.as_ref().map_or(0,    |c| c.active_w() + gap + 1)
             + self.cv.map_or(0,              |w| w + gap + 1)
             + self.srtt.as_ref().map_or(0,   |c| c.active_w() + gap + 1)
-            + self.streak.map_or(0,          |w| w + gap + 1)
-            + self.last.map_or(0,            |w| w + gap + 1)
+            + self.seen.map_or(0,            |w| w + gap + 1)
+            + self.lost.map_or(0,            |w| w + gap + 1)
             + self.status.map_or(0,          |w| w + gap + 1);
         let show_drops = show_drp && !hide(BaseStat::Drops);
         base + extras
@@ -489,7 +489,7 @@ impl ColWidths {
                     ExtraStat::P95  => if let Some(ref mut c) = cw.p95  { if c.frac_w > 0 { c.frac_w = 0; stripped = true; break; } }
                     ExtraStat::P99  => if let Some(ref mut c) = cw.p99  { if c.frac_w > 0 { c.frac_w = 0; stripped = true; break; } }
                     ExtraStat::Srtt => if let Some(ref mut c) = cw.srtt { if c.frac_w > 0 { c.frac_w = 0; stripped = true; break; } }
-                    _ => {} // Cv and Streak have no frac_w; All/Default/None never appear
+                    _ => {} // Cv/Seen/Lost/Status have no frac_w; All/Default/None never appear
                 }
             }
             if stripped { continue; }
@@ -526,7 +526,7 @@ pub fn mode_badge_visible(vis: Option<bool>, mode_labels: &[String]) -> bool {
 /// Returns a bitmask (one bit per dialog row index 0–22) where a set bit means
 /// the column is enabled but not currently rendered because the terminal is too narrow.
 /// Bits 0–4 (identity) are always 0 after the min_size check.
-/// Bits 5–8 = base stats; 9–19 = extra numerical stats (18 = streak, 19 = last).
+/// Bits 5–8 = base stats; 9–19 = extra numerical stats (18 = seen, 19 = lost).
 /// Bit 20 = recent sparkline (set when `show_recent && circles_w == 0`).
 /// Bit 21 = bar (always 0; bar gets its own allocation before `stats_avail`).
 /// Bit 22 = status (the probe/uptime summary text column - appended last in
@@ -571,8 +571,8 @@ pub fn compute_space_hidden(
             ExtraStat::P99    => (15, cw.p99.as_ref().map(|c| gap + 1 + c.active_w())),
             ExtraStat::Cv     => (16, cw.cv.map(|w| gap + 1 + w)),
             ExtraStat::Srtt   => (17, cw.srtt.as_ref().map(|c| gap + 1 + c.active_w())),
-            ExtraStat::Streak => (18, cw.streak.map(|w| gap + 1 + w)),
-            ExtraStat::Last   => (19, cw.last.map(|w| gap + 1 + w)),
+            ExtraStat::Seen   => (18, cw.seen.map(|w| gap + 1 + w)),
+            ExtraStat::Lost   => (19, cw.lost.map(|w| gap + 1 + w)),
             ExtraStat::Status => (22, cw.status.map(|w| gap + 1 + w)),
             _ => continue,
         };
@@ -603,7 +603,8 @@ pub fn compute_no_data(states: &[TargetState], extras: &[ExtraStat], hidden_base
     let any_mtr      = states.iter().any(|s| s.win_mtr().is_some());
     let any_srtt     = states.iter().any(|s| s.srtt > 0.0);
     let any_cv       = states.iter().any(|s| s.win_cv() > 0.0);
-    let any_last     = states.iter().any(|s| s.last_up.is_some());
+    let any_seen     = states.iter().any(|s| s.last_up.is_some());
+    let any_lost     = states.iter().any(|s| s.last_drop_at.is_some());
     // Use > 1 to match the auto-show condition in ip_changes_slot_width / identity_column_states.
     let any_resolve  = states.iter().any(|s| s.ip_changes > 1);
     let any_drops    = states.iter().any(|s| s.win_drops > 0);
@@ -628,8 +629,8 @@ pub fn compute_no_data(states: &[TargetState], extras: &[ExtraStat], hidden_base
     if want(&ExtraStat::P99)    && !any_window && !any_life_rtts { mask |= 1 << 15; }
     if want(&ExtraStat::Cv)     && !any_cv      { mask |= 1 << 16; }
     if want(&ExtraStat::Srtt)   && !any_srtt    { mask |= 1 << 17; }
-    // streak (bit 18) always has data — "0" is a valid reading
-    if want(&ExtraStat::Last)   && !any_last    { mask |= 1 << 19; }
+    if want(&ExtraStat::Seen)   && !any_seen    { mask |= 1 << 18; }
+    if want(&ExtraStat::Lost)   && !any_lost    { mask |= 1 << 19; }
 
     if want(&ExtraStat::Recent) && !any_history { mask |= 1 << 20; }
     if want(&ExtraStat::Bar)    && !any_history { mask |= 1 << 21; }
@@ -658,8 +659,8 @@ pub fn compute_col_widths(states: &[TargetState], stats_window: bool, extras: &[
     let (mut p99_c, mut p99_i, mut p99_f) = (3usize, 1usize, 0usize);
     let (mut srt_c, mut srt_i, mut srt_f) = (3usize, 1usize, 0usize);
     let mut cv_w     = 4usize;   // min: "0.0%"
-    let mut streak_w = 1usize;
-    let mut last_w   = 1usize;   // min: "~" placeholder
+    let mut seen_w   = 1usize;   // min: "~" placeholder
+    let mut lost_w   = 1usize;   // min: "~" placeholder
     let mut status_w = 1usize;
     let now = Instant::now();
     for s in states {
@@ -765,11 +766,11 @@ pub fn compute_col_widths(states: &[TargetState], stats_window: bool, extras: &[
             let cv = if stats_window { s.win_cv() } else { s.life_cv() };
             cv_w = cv_w.max(fmt_cv(cv).len());
         }
-        if want(&ExtraStat::Streak) {
-            streak_w = streak_w.max(fmt_count(s.cur_drop_streak as u64).len());
+        if want(&ExtraStat::Seen) {
+            seen_w = seen_w.max(fmt_since(s.last_up, now).len());
         }
-        if want(&ExtraStat::Last) {
-            last_w = last_w.max(fmt_last_up(s.last_up, now).len());
+        if want(&ExtraStat::Lost) {
+            lost_w = lost_w.max(fmt_since(s.last_drop_at, now).len());
         }
         if want(&ExtraStat::Status) {
             status_w = status_w.max(probe_status_text(s, now, interval_ms).chars().count());
@@ -792,8 +793,8 @@ pub fn compute_col_widths(states: &[TargetState], stats_window: bool, extras: &[
         p99:        if want(&ExtraStat::P99)    { Some(RttColWidth { compact: p99_c, int_w: p99_i, frac_w: p99_f }) } else { None },
         cv:         if want(&ExtraStat::Cv)     { Some(cv_w) }     else { None },
         srtt:       if want(&ExtraStat::Srtt)   { Some(RttColWidth { compact: srt_c, int_w: srt_i, frac_w: srt_f }) } else { None },
-        streak:     if want(&ExtraStat::Streak) { Some(streak_w) } else { None },
-        last:       if want(&ExtraStat::Last)   { Some(last_w) }   else { None },
+        seen:       if want(&ExtraStat::Seen)   { Some(seen_w) }   else { None },
+        lost:       if want(&ExtraStat::Lost)   { Some(lost_w) }   else { None },
         status:     if want(&ExtraStat::Status) { Some(status_w) } else { None },
         stat_order: extras.to_vec(),
         hidden_base_stats: hidden_base.to_vec(),
@@ -878,8 +879,8 @@ fn col_widths_max(a: &ColWidths, b: &ColWidths) -> ColWidths {
         p99:           ormax(&a.p99, &b.p99),
         cv:            match (a.cv, b.cv) { (Some(x), Some(y)) => Some(x.max(y)), (x, y) => x.or(y) },
         srtt:          ormax(&a.srtt, &b.srtt),
-        streak:        match (a.streak, b.streak) { (Some(x), Some(y)) => Some(x.max(y)), (x, y) => x.or(y) },
-        last:          match (a.last, b.last) { (Some(x), Some(y)) => Some(x.max(y)), (x, y) => x.or(y) },
+        seen:          match (a.seen, b.seen) { (Some(x), Some(y)) => Some(x.max(y)), (x, y) => x.or(y) },
+        lost:          match (a.lost, b.lost) { (Some(x), Some(y)) => Some(x.max(y)), (x, y) => x.or(y) },
         status:        match (a.status, b.status) { (Some(x), Some(y)) => Some(x.max(y)), (x, y) => x.or(y) },
         // Visibility/order reflect the user's current toggle state and shouldn't be
         // held back by the width hysteresis below - only numeric widths get that.
@@ -947,9 +948,10 @@ pub fn fmt_cv(cv: f64) -> String {
     if cv < 100.0 { format!("{:.1}%", cv) } else { format!("{:.0}%", cv) }
 }
 
-/// Compact "time since" string for the last successful response, e.g. "now", "5s", "12m", "3h", "2d".
-/// None (no response yet) formats as "~", matching the other stat columns' placeholder.
-pub fn fmt_last_up(last: Option<Instant>, now: Instant) -> String {
+/// Compact "time since" string, e.g. "now", "5s", "12m", "3h", "2d" - used for the
+/// seen (last reply) and lost (last drop) columns. None (no such event yet) formats
+/// as "~", matching the other stat columns' placeholder.
+pub fn fmt_since(last: Option<Instant>, now: Instant) -> String {
     match last {
         None => "~".into(),
         Some(t) => {

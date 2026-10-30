@@ -155,26 +155,26 @@ pub const HELP_SORTS: &[(&str, &str)] = &[
     ("p99",    "lowest 99th-percentile RTT to top"),
     ("cv",     "lowest coefficient of variation (std/avg) to top"),
     ("srtt",   "lowest smoothed RTT (RFC\u{00a0}6298 SRTT) to top"),
-    ("streak", "no current drop streak first"),
-    ("last",   "most recently responded (host up) to top"),
+    ("seen",   "most recently responded (host up) to top"),
+    ("lost",   "longest without a drop to top"),
 ];
 
 /// Per-row symbol for the sort picker, one entry per `HELP_SORTS` row (same order).
 /// Reuses the exact glyph the 'c' column dialog shows for the matching stat, so a
 /// sort mode and its column read as the same thing across both dialogs.
 const SORT_SYMBOLS_ASCII: &[&str] = &[
-    " ", "a", "~", "x", "j", "w", "s", "0", "1", "p", "5", "9", "%", "t", "#", "u",
+    " ", "a", "~", "x", "j", "w", "s", "0", "1", "p", "5", "9", "%", "t", "u", "d",
 ];
 const SORT_SYMBOLS_UNICODE: &[&str] = &[
     " ", "a", "\u{2248}", "\u{2717}", "\u{03b4}", "\u{03a9}", "\u{00b1}",
-    "\u{2080}", "\u{2081}", "\u{00bd}", "\u{2085}", "\u{2089}", "%", "\u{03c4}", "#", "\u{2191}",
+    "\u{2080}", "\u{2081}", "\u{00bd}", "\u{2085}", "\u{2089}", "%", "\u{03c4}", "\u{2191}", "\u{2193}",
 ];
 
 /// Section layout for the sort picker: (display name, start index into HELP_SORTS, item count)
 pub const SORT_GROUPS: &[(&str, usize, usize)] = &[
     ("basic",  0, 2),   // none, name
     ("stats",  2, 5),   // avg, loss, jitter, mtr, std
-    ("detail", 7, 9),   // p01, p10, p50, p95, p99, cv, srtt, streak, last
+    ("detail", 7, 9),   // p01, p10, p50, p95, p99, cv, srtt, seen, lost
 ];
 
 pub const HELP_THEMES: &[&str] = &[
@@ -1468,8 +1468,8 @@ pub fn explain_content_lines(ascii: bool) -> Vec<Line<'static>> {
             ("9", "p99   ", "99th-percentile RTT"),
             ("%", "cv    ", "coefficient of variation (stddev/avg %)"),
             ("t", "srtt  ", "RFC 6298 smoothed RTT"),
-            ("#", "streak", "consecutive drop streak count"),
-            ("u", "last  ", "time since the last successful response"),
+            ("u", "seen  ", "time since the last successful reply"),
+            ("d", "lost  ", "time since the last drop (~ = none yet)"),
             ("i", "status", "probe count + elapsed, plus down/last-drop once notable"),
         ] {
             lines.push(Line::from(vec![raw("    "), span(sym, bld), raw("  "), raw(name), raw("  "), raw(desc)]));
@@ -1485,8 +1485,8 @@ pub fn explain_content_lines(ascii: bool) -> Vec<Line<'static>> {
             ("\u{2089}", "p99   ", "99th-percentile RTT"),
             ("%",        "cv    ", "coefficient of variation (stddev/avg %)"),
             ("\u{03c4}", "srtt  ", "RFC 6298 smoothed RTT"),
-            ("#",        "streak", "consecutive drop streak count"),
-            ("\u{2191}", "last  ", "time since the last successful response"),
+            ("\u{2191}", "seen  ", "time since the last successful reply"),
+            ("\u{2193}", "lost  ", "time since the last drop (~ = none yet)"),
             ("\u{2139}", "status", "probe count + elapsed, plus down/last-drop once notable"),
         ] {
             lines.push(Line::from(vec![raw("    "), span(sym, bld), raw("  "), raw(name), raw("  "), raw(desc)]));
@@ -2160,13 +2160,13 @@ pub fn draw_stat_column_toggle_dialog(
     let symbols: [&str; STAT_TOGGLE_COUNT] = if ascii {
         [" ", " ", ":", " ", " ",
          "~", "r", "j", "x",
-         "w", "s", "0", "1", "p", "5", "9", "%", "t", "#", "u",
+         "w", "s", "0", "1", "p", "5", "9", "%", "t", "u", "d",
          "o", "|",
          "i"]
     } else {
         [" ", " ", ":", " ", "\u{21bb}",
          "\u{2248}", "\u{21d5}", "\u{03b4}", "\u{2717}",
-         "\u{03a9}", "\u{00b1}", "\u{2080}", "\u{2081}", "\u{00bd}", "\u{2085}", "\u{2089}", "%", "\u{03c4}", "#", "\u{2191}",
+         "\u{03a9}", "\u{00b1}", "\u{2080}", "\u{2081}", "\u{00bd}", "\u{2085}", "\u{2089}", "%", "\u{03c4}", "\u{2191}", "\u{2193}",
          "\u{25cb}", "\u{258f}",
          "\u{2139}"]
     };
@@ -2200,8 +2200,8 @@ pub fn draw_stat_column_toggle_dialog(
         ("p99   ", "99th-percentile RTT",                   extra_stats.contains(&ExtraStat::P99)),
         ("cv    ", "coefficient of variation",              extra_stats.contains(&ExtraStat::Cv)),
         ("srtt  ", "smoothed RTT  (RFC 6298)",              extra_stats.contains(&ExtraStat::Srtt)),
-        ("streak", "consecutive drop streak",               extra_stats.contains(&ExtraStat::Streak)),
-        ("last  ", "time since last successful response",   extra_stats.contains(&ExtraStat::Last)),
+        ("seen  ", "time since last successful reply",      extra_stats.contains(&ExtraStat::Seen)),
+        ("lost  ", "time since last drop",                  extra_stats.contains(&ExtraStat::Lost)),
         ("recent", "per-probe sparkline on target row",     extra_stats.contains(&ExtraStat::Recent)),
         ("bar   ", "inline range bar on target row",        extra_stats.contains(&ExtraStat::Bar)),
         ("status", "probe count + elapsed, plus down/last-drop", extra_stats.contains(&ExtraStat::Status)),

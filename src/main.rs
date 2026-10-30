@@ -78,7 +78,8 @@ fn print_explain() {
     println!("    {}  p99     99th-percentile RTT",    bld("₉"));
     println!("    {}  cv      coefficient of variation (stddev/avg %)",    bld("%"));
     println!("    {}  srtt    RFC 6298 smoothed RTT",                      bld("τ"));
-    println!("    {}  streak  consecutive drop streak count",              bld("#"));
+    println!("    {}  seen    time since the last successful reply",       bld("↑"));
+    println!("    {}  lost    time since the last drop  (~ = none yet)",   bld("↓"));
     println!("  Identity columns - automatic by default, force with {} / hide via {}:", bld("--columns"), bld("none"));
     println!("    {}     probe-type badge  (auto: shown when targets have mixed modes)", bld("mode"));
     println!("    {}     custom label or hostname  (auto: shown when one exists)",       bld("name"));

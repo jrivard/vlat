@@ -487,8 +487,6 @@ pub enum SortMode {
     Std,
     /// Smoothest jitter to top
     Jitter,
-    /// No current drop streak first; longest streak to bottom
-    Streak,
     /// Lowest median (p50) RTT to top
     P50,
     /// Lowest 95th-percentile RTT to top
@@ -504,7 +502,9 @@ pub enum SortMode {
     /// Lowest smoothed RTT (RFC 6298 SRTT) to top
     Srtt,
     /// Most recently responded (host up) to top
-    Last,
+    Seen,
+    /// Longest without a drop to top; most recent drop to bottom
+    Lost,
 }
 
 impl SortMode {
@@ -517,7 +517,6 @@ impl SortMode {
             SortMode::Loss   => "loss",
             SortMode::Std    => "std",
             SortMode::Jitter => "jitter",
-            SortMode::Streak => "streak",
             SortMode::P50    => "p50",
             SortMode::P95    => "p95",
             SortMode::P99    => "p99",
@@ -525,7 +524,8 @@ impl SortMode {
             SortMode::P10    => "p10",
             SortMode::Cv     => "cv",
             SortMode::Srtt   => "srtt",
-            SortMode::Last   => "last",
+            SortMode::Seen   => "seen",
+            SortMode::Lost   => "lost",
         }
     }
 }
@@ -671,7 +671,7 @@ pub struct Args {
 
     /// Columns and visual elements to display. Default set includes the recent sparkline
     /// and range bar; numeric extras are off by default. Stat values: mtr std p01 p10
-    /// p50 p95 p99 cv srtt streak last recent bar status.
+    /// p50 p95 p99 cv srtt seen lost recent bar status.
     /// Identity values (auto-shown unless overridden): mode name port addr resolve.
     /// Pseudo-values: all (all columns), none (reset to empty), default (default set).
     /// 'none' may be combined: --columns none,mtr shows only mtr; 'all' is exclusive.
@@ -1021,10 +1021,10 @@ pub enum ExtraStat {
     Cv,
     /// RFC 6298 smoothed RTT  (τ / t)
     Srtt,
-    /// Current consecutive-drop streak  (# / #)
-    Streak,
-    /// Time since the last successful response, e.g. "5m" (↑ / u)
-    Last,
+    /// Time since the last successful reply, e.g. "5m"  (↑ / u)
+    Seen,
+    /// Time since the last drop, e.g. "3h"; "~" if none yet  (↓ / d)
+    Lost,
     /// Show the per-probe sparkline on every target row (on by default)
     Recent,
     /// Show the inline range bar on every target row (on by default)
@@ -1039,12 +1039,12 @@ pub enum ExtraStat {
 /// Canonical display order of the stat columns used by 'all' and the 'x' dialog.
 /// Identity columns (mode/name/port/addr/resolve) are handled via ColumnVis, not this list.
 /// `Status` is appended last (rather than grouped with the other time-based stats
-/// next to `Last`) so its bit/index position never shifts the ones already assigned
+/// next to `Seen`/`Lost`) so its bit/index position never shifts the ones already assigned
 /// to `Recent`/`Bar` in the toggle dialog and the space_hidden/no_data bitmasks.
 pub const EXTRA_STAT_ALL: &[ExtraStat] = &[
     ExtraStat::Mtr, ExtraStat::Std,
     ExtraStat::P01, ExtraStat::P10, ExtraStat::P50, ExtraStat::P95, ExtraStat::P99,
-    ExtraStat::Cv, ExtraStat::Srtt, ExtraStat::Streak, ExtraStat::Last,
+    ExtraStat::Cv, ExtraStat::Srtt, ExtraStat::Seen, ExtraStat::Lost,
     ExtraStat::Recent, ExtraStat::Bar,
     ExtraStat::Status,
 ];

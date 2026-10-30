@@ -117,8 +117,8 @@ fn sort_idx(mode: &SortMode) -> usize {
         SortMode::P99    => 11,
         SortMode::Cv     => 12,
         SortMode::Srtt   => 13,
-        SortMode::Streak => 14,
-        SortMode::Last   => 15,
+        SortMode::Seen   => 14,
+        SortMode::Lost   => 15,
     }
 }
 
@@ -138,8 +138,8 @@ fn sort_mode_at_idx(idx: usize) -> SortMode {
         11 => SortMode::P99,
         12 => SortMode::Cv,
         13 => SortMode::Srtt,
-        14 => SortMode::Streak,
-        _  => SortMode::Last,
+        14 => SortMode::Seen,
+        _  => SortMode::Lost,
     }
 }
 
@@ -360,8 +360,8 @@ fn extra_stat_cli_name(stat: &crate::cli::ExtraStat) -> &'static str {
         ExtraStat::P01    => "p01",    ExtraStat::P10  => "p10",
         ExtraStat::P50    => "p50",    ExtraStat::P95  => "p95",
         ExtraStat::P99    => "p99",    ExtraStat::Cv   => "cv",
-        ExtraStat::Srtt   => "srtt",   ExtraStat::Streak => "streak",
-        ExtraStat::Last   => "last",
+        ExtraStat::Srtt   => "srtt",   ExtraStat::Seen => "seen",
+        ExtraStat::Lost   => "lost",
         ExtraStat::Recent => "recent", ExtraStat::Bar  => "bar",
         ExtraStat::Status => "status",
         _ => "?",
@@ -2857,18 +2857,6 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                             }
                         }
                     }
-                    macro_rules! bubble_swap_u32 {
-                        ($i:expr, $ka:expr, $kb:expr) => {
-                            let should_swap = if rev { $ka < $kb } else { $ka > $kb };
-                            if should_swap {
-                                let b_slot = sort_order[$i + 1];
-                                let a_slot = sort_order[$i];
-                                sort_order.swap($i, $i + 1);
-                                sort_arrows[b_slot] = Some((now, true));
-                                sort_arrows[a_slot] = Some((now, false));
-                            }
-                        }
-                    }
                     match sort_mode {
                         SortMode::Mtr => {
                             // Bubble-sort pass: one position per interval, fastest RTT to top.
@@ -2994,22 +2982,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                                 bubble_swap_f64!(i, ka, kb);
                             }
                         }
-                        SortMode::Streak => {
-                            // Bubble-sort pass: no current drop streak first; longest streak to bottom.
-                            let n = sort_order.len();
-                            let win_sort_key = |slot: usize| -> u32 {
-                                states[slot].cur_drop_streak
-                            };
-                            for i in 0..n.saturating_sub(1) {
-                                let a = sort_order[i];
-                                let b = sort_order[i + 1];
-                                if states[a].waiting || states[b].waiting { continue; }
-                                let ka = win_sort_key(a);
-                                let kb = win_sort_key(b);
-                                bubble_swap_u32!(i, ka, kb);
-                            }
-                        }
-                        SortMode::Last => {
+                        SortMode::Seen => {
                             // Bubble-sort pass: most recently responded (host up) to top;
                             // never-up targets sink to the bottom.
                             let n = sort_order.len();
@@ -3017,6 +2990,24 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                                 states[slot].last_up
                                     .map(|t| now.saturating_duration_since(t).as_secs_f64())
                                     .unwrap_or(f64::MAX)
+                            };
+                            for i in 0..n.saturating_sub(1) {
+                                let a = sort_order[i];
+                                let b = sort_order[i + 1];
+                                if states[a].waiting || states[b].waiting { continue; }
+                                let ka = win_sort_key(a);
+                                let kb = win_sort_key(b);
+                                bubble_swap_f64!(i, ka, kb);
+                            }
+                        }
+                        SortMode::Lost => {
+                            // Bubble-sort pass: never dropped first, then longest since the
+                            // last drop; most recent drop (or currently down) to bottom.
+                            let n = sort_order.len();
+                            let win_sort_key = |slot: usize| -> f64 {
+                                states[slot].last_drop_at
+                                    .map(|t| -now.saturating_duration_since(t).as_secs_f64())
+                                    .unwrap_or(f64::NEG_INFINITY)
                             };
                             for i in 0..n.saturating_sub(1) {
                                 let a = sort_order[i];
@@ -3849,7 +3840,6 @@ fn print_summary(states: &[TargetState], mode_labels: &[String], exec_cmds: &[St
     let show_p99     = has_extra(&ExtraStat::P99);
     let show_cv      = has_extra(&ExtraStat::Cv);
     let show_srtt    = has_extra(&ExtraStat::Srtt);
-    let show_streak  = has_extra(&ExtraStat::Streak);
     let show_changes = any_changes;
     // ExtraStat::Bar and ExtraStat::Recent (the live view's inline range bar
     // and per-probe sparkline) and the live "up" status badge are widgets,
@@ -3907,7 +3897,6 @@ fn print_summary(states: &[TargetState], mode_labels: &[String], exec_cmds: &[St
                 else if cv < 100.0 { format!("{:.1}%", cv) } else { format!("{:.0}%", cv) }
             }
             "srtt"   => if s.srtt > 0.0 { format!("{:.1}ms", s.srtt) } else { "—".to_string() },
-            "streak" => if s.max_drop_streak > 0 { fmt_thousands(s.max_drop_streak as u64) } else { "—".to_string() },
             _ => String::new(),
         }
     };
@@ -4006,7 +3995,7 @@ fn print_summary(states: &[TargetState], mode_labels: &[String], exec_cmds: &[St
     for (name, on) in [
         ("stddev", show_std), ("mtr", show_mtr), ("p01", show_p01), ("p10", show_p10),
         ("p50", show_p50), ("p95", show_p95), ("p99", show_p99), ("cv%", show_cv),
-        ("srtt", show_srtt), ("streak", show_streak),
+        ("srtt", show_srtt),
     ] {
         if !on { continue; }
         let vals: Vec<String> = all.iter().map(|(s, _, _, _)| fmt_ext_val(name, s)).collect();

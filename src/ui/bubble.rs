@@ -289,7 +289,6 @@ pub fn bubble_metric(state: &TargetState, sort: &SortMode) -> f64 {
         SortMode::Loss   => state.win_loss_pct(),
         SortMode::Std    => state.win_stddev(),
         SortMode::Jitter => state.win_jitter_avg(),
-        SortMode::Streak => state.cur_drop_streak as f64,
         SortMode::P50    => state.win_median(),
         SortMode::P95    => state.win_p95(),
         SortMode::P99    => state.win_p99(),
@@ -298,8 +297,12 @@ pub fn bubble_metric(state: &TargetState, sort: &SortMode) -> f64 {
         SortMode::Cv     => state.win_cv(),
         SortMode::Srtt   => state.srtt,
         SortMode::Mtr    => state.win_mtr().unwrap_or_else(|| state.win_avg()),
-        SortMode::Last   => state.last_up
+        SortMode::Seen   => state.last_up
             .map(|t| crate::time::Instant::now().saturating_duration_since(t).as_secs_f64())
+            .unwrap_or(0.0),
+        // Bigger the more recent the last drop; never dropped = smallest.
+        SortMode::Lost   => state.last_drop_at
+            .map(|t| 1.0 / (1.0 + crate::time::Instant::now().saturating_duration_since(t).as_secs_f64()))
             .unwrap_or(0.0),
     }
 }

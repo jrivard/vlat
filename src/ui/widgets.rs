@@ -27,7 +27,7 @@ use crate::cli::{Args, BaseStat, ExtraStat};
 use crate::constants::{BAR_ANIM_SECS, GRAPH_ANIM_SECS, TIER_FAST_PCT, TIER_HIGH_PCT};
 use crate::state::{GraphColCache, MtrTrend, SparklineColCache, TargetState};
 use crate::types::Sample;
-use super::{ColWidths, RttColWidth, fmt_count, fmt_cv, fmt_last_up, fmt_rtt, fmt_rtt_nodec, probe_status_text, Theme};
+use super::{ColWidths, RttColWidth, fmt_count, fmt_cv, fmt_since, fmt_rtt, fmt_rtt_nodec, probe_status_text, Theme};
 
 pub fn trend_spark_span(trend: MtrTrend, ascii: bool, theme: &Theme) -> Span<'static> {
     let (ch, style) = if ascii {
@@ -613,8 +613,8 @@ pub fn build_stats_keys_line(
             ExtraStat::P99    => if let Some(ref col) = cw.p99    { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "p99",    w = 1 + col.active_w()), dim)); }
             ExtraStat::Cv     => if let Some(cv_w)   = cw.cv      { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "cv",     w = 1 + cv_w),           dim)); }
             ExtraStat::Srtt   => if let Some(ref col) = cw.srtt   { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "srtt",   w = 1 + col.active_w()), dim)); }
-            ExtraStat::Streak => if let Some(stk_w)  = cw.streak  { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "streak", w = 1 + stk_w),          dim)); }
-            ExtraStat::Last   => if let Some(last_w) = cw.last    { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "last",   w = 1 + last_w),         dim)); }
+            ExtraStat::Seen   => if let Some(seen_w) = cw.seen    { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "seen",   w = 1 + seen_w),         dim)); }
+            ExtraStat::Lost   => if let Some(lost_w) = cw.lost    { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "lost",   w = 1 + lost_w),         dim)); }
             ExtraStat::Status => if let Some(status_w) = cw.status { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "status", w = 1 + status_w),      dim)); }
             _ => {}
         }
@@ -745,8 +745,8 @@ pub fn build_stats_line<'a>(
                 ExtraStat::P99    => if let Some(ref col) = cw.p99    { spans.push(Span::raw(sp.clone())); spans.push(Span::styled(sym("9", "\u{2089}", "p99"), dim)); push_mtr_placeholder(&mut spans, d, dim, col); }
                 ExtraStat::Cv     => if let Some(cv_w) = cw.cv        { spans.push(Span::raw(sp.clone())); spans.push(Span::styled(sym("%", "%", "cv"), dim)); spans.push(Span::styled(format!("{:>w$}", d, w = cv_w), dim)); }
                 ExtraStat::Srtt   => if let Some(ref col) = cw.srtt   { spans.push(Span::raw(sp.clone())); spans.push(Span::styled(sym("t", "\u{03c4}", "srtt"), dim)); push_mtr_placeholder(&mut spans, d, dim, col); }
-                ExtraStat::Streak => if let Some(stk_w) = cw.streak   { spans.push(Span::raw(sp.clone())); spans.push(Span::styled(sym("#", "#", "streak"), dim)); spans.push(Span::styled(format!("{:>w$}", d, w = stk_w), dim)); }
-                ExtraStat::Last   => if let Some(last_w) = cw.last    { spans.push(Span::raw(sp.clone())); if verbose_labels { spans.push(Span::styled("last ", dim)); } spans.push(Span::styled(format!("{:>w$}", d, w = last_w), dim)); }
+                ExtraStat::Seen   => if let Some(seen_w) = cw.seen    { spans.push(Span::raw(sp.clone())); spans.push(Span::styled(sym("u", "\u{2191}", "seen"), dim)); spans.push(Span::styled(format!("{:>w$}", d, w = seen_w), dim)); }
+                ExtraStat::Lost   => if let Some(lost_w) = cw.lost    { spans.push(Span::raw(sp.clone())); spans.push(Span::styled(sym("d", "\u{2193}", "lost"), dim)); spans.push(Span::styled(format!("{:>w$}", d, w = lost_w), dim)); }
                 ExtraStat::Status => if let Some(status_w) = cw.status { spans.push(Span::raw(sp.clone())); if verbose_labels { spans.push(Span::styled("status ", dim)); } spans.push(Span::styled(format!("{:<w$}", d, w = status_w), dim)); }
                 _ => {}
             }
@@ -898,21 +898,20 @@ pub fn build_stats_line<'a>(
                 if s.srtt > 0.0 { push_rtt_val(&mut spans, s.srtt, col, bright, mid); }
                 else            { push_mtr_placeholder(&mut spans, d, dim, col); }
             }
-            ExtraStat::Streak => if let Some(stk_w) = cw.streak {
-                let count = s.cur_drop_streak;
-                let stk_style = if count > 0 { Style::default().fg(theme.drop_color).add_modifier(Modifier::BOLD) } else { bright };
-                spans.push(Span::styled(sym("#", "#", "streak"), dim));
-                spans.push(Span::styled(format!("{:>w$}", fmt_count(count as u64), w = stk_w), stk_style));
-            }
-            ExtraStat::Last => if let Some(last_w) = cw.last {
-                // No compact glyph (the value is self-explanatory, e.g. "12m") - only
-                // the single-target verbose view gets a "last " word label.
-                if verbose_labels { spans.push(Span::styled("last ", dim)); }
-                if let Some(t) = s.last_up {
-                    let val = fmt_last_up(Some(t), Instant::now());
-                    spans.push(Span::styled(format!("{:>w$}", val, w = last_w), bright));
+            ExtraStat::Seen | ExtraStat::Lost => {
+                // Time since the last reply (seen, ↑) or drop (lost, ↓). Both read in
+                // the drop colour while the target is down; "~" (never) is dimmed.
+                let (w_opt, at, glyph) = if *stat == ExtraStat::Seen {
+                    (cw.seen, s.last_up, sym("u", "\u{2191}", "seen"))
                 } else {
-                    spans.push(Span::styled(format!("{:>w$}", d, w = last_w), dim));
+                    (cw.lost, s.last_drop_at, sym("d", "\u{2193}", "lost"))
+                };
+                if let Some(w) = w_opt {
+                    let style = if at.is_none() { dim }
+                        else if s.cur_drop_streak > 0 { Style::default().fg(theme.drop_color).add_modifier(Modifier::BOLD) }
+                        else { bright };
+                    spans.push(Span::styled(glyph, dim));
+                    spans.push(Span::styled(format!("{:>w$}", fmt_since(at, Instant::now()), w = w), style));
                 }
             }
             ExtraStat::Status => if let Some(status_w) = cw.status {
