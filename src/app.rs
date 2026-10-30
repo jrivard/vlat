@@ -597,6 +597,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                 cancel:      per_cancel_rx,
                 start_delay: $start_delay,
                 dup_tracker: dup_tracker.clone(),
+                max_probes:  args.count,
             });
             task_id_to_state.insert(tid, slot);
             task_cancels.push((tid, per_cancel_tx));
@@ -638,6 +639,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                 tid, dt.profile, target_intervals[slot],
                 probe_tx.clone(), start_tx.clone(), per_cancel_rx,
                 Duration::from_millis(stagger_ms * slot as u64),
+                args.count,
             );
             task_id_to_state.insert(tid, slot);
             task_cancels.push((tid, per_cancel_tx));
@@ -843,6 +845,16 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
     // Tracks slots whose initial DNS resolution failed; cleared on first success.
     // These slots retry every 5 seconds instead of waiting the full resolve_interval.
     let mut never_resolved: Vec<bool> = vec![false; states.len()];
+    // --count is per target: done once every target has N results back (drops
+    // included). Targets whose initial DNS lookup failed never probe, so they
+    // count as done rather than holding the session open forever.
+    macro_rules! count_reached {
+        () => {
+            args.count.is_some_and(|n| {
+                states.iter().zip(&never_resolved).all(|(s, &nr)| nr || s.total_sent >= n)
+            })
+        };
+    }
     let mut resolve_check = time::interval(Duration::from_secs(1));
     resolve_check.tick().await; // consume initial immediate tick
 
@@ -2631,9 +2643,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                     }
                 }
 
-                if let Some(limit) = args.count {
-                    if states.iter().map(|s| s.total_sent).sum::<u64>() >= limit { break; }
-                }
+                if count_reached!() { break; }
             }
 
             // Initial async resolve result (multi-target startup)
@@ -2648,6 +2658,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                                 states[*slot].resolve_error = Some(msg.clone());
                                 never_resolved[*slot] = true;
                             }
+                            if count_reached!() { break; }
                         }
                         InitResolveResult::Ok { slots, ip, hostname, label } => {
                             // Apply the shared DNS result to every slot that requested it.

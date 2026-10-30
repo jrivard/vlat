@@ -228,13 +228,15 @@ pub struct ProbeTask {
     pub cancel:      watch::Receiver<bool>,
     pub start_delay: Duration,
     pub dup_tracker: Option<Arc<IcmpDupTracker>>,
+    /// Stop sending after this many probes (`--count`); in-flight probes still report.
+    pub max_probes:  Option<u64>,
 }
 
 pub fn spawn_probe_task(task: ProbeTask) {
     let ProbeTask {
         task_id, ip_shared, interval, timeout, mode, port,
         icmp4: icmp4_arc, icmp6: icmp6_arc, bind_ip, hostname, dns_query,
-        tls_config, http_path, exec_cmd, tx, start_tx, mut cancel, start_delay, dup_tracker,
+        tls_config, http_path, exec_cmd, tx, start_tx, mut cancel, start_delay, dup_tracker, max_probes,
     } = task;
     let mode_tag: u8 = match mode {
         PingMode::Icmp  => 0,
@@ -258,6 +260,7 @@ pub fn spawn_probe_task(task: ProbeTask) {
         ticker.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
         let mut seq: usize = 0;
         loop {
+            if max_probes.is_some_and(|n| seq as u64 >= n) { break; }
             tokio::select! {
                 _ = ticker.tick() => {}
                 _ = cancel.changed() => { break; }
@@ -404,6 +407,7 @@ pub fn spawn_demo_task(
     start_tx:    mpsc::UnboundedSender<ProbeStarted>,
     mut cancel:  watch::Receiver<bool>,
     start_delay: Duration,
+    max_probes:  Option<u64>,
 ) {
     tokio::spawn(async move {
         let mut rng            = crate::demo::Rng::seeded_with(task_id as u64);
@@ -414,6 +418,7 @@ pub fn spawn_demo_task(
         ticker.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
         let mut seq: usize = 0;
         loop {
+            if max_probes.is_some_and(|n| seq as u64 >= n) { break; }
             tokio::select! {
                 _ = ticker.tick() => {}
                 _ = cancel.changed() => { break; }
