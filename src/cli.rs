@@ -861,6 +861,14 @@ pub struct Args {
     #[arg(skip)]
     pub single: bool,
 
+    /// Internal: whether the single view shows the probe-status text on its header
+    /// line. Kept apart from `extra_stats` so it can default on in the single view
+    /// without adding a `status` column to the list view. Follows `--columns` when
+    /// that is passed explicitly; the column dialog's `status` row flips it while the
+    /// single view is active.
+    #[arg(skip = true)]
+    pub single_status: bool,
+
     #[arg(skip)]
     pub pong: bool,
 

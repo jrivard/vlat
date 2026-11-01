@@ -602,6 +602,10 @@ async fn main() {
         Ok((stats, vis)) => { args.extra_stats = stats; args.column_vis = vis; }
         Err(e) => { eprintln!("vlat: {}", e); process::exit(1); }
     }
+    // The single view shows its status text by default; an explicit --columns decides it.
+    if user_set_columns {
+        args.single_status = args.extra_stats.contains(&cli::ExtraStat::Status);
+    }
     // Saved runtime column state ('x' dialog) isn't CLI-expressible - apply it
     // after resolve_columns, unless the user passed --columns explicitly.
     let is_restart = restart_loaded.is_some();

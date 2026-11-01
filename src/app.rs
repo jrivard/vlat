@@ -2235,7 +2235,15 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                                     } else {
                                         let extra_idx = idx - IDENTITY_COUNT - BASE_STATS.len();
                                         let stat = crate::cli::EXTRA_STAT_ALL[extra_idx].clone();
-                                        if args.extra_stats.contains(&stat) {
+                                        // Mirrors the draw dispatch: draw_single_ui runs only when
+                                        // no fullscreen view is covering it.
+                                        let single_view_active = args.single && !args.fullscreen
+                                            && !fullscreen_all && fullscreen_target.is_none();
+                                        if stat == crate::cli::ExtraStat::Status && single_view_active {
+                                            // The single view keeps its own status flag (on by default)
+                                            // so this doesn't add a status column to the list view.
+                                            args.single_status = !args.single_status;
+                                        } else if args.extra_stats.contains(&stat) {
                                             args.extra_stats.retain(|s| s != &stat);
                                         } else {
                                             args.extra_stats.push(stat);

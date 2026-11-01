@@ -286,7 +286,16 @@ pub fn render_dialogs(
                                       args.ascii, &args.theme);
         }
         DialogMode::StatColumnToggle { cursor, identity } => {
-            draw_stat_column_toggle_dialog(f, area, *cursor, identity, &args.extra_stats, &args.hidden_base_stats, space_hidden, no_data,
+            // The single view's 'status' row reflects its own flag, not the list column.
+            let single_extra: Vec<ExtraStat>;
+            let extra_stats: &[ExtraStat] = if current_view == "single" {
+                single_extra = args.extra_stats.iter().filter(|s| **s != ExtraStat::Status).cloned()
+                    .chain(args.single_status.then_some(ExtraStat::Status)).collect();
+                &single_extra
+            } else {
+                &args.extra_stats
+            };
+            draw_stat_column_toggle_dialog(f, area, *cursor, identity, extra_stats, &args.hidden_base_stats, space_hidden, no_data,
                 super::dialogs::stat_toggles_not_in_view(current_view),
                 super::dialogs::columns_hidden_by_headers(current_view, show_headers),
                 args.ascii, &args.theme);
@@ -859,7 +868,6 @@ fn compute_single_layout(area: Rect, states: &[TargetState], args: &Args, col_wi
             StatItem::Extra(ExtraStat::Srtt)   => (5, effective_cw.srtt.as_ref().map_or(0, |c| c.active_w())),
             StatItem::Extra(ExtraStat::Seen)   => (5, effective_cw.seen.unwrap_or(0)),   // "seen "
             StatItem::Extra(ExtraStat::Lost)   => (5, effective_cw.lost.unwrap_or(0)),   // "lost "
-            StatItem::Extra(ExtraStat::Status) => (7, effective_cw.status.unwrap_or(0)), // "status "
             StatItem::Extra(_) => (0, 0),
         };
         if label_w == 0 && val_w == 0 { 0 } else { gap + label_w + val_w }
@@ -871,7 +879,8 @@ fn compute_single_layout(area: Rect, states: &[TargetState], args: &Args, col_wi
     if !hide(&BaseStat::Jitter) { stat_items.push(StatItem::Jitter); }
     if show_drp && !hide(&BaseStat::Drops) { stat_items.push(StatItem::Drops); }
     if show_dup { stat_items.push(StatItem::Dup); }
-    for stat in &effective_cw.stat_order {
+    // Status is drawn on the header line (see render), not as a stat-row item.
+    for stat in effective_cw.stat_order.iter().filter(|s| **s != ExtraStat::Status) {
         stat_items.push(StatItem::Extra(stat.clone()));
     }
     let mut stat_pages: Vec<Vec<StatItem>> = Vec::new();
@@ -994,8 +1003,10 @@ pub fn draw_single_ui(f: &mut Frame, states: &[TargetState], ctx: &ViewCtx) {
                 line.spans.push(Span::styled(frame_str, Style::default().fg(Color::Gray)));
             }
 
-            line.spans.push(Span::raw("  "));
-            line.spans.push(Span::raw(super::probe_status_text(state, Instant::now(), args.interval)));
+            if args.single_status {
+                line.spans.push(Span::raw("  "));
+                line.spans.push(Span::raw(super::probe_status_text(state, Instant::now(), args.interval)));
+            }
         }
 
         let w = horiz[1].width as usize;
@@ -1089,8 +1100,12 @@ pub fn draw_single_ui(f: &mut Frame, states: &[TargetState], ctx: &ViewCtx) {
         } else {
             line.spans.extend(build_status_badge_spans(state, tick, &args.theme, args.ascii));
         }
-        line.spans.push(Span::raw("  "));
-        line.spans.push(Span::raw(super::probe_status_text(state, Instant::now(), args.interval)));
+        // The column dialog's 'status' row controls this text in the single view (via
+        // args.single_status) - it lives here on the header line, not in the stat rows below.
+        if args.single_status {
+            line.spans.push(Span::raw("  "));
+            line.spans.push(Span::raw(super::probe_status_text(state, Instant::now(), args.interval)));
+        }
 
         let w = horiz[1].width as usize;
         f.render_widget(Paragraph::new(truncate_line(line, w)), horiz[1]);
@@ -1834,6 +1849,10 @@ mod single_view_layout_tests {
         let (stats, vis) = crate::cli::resolve_columns(&args.extra_stats).unwrap();
         args.extra_stats = stats;
         args.column_vis = vis;
+        // Mirrors main.rs: an explicit --columns decides the single view's status text.
+        if extra.contains(&"--columns") {
+            args.single_status = args.extra_stats.contains(&crate::cli::ExtraStat::Status);
+        }
 
         let states = vec![state];
         let col_widths = super::super::compute_col_widths(
@@ -2086,7 +2105,7 @@ mod single_view_layout_tests {
     }
 
     #[test]
-    fn status_column_is_opt_in_and_shares_the_status_line_text() {
+    fn status_text_is_on_by_default_and_follows_the_status_column() {
         let mut state = TargetState::new("127.0.0.1".to_string());
         state.current_ip = Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)));
         state.record_sent(0);
@@ -2094,16 +2113,19 @@ mod single_view_layout_tests {
         state.record_sent(1);
         state.record_result(1, Ok(13.0), 0, false);
 
-        // Disabled by default - "N probes," should appear exactly once, from the
-        // dedicated status line, not a second time from a `status` stats row.
+        // On by default in the single view (though `status` isn't a default list column),
+        // drawn once on the header line.
         let out_default = render_single_state(100, 20, &[], state.clone());
-        assert_eq!(out_default.matches("2 probes,").count(), 1, "status column must be off by default: {out_default:?}");
+        assert_eq!(out_default.matches("2 probes,").count(), 1, "status text should be on by default, once: {out_default:?}");
 
-        // Explicitly enabled ("default" composes in the base set + status): a
-        // second "N probes, <elapsed>" now also appears in the stats row.
-        let out_on = render_single_state(100, 20, &["--columns", "default,status"], state);
-        assert_eq!(out_on.matches("2 probes,").count(), 2, "enabling --columns status should add a second copy in the stats row: {out_on:?}");
-        assert!(out_on.contains("status"), "the stats-row word label should read \"status\": {out_on:?}");
+        // Enabling the column explicitly doesn't add a second copy in the stats rows.
+        let out_on = render_single_state(100, 20, &["--columns", "default,status"], state.clone());
+        assert_eq!(out_on.matches("2 probes,").count(), 1, "status text must not be duplicated into the stats rows: {out_on:?}");
+        assert!(!out_on.contains("status "), "no stats-row \"status\" label: {out_on:?}");
+
+        // An explicit --columns without status turns it off.
+        let out_off = render_single_state(100, 20, &["--columns", "default"], state);
+        assert!(!out_off.contains("probes,"), "--columns without status should hide the status text: {out_off:?}");
     }
 
     #[test]
