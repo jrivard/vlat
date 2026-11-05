@@ -1,0 +1,49 @@
+first probe in flight                          | waiting for reply
+several in flight                              | waiting for reply
+first probe timed out                          | unreachable
+never replied                                  | unreachable
+first reply                                    | ok · no loss · 1 sent over 0s
+healthy                                        | ok · no loss · 2 sent over 2m 15s
+healthy, long run                              | ok · no loss · 1k sent over 2d 5h
+one drop, unsettled, back up                   | recovering · 1 lost (50%), last failure just now
+one drop, settled                              | recovering · 1 lost (50%), last failure 30s ago
+two drops, last 45s ago (flaky)                | flaky · 2 lost (40%), last failure 45s ago
+two drops 10m apart (1 in window)              | recovering · 2 lost (40%), last failure 45s ago
+flaky, many drops                              | flaky · 5 lost (45%), last failure just now
+loss 2.5%                                      | recovering · 1 lost (2.5%), last failure 39s ago
+loss 0.5% (hidden)                             | recovering · 1 lost, last failure 3m 19s ago
+just went down (unsettled)                     | down · 1 lost (50%), last success just now
+down 30s                                       | down · 3 lost (75%), last success 30s ago
+down, mostly lost (98%)                        | down · 39 lost (98%), last success 39s ago
+down, 99.5% lost (pct hidden)                  | down · 199 lost, last success 3m 19s ago
+down again after recovering                    | down · 4 lost (67%), last success 20s ago
+slow poller, drop 40s ago (unsettled)          | recovering · 1 lost (50%), last failure just now
+slow poller, drop 90s ago                      | recovering · 1 lost (50%), last failure 1m 30s ago
+slow poller, drop 20m ago                      | ok now · 1 lost (50%), last failure 20m ago
+recovering, 4m 59s since failure               | recovering · 1 lost (50%), last failure 4m ago
+ok now, 5m since failure                       | ok now · 1 lost (50%), last failure 5m ago
+short --window 10s, drop 30s ago               | ok now · 1 lost (50%), last failure 30s ago
+ok now, 59m since failure                      | ok now · 1 lost (33%), last failure 59m ago
+all clear, 1h since failure                    | ok · no loss for 1h 0m
+all clear, days later                          | ok · no loss for 4d
+loss 4.9% (just under lossy)                   | flaky · 5 lost (4.9%), last failure just now
+loss 5.1% (lossy)                              | lossy · 5 lost (5.1%), last failure just now
+lossy, fallen to 4% (hysteresis holds)         | lossy · 6 lost (4.0%), last failure 47s ago
+lossy, fallen to 2.9% (released)               | flaky · 6 lost (2.9%), last failure 1m 44s ago
+struggling, 1 in 3 lost                        | struggling · 10 lost (33%), last failure just now
+one outage, recovered                          | recovering · 3 lost (23%), last failure 20s ago
+flapping, two outages                          | flapping · 6 lost (33%), last failure 20s ago
+slow (median over --warn-rtt 20ms)             | ok, slow · no loss · 20 sent over 20s
+degraded (3x its own baseline)                 | ok, degraded · no loss · 40 sent over 1m 0s
+jittery                                        | ok, jittery · no loss · 30 sent over 30s
+spiky                                          | ok, spiky · no loss · 100 sent over 1m 40s
+recovering, jittery                            | recovering, jittery · 1 lost (2.7%), last failure 12s ago
+lossy, worsening                               | lossy, worsening · 20 lost (6.7%), last failure just now
+lossy, improving                               | lossy, improving · 20 lost (6.7%), last failure 1m 40s ago
+lossy, steady (no trend word)                  | lossy · 20 lost (6.7%), last failure just now
+struggling, worsening                          | struggling, worsening · 78 lost (26%), last failure just now
+degraded, worsening                            | ok, degraded, worsening · no loss · 300 sent over 4m
+degraded, improving                            | ok, degraded, improving · no loss · 300 sent over 4m
+latency rising, but not degraded (no word)     | ok · no loss · 300 sent over 4m
+loss rising, but only recovering (no word)     | recovering · 1 lost, last failure just now
+flaky hides quality                            | flaky · 2 lost (2.4%), last failure 10s ago

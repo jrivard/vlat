@@ -2222,7 +2222,7 @@ pub fn draw_stat_column_toggle_dialog(
         ("lost  ", "time since last drop",                  extra_stats.contains(&ExtraStat::Lost)),
         ("recent", "per-probe sparkline on target row",     extra_stats.contains(&ExtraStat::Recent)),
         ("bar   ", "inline range bar on target row",        extra_stats.contains(&ExtraStat::Bar)),
-        ("status", "probe count + elapsed, plus down/last-drop", extra_stats.contains(&ExtraStat::Status)),
+        ("status", "verdict \u{00b7} sent count \u{00b7} elapsed", extra_stats.contains(&ExtraStat::Status)),
     ];
 
     let mut body: Vec<Line> = vec![

@@ -27,7 +27,7 @@ use crate::cli::{Args, BaseStat, ExtraStat};
 use crate::constants::{BAR_ANIM_SECS, GRAPH_ANIM_SECS, TIER_FAST_PCT, TIER_HIGH_PCT};
 use crate::state::{GraphColCache, MtrTrend, SparklineColCache, TargetState};
 use crate::types::Sample;
-use super::{ColWidths, RttColWidth, fmt_count, fmt_cv, fmt_since, fmt_rtt, fmt_rtt_nodec, probe_status_text, Theme};
+use super::{ColWidths, RttColWidth, fmt_count, fmt_cv, fmt_since, fmt_rtt, fmt_rtt_nodec, probe_status_spans, Theme};
 
 pub fn trend_spark_span(trend: MtrTrend, ascii: bool, theme: &Theme) -> Span<'static> {
     let (ch, style) = if ascii {
@@ -915,12 +915,14 @@ pub fn build_stats_line<'a>(
                 }
             }
             ExtraStat::Status => if let Some(status_w) = cw.status {
-                // No compact glyph (self-explanatory text, e.g. "31 probes, 30s") -
+                // No compact glyph (self-explanatory text, e.g. "ok · no loss · 31 sent over 30s") -
                 // only the single-target verbose view gets a word label. Left-aligned,
                 // unlike the numeric columns, since it's free text.
                 if verbose_labels { spans.push(Span::styled("status ", dim)); }
-                let text = probe_status_text(s, Instant::now(), interval_ms);
-                spans.push(Span::styled(format!("{:<w$}", text, w = status_w), bright));
+                let parts = probe_status_spans(s, Instant::now(), interval_ms, ascii, theme, bright);
+                let text_w: usize = parts.iter().map(|p| p.content.chars().count()).sum();
+                spans.extend(parts);
+                if text_w < status_w { spans.push(Span::raw(" ".repeat(status_w - text_w))); }
             }
             _ => { spans.pop(); } // remove the gap we pushed for unrecognised/pseudo variants
         }

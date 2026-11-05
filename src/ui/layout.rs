@@ -1005,7 +1005,7 @@ pub fn draw_single_ui(f: &mut Frame, states: &[TargetState], ctx: &ViewCtx) {
 
             if args.single_status {
                 line.spans.push(Span::raw("  "));
-                line.spans.push(Span::raw(super::probe_status_text(state, Instant::now(), args.interval)));
+                line.spans.extend(super::probe_status_spans(state, Instant::now(), args.interval, args.ascii, &args.theme, Style::default()));
             }
         }
 
@@ -1104,7 +1104,7 @@ pub fn draw_single_ui(f: &mut Frame, states: &[TargetState], ctx: &ViewCtx) {
         // args.single_status) - it lives here on the header line, not in the stat rows below.
         if args.single_status {
             line.spans.push(Span::raw("  "));
-            line.spans.push(Span::raw(super::probe_status_text(state, Instant::now(), args.interval)));
+            line.spans.extend(super::probe_status_spans(state, Instant::now(), args.interval, args.ascii, &args.theme, Style::default()));
         }
 
         let w = horiz[1].width as usize;
@@ -1912,7 +1912,7 @@ mod single_view_layout_tests {
         let out = render_single_state(100, 20, &[], state);
         let non_blank: Vec<&str> = out.lines().filter(|l| !l.trim().is_empty()).collect();
         assert_eq!(non_blank.len(), 1, "only one line should render while waiting for the first reply: {non_blank:?}");
-        assert!(non_blank[0].contains("3 probes"), "should show the in-flight probe count: {:?}", non_blank[0]);
+        assert!(non_blank[0].contains("waiting for reply"), "should say it's waiting for the first reply: {:?}", non_blank[0]);
         assert!(!non_blank[0].contains("DOWN"), "should not claim DOWN before any probe has timed out: {:?}", non_blank[0]);
     }
 
@@ -1927,7 +1927,7 @@ mod single_view_layout_tests {
         let non_blank: Vec<&str> = out.lines().filter(|l| !l.trim().is_empty()).collect();
         assert_eq!(non_blank.len(), 1, "still just one compact line once down, not the full row layout: {non_blank:?}");
         assert!(non_blank[0].contains("DOWN"), "should show DOWN once a probe has timed out with no reply ever: {:?}", non_blank[0]);
-        assert!(non_blank[0].contains("no reply, 1 probe, "), "should read as \"no reply, N probes, <elapsed>\": {:?}", non_blank[0]);
+        assert!(non_blank[0].trim_end().ends_with("unreachable"), "should read as just \"unreachable\": {:?}", non_blank[0]);
     }
 
     #[test]
@@ -1988,7 +1988,7 @@ mod single_view_layout_tests {
 
         let extra = ["--history-rows", "10"];
         let (width, height) = (100u16, 20u16);
-        let status_row = |out: &str| out.lines().position(|l| l.contains(" probe")).expect("status line present");
+        let status_row = |out: &str| out.lines().position(|l| l.contains("no loss")).expect("status line present");
 
         let out = render_single_state(width, height, &extra, state.clone());
         let first_row = status_row(&out);
@@ -2030,7 +2030,7 @@ mod single_view_layout_tests {
     #[test]
     fn no_return_line_reads_no_response_once_down() {
         // Never had a successful reply, so there's no "last seen" reference point -
-        // the text should read "no reply, N probes, <elapsed>" instead.
+        // the text should read "no replies \u{00b7} N sent over <elapsed>" instead.
         let mut state = TargetState::new("127.0.0.1".to_string());
         state.current_ip = Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)));
         state.record_sent(0);
@@ -2039,7 +2039,7 @@ mod single_view_layout_tests {
         let out = render_single_state(100, 20, &[], state);
         let non_blank: Vec<&str> = out.lines().filter(|l| !l.trim().is_empty()).collect();
         assert_eq!(non_blank.len(), 1);
-        assert!(non_blank[0].contains("no reply, 1 probe, "), "should read \"no reply, N probes, <elapsed>\": {:?}", non_blank[0]);
+        assert!(non_blank[0].trim_end().ends_with("unreachable"), "should read just \"unreachable\": {:?}", non_blank[0]);
         assert!(!non_blank[0].contains("last seen"), "never having been up, must not say \"last seen\": {:?}", non_blank[0]);
     }
 
@@ -2059,7 +2059,7 @@ mod single_view_layout_tests {
         state.last_up = state.last_up.map(|t| t - Duration::from_secs(30));
 
         let out = render_single_state(100, 20, &[], state);
-        assert!(out.contains("down 30s"), "should append a \"down <elapsed>\" note once down long enough: {out:?}");
+        assert!(out.contains("last success 30s ago"), "should say when it last replied once down long enough: {out:?}");
         assert!(!out.contains("last seen") && !out.contains("last down"), "{out:?}");
     }
 
@@ -2073,7 +2073,9 @@ mod single_view_layout_tests {
         state.record_result(1, Err(()), 0, false); // just went down
 
         let out = render_single_state(100, 20, &[], state);
-        assert!(!out.contains("down "), "a drop that just happened shouldn't get a \"down\" callout yet: {out:?}");
+        // The verdict agrees with the badge at once; only its duration waits to settle.
+        assert!(out.contains("down \u{00b7} "), "a fresh outage reads as a bare \"down\": {out:?}");
+        assert!(out.contains("last success just now"), "a drop that just happened shouldn't get an age yet: {out:?}");
     }
 
     #[test]
@@ -2086,7 +2088,7 @@ mod single_view_layout_tests {
         state.record_result(1, Err(()), 0, false); // now down
 
         let out = render_single_state(100, 20, &[], state);
-        let status_line = out.lines().find(|l| l.contains("2 probes,")).expect("status line present");
+        let status_line = out.lines().find(|l| l.contains("last success")).expect("status line present");
         assert!(status_line.contains("DOWN"), "should show the \"DOWN\" word, matching the pre-first-reply line: {status_line:?}");
         assert!(!status_line.contains('\u{2717}'), "should not also show the compact \u{2717}\u{2717} badge: {status_line:?}");
     }
@@ -2116,16 +2118,16 @@ mod single_view_layout_tests {
         // On by default in the single view (though `status` isn't a default list column),
         // drawn once on the header line.
         let out_default = render_single_state(100, 20, &[], state.clone());
-        assert_eq!(out_default.matches("2 probes,").count(), 1, "status text should be on by default, once: {out_default:?}");
+        assert_eq!(out_default.matches("2 sent over").count(), 1, "status text should be on by default, once: {out_default:?}");
 
         // Enabling the column explicitly doesn't add a second copy in the stats rows.
         let out_on = render_single_state(100, 20, &["--columns", "default,status"], state.clone());
-        assert_eq!(out_on.matches("2 probes,").count(), 1, "status text must not be duplicated into the stats rows: {out_on:?}");
+        assert_eq!(out_on.matches("2 sent over").count(), 1, "status text must not be duplicated into the stats rows: {out_on:?}");
         assert!(!out_on.contains("status "), "no stats-row \"status\" label: {out_on:?}");
 
         // An explicit --columns without status turns it off.
         let out_off = render_single_state(100, 20, &["--columns", "default"], state);
-        assert!(!out_off.contains("probes,"), "--columns without status should hide the status text: {out_off:?}");
+        assert!(!out_off.contains("no loss"), "--columns without status should hide the status text: {out_off:?}");
     }
 
     #[test]
@@ -2151,7 +2153,7 @@ mod single_view_layout_tests {
         assert!(!status.contains("avg"), "third-to-last line should be the combined name/status line: {:?}", status);
         assert!(stats.contains("avg"), "second-to-last line should be the stats line: {:?}", stats);
         assert!(!bar.contains("avg"), "last line should be the recent-trend bar: {:?}", bar);
-        assert!(status.contains("probe"), "name/status line should be the probe-summary line: {:?}", status);
+        assert!(status.contains("no loss"), "name/status line should be the probe-summary line: {:?}", status);
         assert!(status.contains("tcp"), "name/status line should also carry the name/address header (mode badge here): {:?}", status);
         let lead = |s: &str| s.chars().take_while(|c| *c == ' ').count();
         assert_eq!(lead(bar), 2, "recent bar indent: {:?}", bar);
@@ -2168,13 +2170,14 @@ mod single_view_layout_tests {
         // `--columns all` there are far more labels than fit on one 60-wide row, so
         // they must be spread across several rows rather than truncated onto one.
         let labels = ["avg ", "range ", "jitter ", "loss ", "mtr ", "std ", "p01 ", "p10 ", "p50 ", "p95 ", "p99 ", "cv ", "srtt ", "seen ", "lost "];
-        let is_stats_row = |l: &&str| labels.iter().any(|lbl| l.contains(lbl));
+        // The header's status text ("ok · no loss · …", "N lost") isn't a stats row.
+        let is_stats_row = |l: &&str| !l.contains(" sent over ") && labels.iter().any(|lbl| l.contains(lbl));
         let stats_lines: Vec<&str> = lines.iter().copied().filter(is_stats_row).collect();
         assert!(stats_lines.len() >= 2, "expected the enabled columns to wrap onto 2+ rows: {:?}", lines);
 
         // Every enabled stat must actually appear exactly once - none silently dropped.
         for lbl in labels {
-            let count = lines.iter().filter(|l| l.contains(lbl)).count();
+            let count = stats_lines.iter().filter(|l| l.contains(lbl)).count();
             assert_eq!(count, 1, "label {:?} should appear exactly once across the wrapped rows: {:?}", lbl, lines);
         }
 

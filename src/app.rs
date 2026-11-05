@@ -2663,6 +2663,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                 if !was_drop { session_packets_received += 1; }
                 session_bytes_sent     += msg.bytes_sent;
                 session_bytes_received += msg.bytes_received;
+                states[slot].warn_rtt = args.warn_rtt; // for the `slow` status grade
                 states[slot].record_result(msg.seq, msg.outcome, args.window, msg.dup);
                 // First result: start the calibration window so the graph draws at a
                 // stable scale instead of cascading through early scale animations.
@@ -3240,7 +3241,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
             // A colorful "vlat:" wordmark, then a brief plain-English final summary -
             // not the live status line's text, which is meaningless once the run has
             // actually ended (a newcomer wants sent/received/loss/time/latency, not
-            // "3 probes, 12s"). This is the last thing printed before the shell
+            // "ok · no loss · 3 sent over 12s"). This is the last thing printed before the shell
             // prompt returns.
             for (i, ch) in "vlat:".chars().enumerate() {
                 let (r, g, b) = args.theme.target_color(i);

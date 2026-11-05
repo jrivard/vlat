@@ -48,6 +48,58 @@ pub const SESSION_SAVE_SECS: u64      = 60;      // periodic session-save interv
 // explicit --summary-json-interval is given.
 pub const SUMMARY_JSON_DEFAULT_SECS: u64 = 5;
 
+// Status text: how long without a failure before a target that has had losses
+// reads plain "ok · no loss for T" again, instead of "ok now · N lost, ...".
+pub const STATUS_ALL_CLEAR_SECS: u64 = 3_600;
+
+// Status grading (state.rs `StatusGrade`, worded in ui/status_text.rs). Each
+// grade has an ENTER threshold and a lower STAY threshold (hysteresis), so a
+// value hovering near a boundary doesn't flip the word back and forth.
+//
+// Loss grades use window loss %, once the window holds enough resolved probes.
+pub const GRADE_LOSS_MIN_SAMPLES: usize = 20;
+pub const GRADE_LOSSY_ENTER_PCT: f64      = 5.0;
+pub const GRADE_LOSSY_STAY_PCT: f64       = 3.0;
+pub const GRADE_STRUGGLING_ENTER_PCT: f64 = 25.0;
+pub const GRADE_STRUGGLING_STAY_PCT: f64  = 20.0;
+// An outage is this many consecutive drops; 2+ outages in the window = flapping.
+pub const GRADE_OUTAGE_MIN_DROPS: u32     = 2;
+pub const GRADE_FLAPPING_OUTAGES: usize   = 2;
+// Quality grades use (at most) the most recent replies in the window.
+pub const GRADE_QUALITY_MIN_SAMPLES: usize = 10;
+pub const GRADE_QUALITY_MAX_SAMPLES: usize = 600;
+// slow: window median vs --warn-rtt (enter at it, stay above this fraction of it).
+pub const GRADE_SLOW_STAY_FRAC: f64       = 0.9;
+// degraded: window median vs the target's own slow-moving baseline, both as a
+// ratio and an absolute gap (so 0.3ms -> 0.7ms on a LAN isn't "degraded").
+pub const GRADE_BASELINE_TAU_SECS: f64    = 3_600.0;
+pub const GRADE_DEGRADED_ENTER_RATIO: f64 = 2.0;
+pub const GRADE_DEGRADED_STAY_RATIO: f64  = 1.5;
+pub const GRADE_DEGRADED_ENTER_MS: f64    = 5.0;
+pub const GRADE_DEGRADED_STAY_MS: f64     = 3.0;
+// jittery: median probe-to-probe jitter vs median RTT.
+pub const GRADE_JITTERY_ENTER_RATIO: f64  = 0.5;
+pub const GRADE_JITTERY_STAY_RATIO: f64   = 0.35;
+pub const GRADE_JITTERY_ENTER_MS: f64     = 2.0;
+pub const GRADE_JITTERY_STAY_MS: f64      = 1.5;
+// spiky: p99 vs median RTT - mostly fine, with occasional big outliers.
+pub const GRADE_SPIKY_ENTER_RATIO: f64    = 4.0;
+pub const GRADE_SPIKY_STAY_RATIO: f64     = 3.0;
+pub const GRADE_SPIKY_ENTER_MS: f64       = 20.0;
+pub const GRADE_SPIKY_STAY_MS: f64        = 15.0;
+// Trends (improving / worsening): the last RECENT_SECS of the stats window vs
+// the rest of it, each side needing MIN_SAMPLES resolved probes. Only clear
+// changes count (both a ratio and an absolute gap), with hysteresis.
+pub const GRADE_TREND_RECENT_SECS: f64     = 60.0;
+pub const GRADE_TREND_MIN_SAMPLES: usize   = 10;
+pub const GRADE_LOSS_TREND_ENTER_PP: f64   = 5.0;  // percentage points
+pub const GRADE_LOSS_TREND_STAY_PP: f64    = 2.0;
+pub const GRADE_LOSS_TREND_ENTER_RATIO: f64 = 1.5;
+pub const GRADE_LATENCY_TREND_ENTER_RATIO: f64 = 1.25; // of the median
+pub const GRADE_LATENCY_TREND_STAY_RATIO: f64  = 1.1;
+pub const GRADE_LATENCY_TREND_ENTER_MS: f64    = 5.0;
+pub const GRADE_LATENCY_TREND_STAY_MS: f64     = 3.0;
+
 // Window / graph-width limits
 pub const WINDOW_MIN_SECS: u64        = 10;
 pub const WINDOW_MAX_SECS: u64        = 86_400; // 24 h

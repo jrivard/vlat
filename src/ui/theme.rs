@@ -83,6 +83,7 @@ pub struct Theme {
     pub uptime:            (u8,u8,u8), // corner uptime overlay
     pub col_key_rule:      (u8,u8,u8), // separator line under column-key names
     pub xaxis_dim:         (u8,u8,u8), // dim X-axis time labels
+    pub status_sep:        (u8,u8,u8), // dim · separators in the probe-status text
     pub xaxis_now:         Color,      // "now" X-axis label
     pub small_term:        (u8,u8,u8), // "terminal too small" message
 
@@ -258,6 +259,7 @@ impl Theme {
             uptime:      (80, 80, 80),
             col_key_rule:(46, 46, 46),
             xaxis_dim:   (80, 80, 80),
+            status_sep:  (80, 80, 80),
             xaxis_now:   Color::White,
             small_term:  (160, 160, 160),
 
@@ -339,6 +341,7 @@ impl Theme {
             uptime:      (80, 80, 80),
             col_key_rule:(46, 46, 46),
             xaxis_dim:   (80, 80, 80),
+            status_sep:  (80, 80, 80),
             xaxis_now:   Color::White,
             small_term:  (160, 160, 160),
 
@@ -416,6 +419,7 @@ impl Theme {
             uptime:      (80, 80, 80),
             col_key_rule:(41, 41, 41),
             xaxis_dim:   (80, 80, 80),
+            status_sep:  (80, 80, 80),
             xaxis_now:   Color::White,
             small_term:  (170, 170, 170),
 
@@ -495,6 +499,7 @@ impl Theme {
             uptime:      (76, 86, 106),
             col_key_rule:(51, 57, 70),
             xaxis_dim:   (76, 86, 106),
+            status_sep:  (76, 86, 106),
             xaxis_now:   Color::Rgb(216, 222, 233),
             small_term:  (143, 188, 187),
 
@@ -572,6 +577,7 @@ impl Theme {
             uptime:      (102, 92, 84),
             col_key_rule:(65, 60, 56),
             xaxis_dim:   (102, 92, 84),
+            status_sep:  (102, 92, 84),
             xaxis_now:   Color::Rgb(235, 219, 178),
             small_term:  (168, 153, 132),
 
@@ -650,6 +656,7 @@ impl Theme {
             uptime:      (98, 114, 164),
             col_key_rule:(55, 57, 71),
             xaxis_dim:   (98, 114, 164),
+            status_sep:  (98, 114, 164),
             xaxis_now:   Color::Rgb(248, 248, 242),
             small_term:  (139, 233, 253),
 
@@ -728,6 +735,7 @@ impl Theme {
             uptime:      (88, 110, 117),
             col_key_rule:(5, 48, 59),
             xaxis_dim:   (88, 110, 117),
+            status_sep:  (88, 110, 117),
             xaxis_now:   Color::Rgb(147, 161, 161),  // base1
             small_term:  (131, 148, 150),
 
@@ -802,6 +810,7 @@ impl Theme {
             uptime:      (90, 90, 90),
             col_key_rule:(43, 43, 43),
             xaxis_dim:   (90, 90, 90),
+            status_sep:  (90, 90, 90),
             xaxis_now:   Color::White,
             small_term:  (180, 180, 180),
 
@@ -876,6 +885,7 @@ impl Theme {
             uptime:      (100, 55, 0),
             col_key_rule:(46, 25, 0),
             xaxis_dim:   (100, 55, 0),
+            status_sep:  (100, 55, 0),
             xaxis_now:   Color::Rgb(255, 200, 60),
             small_term:  (150, 90, 0),
 
@@ -950,6 +960,7 @@ impl Theme {
             uptime:      (50, 88, 22),
             col_key_rule:(17, 39, 8),
             xaxis_dim:   (48, 85, 20),
+            status_sep:  (48, 85, 20),
             xaxis_now:   Color::Rgb(125, 242, 65),
             small_term:  (78, 135, 38),
 
@@ -1024,6 +1035,7 @@ impl Theme {
             uptime:      (70, 70, 70),
             col_key_rule:(40, 40, 40),
             xaxis_dim:   (70, 70, 70),
+            status_sep:  (70, 70, 70),
             xaxis_now:   Color::White,
             small_term:  (110, 110, 110),
 

@@ -1,11 +1,9 @@
 # vlat
+- modern replacement for ping that doesn't infinitely scroll your terminal 
+- beautiful full screen visualizations for monitoring 
+- crazy feature set for latency measuring enthusiasts
 
-Two reasons to use vlat:
-
-1) modern replacement for ping that doesn't infinitely scroll your terminal
-2) beautiful full screen visualizations for monitoring latency 
-
-Built for latency measurement enthusiasts.
+<br>
 
 ![single view animated demo](screens/vlat-screen-single.gif)
 
@@ -31,7 +29,7 @@ Built for latency measurement enthusiasts.
   - dns
   - ntp
   - ssh
-  - smtp/smpts
+  - smtp/smtpss
   - exec:  Supply your own script to measure anything
 - Network Features
   - Configure intervals, timeouts, labels, and probe parameters per target

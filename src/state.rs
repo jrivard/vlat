@@ -105,6 +105,12 @@ pub struct TargetState {
     pub win_drop_times: Vec<Instant>,
     pub win_dups:       u32,
     pub win_dup_times:  Vec<Instant>,
+    /// Start of each drop *event* in the stats window: a streak of consecutive
+    /// drops counts once. Pruned like `win_drop_times`.
+    pub win_drop_event_times: Vec<Instant>,
+    /// Each outage (a streak reaching `GRADE_OUTAGE_MIN_DROPS` drops) in the
+    /// stats window, timed when it qualified. Pruned like `win_drop_times`.
+    pub win_outage_times: Vec<Instant>,
     pub last_rtt:          f64,
     pub current_jitter:    f64,
     pub srtt:              f64,   // RFC 6298 smoothed RTT
@@ -151,7 +157,7 @@ pub struct TargetState {
     pub last_up: Option<Instant>,
 
     /// Wall-clock time of the most recent dropped probe. Unlike `win_drop_times`,
-    /// never pruned by the stats window - drives the "last drop <elapsed>" note in
+    /// never pruned by the stats window - drives the "N lost <age> ago" verdict in
     /// the probe/uptime summary text, which should still work with `--window 0`
     /// (lifetime) or a short window long after the drop itself has aged out of it.
     pub last_drop_at: Option<Instant>,
@@ -167,6 +173,68 @@ pub struct TargetState {
     /// sitting in `history`, and without this the view would jump straight to its
     /// full row count the instant that backlog counts as "revealed" data.
     pub first_success_idx: Option<usize>,
+
+    /// --warn-rtt, for the `slow` grade. Set by the app before each result.
+    pub warn_rtt: Option<f64>,
+    /// Slow-moving "normal" RTT for the `degraded` grade: the window median,
+    /// time-averaged with a `GRADE_BASELINE_TAU_SECS` time constant. 0 until
+    /// the first reply.
+    pub baseline_rtt: f64,
+    pub baseline_at: Option<Instant>,
+    /// Loss and quality grades for the status text, re-graded (with
+    /// hysteresis) whenever a probe resolves or the window changes.
+    pub grade: StatusGrade,
+}
+
+/// How much of the stats window is being lost.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum LossGrade { #[default] Normal, Lossy, Struggling }
+
+/// How well a target answers when it does. Each flag has its own hysteresis;
+/// the status text shows the first set one in the order listed.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct QualityFlags {
+    pub slow: bool,
+    pub degraded: bool,
+    pub jittery: bool,
+    pub spiky: bool,
+}
+
+/// Which way a measure is clearly moving: the last `GRADE_TREND_RECENT_SECS`
+/// of the stats window against the rest of it. `None` (in an `Option<Trend>`)
+/// means steady, or not enough data to say.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Trend { Improving, Worsening }
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct StatusGrade {
+    pub loss: LossGrade,
+    pub quality: QualityFlags,
+    /// Loss rate: recent vs the rest of the window.
+    pub loss_trend: Option<Trend>,
+    /// Median RTT: recent vs the rest of the window.
+    pub latency_trend: Option<Trend>,
+}
+
+/// Next trend with hysteresis: keep the current direction while its STAY test
+/// holds, otherwise start one whose ENTER test holds.
+fn next_trend(prev: Option<Trend>, worse: (bool, bool), better: (bool, bool)) -> Option<Trend> {
+    let ((worse_enter, worse_stay), (better_enter, better_stay)) = (worse, better);
+    match prev {
+        Some(Trend::Worsening) if worse_stay => Some(Trend::Worsening),
+        Some(Trend::Improving) if better_stay => Some(Trend::Improving),
+        _ if worse_enter => Some(Trend::Worsening),
+        _ if better_enter => Some(Trend::Improving),
+        _ => None,
+    }
+}
+
+/// Hysteresis: once on, stay on while `stay` holds; otherwise turn on at `enter`.
+fn hyst(was: bool, enter: bool, stay: bool) -> bool { if was { stay } else { enter } }
+
+fn median_sorted(v: &[f64]) -> f64 {
+    let n = v.len();
+    if n == 0 { 0.0 } else if n.is_multiple_of(2) { (v[n / 2 - 1] + v[n / 2]) / 2.0 } else { v[n / 2] }
 }
 
 impl TargetState {
@@ -236,6 +304,12 @@ impl TargetState {
             last_drop_at:    None,
             first_sent_at:   None,
             first_success_idx: None,
+            warn_rtt:        None,
+            baseline_rtt:    0.0,
+            baseline_at:     None,
+            grade:           StatusGrade::default(),
+            win_drop_event_times: Vec::new(),
+            win_outage_times: Vec::new(),
         }
     }
 
@@ -285,6 +359,8 @@ impl TargetState {
                 let before = self.win_drop_times.len();
                 self.win_drop_times.retain(|t| now.duration_since(*t) < Duration::from_secs(effective_window));
                 self.win_drops = self.win_drops.saturating_sub((before - self.win_drop_times.len()) as u32);
+                self.win_drop_event_times.retain(|t| now.duration_since(*t) < Duration::from_secs(effective_window));
+                self.win_outage_times.retain(|t| now.duration_since(*t) < Duration::from_secs(effective_window));
                 let before_dup = self.win_dup_times.len();
                 self.win_dup_times.retain(|t| now.duration_since(*t) < Duration::from_secs(effective_window));
                 self.win_dups = self.win_dups.saturating_sub((before_dup - self.win_dup_times.len()) as u32);
@@ -387,11 +463,121 @@ impl TargetState {
                     self.circle_history[idx] = 255; // drop sentinel - tier lookup not used for drops
                 }
                 self.cur_drop_streak += 1;
+                if self.cur_drop_streak == 1 { self.win_drop_event_times.push(now); }
+                if self.cur_drop_streak == crate::constants::GRADE_OUTAGE_MIN_DROPS { self.win_outage_times.push(now); }
                 if self.cur_drop_streak > self.max_drop_streak {
                     self.max_drop_streak = self.cur_drop_streak;
                 }
             }
         }
+        if outcome.is_ok() { self.update_baseline(); }
+        self.regrade();
+    }
+
+    /// Moves `baseline_rtt` toward the current window median, weighted by the
+    /// time since the last update (so it means the same at any probe rate).
+    fn update_baseline(&mut self) {
+        let now = Instant::now();
+        let mut recent: Vec<f64> = self.recent_rtts();
+        if recent.is_empty() { return; }
+        recent.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let med = median_sorted(&recent);
+        match self.baseline_at {
+            None => self.baseline_rtt = med,
+            Some(t) => {
+                let dt = now.saturating_duration_since(t).as_secs_f64();
+                let alpha = 1.0 - (-dt / crate::constants::GRADE_BASELINE_TAU_SECS).exp();
+                self.baseline_rtt += alpha * (med - self.baseline_rtt);
+            }
+        }
+        self.baseline_at = Some(now);
+    }
+
+    /// The most recent replies in the window, capped at `GRADE_QUALITY_MAX_SAMPLES`.
+    fn recent_rtts(&self) -> Vec<f64> {
+        let start = self.window.len().saturating_sub(crate::constants::GRADE_QUALITY_MAX_SAMPLES);
+        self.window[start..].iter().map(|&(_, v)| v).collect()
+    }
+
+    /// Recomputes `grade` from the window, keeping each grade on until its
+    /// (lower) STAY threshold is crossed. Thresholds are in `constants.rs`.
+    pub fn regrade(&mut self) { self.regrade_at(Instant::now()); }
+
+    /// `regrade` as of `now` (trends split the window by time).
+    pub fn regrade_at(&mut self, now: Instant) {
+        use crate::constants::*;
+        let prev = self.grade;
+
+        let resolved = self.window.len() + self.win_drops as usize;
+        let pct = self.win_loss_pct();
+        let struggling = prev.loss == LossGrade::Struggling;
+        let lossy_or_worse = prev.loss != LossGrade::Normal;
+        let loss = if resolved < GRADE_LOSS_MIN_SAMPLES { LossGrade::Normal }
+            else if hyst(struggling, pct >= GRADE_STRUGGLING_ENTER_PCT, pct >= GRADE_STRUGGLING_STAY_PCT) { LossGrade::Struggling }
+            else if hyst(lossy_or_worse, pct >= GRADE_LOSSY_ENTER_PCT, pct >= GRADE_LOSSY_STAY_PCT) { LossGrade::Lossy }
+            else { LossGrade::Normal };
+
+        let mut rtts = self.recent_rtts();
+        let quality = if rtts.len() < GRADE_QUALITY_MIN_SAMPLES { QualityFlags::default() } else {
+            rtts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let med = median_sorted(&rtts);
+            let p99 = rtts[((rtts.len() as f64 * 0.99) as usize).min(rtts.len() - 1)];
+            let jstart = self.jitter_window.len().saturating_sub(GRADE_QUALITY_MAX_SAMPLES);
+            let mut jit: Vec<f64> = self.jitter_window[jstart..].to_vec();
+            jit.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let jmed = median_sorted(&jit);
+            let base = self.baseline_rtt;
+            let q = prev.quality;
+            QualityFlags {
+                slow: self.warn_rtt.is_some_and(|w| hyst(q.slow, med >= w, med >= w * GRADE_SLOW_STAY_FRAC)),
+                degraded: base > 0.0 && hyst(q.degraded,
+                    med >= base * GRADE_DEGRADED_ENTER_RATIO && med - base >= GRADE_DEGRADED_ENTER_MS,
+                    med >= base * GRADE_DEGRADED_STAY_RATIO && med - base >= GRADE_DEGRADED_STAY_MS),
+                jittery: hyst(q.jittery,
+                    jmed >= med * GRADE_JITTERY_ENTER_RATIO && jmed >= GRADE_JITTERY_ENTER_MS,
+                    jmed >= med * GRADE_JITTERY_STAY_RATIO && jmed >= GRADE_JITTERY_STAY_MS),
+                spiky: hyst(q.spiky,
+                    p99 >= med * GRADE_SPIKY_ENTER_RATIO && p99 - med >= GRADE_SPIKY_ENTER_MS,
+                    p99 >= med * GRADE_SPIKY_STAY_RATIO && p99 - med >= GRADE_SPIKY_STAY_MS),
+            }
+        };
+        let (loss_trend, latency_trend) = self.trends(now, prev);
+        self.grade = StatusGrade { loss, quality, loss_trend, latency_trend };
+    }
+
+    /// Loss-rate and median-RTT trends: the last `GRADE_TREND_RECENT_SECS` of
+    /// the window against the rest of it.
+    fn trends(&self, now: Instant, prev: StatusGrade) -> (Option<Trend>, Option<Trend>) {
+        use crate::constants::*;
+        let recent = |t: Instant| now.saturating_duration_since(t).as_secs_f64() < GRADE_TREND_RECENT_SECS;
+        let (mut rtt_new, mut rtt_old): (Vec<f64>, Vec<f64>) = (Vec::new(), Vec::new());
+        for &(t, v) in &self.window { if recent(t) { rtt_new.push(v) } else { rtt_old.push(v) } }
+        let drops_new = self.win_drop_times.iter().filter(|&&t| recent(t)).count();
+        let drops_old = self.win_drop_times.len() - drops_new;
+        let (n_new, n_old) = (rtt_new.len() + drops_new, rtt_old.len() + drops_old);
+        if n_new < GRADE_TREND_MIN_SAMPLES || n_old < GRADE_TREND_MIN_SAMPLES { return (None, None); }
+
+        let loss_new = drops_new as f64 / n_new as f64 * 100.0;
+        let loss_old = drops_old as f64 / n_old as f64 * 100.0;
+        let r = GRADE_LOSS_TREND_ENTER_RATIO;
+        let loss_trend = next_trend(prev.loss_trend,
+            (loss_new - loss_old >= GRADE_LOSS_TREND_ENTER_PP && loss_new >= loss_old * r,
+             loss_new - loss_old >= GRADE_LOSS_TREND_STAY_PP),
+            (loss_old - loss_new >= GRADE_LOSS_TREND_ENTER_PP && loss_old >= loss_new * r,
+             loss_old - loss_new >= GRADE_LOSS_TREND_STAY_PP));
+
+        let latency_trend = if rtt_new.len() < GRADE_TREND_MIN_SAMPLES || rtt_old.len() < GRADE_TREND_MIN_SAMPLES { None } else {
+            let sort = |v: &mut Vec<f64>| v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            sort(&mut rtt_new);
+            sort(&mut rtt_old);
+            let (m_new, m_old) = (median_sorted(&rtt_new), median_sorted(&rtt_old));
+            let (er, sr) = (GRADE_LATENCY_TREND_ENTER_RATIO, GRADE_LATENCY_TREND_STAY_RATIO);
+            let (ems, sms) = (GRADE_LATENCY_TREND_ENTER_MS, GRADE_LATENCY_TREND_STAY_MS);
+            next_trend(prev.latency_trend,
+                (m_new >= m_old * er && m_new - m_old >= ems, m_new >= m_old * sr && m_new - m_old >= sms),
+                (m_old >= m_new * er && m_old - m_new >= ems, m_old >= m_new * sr && m_old - m_new >= sms))
+        };
+        (loss_trend, latency_trend)
     }
 
     /// True if the most recently resolved probe (skipping any still-pending ones)
@@ -554,10 +740,14 @@ impl TargetState {
         self.win_dup_times.retain(|t| now.duration_since(*t) < cutoff);
         self.win_dups = self.win_dup_times.len() as u32;
 
+        self.win_drop_event_times.retain(|t| now.duration_since(*t) < cutoff);
+        self.win_outage_times.retain(|t| now.duration_since(*t) < cutoff);
+
         let window_len = self.window.len();
         if self.jitter_window.len() > window_len {
             self.jitter_window.drain(..self.jitter_window.len() - window_len);
         }
+        self.regrade();
 
         if self.graph_history.len() > graph_max_entries {
             let excess = self.graph_history.len() - graph_max_entries;

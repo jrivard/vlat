@@ -36,7 +36,7 @@ use super::ViewCtx;
 use super::{
     accent_color,
     compute_no_data,
-    fmt_cv, fmt_since, fmt_rtt, fmt_rtt_nodec, probe_status_text,
+    fmt_cv, fmt_loss, fmt_since, fmt_rtt, fmt_rtt_nodec, probe_status_text,
     trim_range_bar,
     widgets,
     layout::{render_window_label, render_dialogs, truncate_line},
@@ -107,13 +107,6 @@ fn panel_height(args: &Args, panel_w: u16) -> u16 {
     (content + 2).clamp(MIN_PANEL_H, MAX_PANEL_H)
 }
 
-/// Format a packet-loss percentage compactly.
-fn fmt_loss(pct: f64) -> String {
-    if pct <= 0.0 { "0%".to_string() }
-    else if pct < 10.0 { format!("{:.1}%", pct) }
-    else { format!("{:.0}%", pct) }
-}
-
 /// Build the ordered list of stat cells (label, value, value-style) shown below
 /// the sparklines.  Mirrors the column system: visible base stats first (avg,
 /// range, jitter, loss), then the enabled `extra_stats` in display order.  The
@@ -169,7 +162,7 @@ fn stat_cells(state: &TargetState, args: &Args, theme: &super::Theme) -> Vec<(&'
             ExtraStat::Srtt => v.push(("srtt", if state.srtt > 0.0 { fmt_rtt(state.srtt) } else { "~".into() }, val)),
             ExtraStat::Seen => v.push(("seen", fmt_since(state.last_up, Instant::now()), val)),
             ExtraStat::Lost => v.push(("lost", fmt_since(state.last_drop_at, Instant::now()), val)),
-            ExtraStat::Status => v.push(("stat", probe_status_text(state, Instant::now(), args.interval), val)),
+            ExtraStat::Status => v.push(("stat", probe_status_text(state, Instant::now(), args.interval, args.ascii), val)),
             // Recent / Bar are dedicated rows; identity / meta variants never appear here.
             _ => {}
         }
