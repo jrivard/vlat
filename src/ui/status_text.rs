@@ -634,7 +634,8 @@ mod tests {
             std::fs::write(&path, &actual).unwrap();
             return;
         }
-        let expected = std::fs::read_to_string(&path).unwrap_or_default();
+        // Ignore CRs: git on Windows may check the file out with CRLF line endings.
+        let expected = std::fs::read_to_string(&path).unwrap_or_default().replace("\r\n", "\n");
         assert!(expected == actual,
             "status text snapshot differs; rerun with UPDATE_SNAPSHOTS=1 and review `git diff {}`\n--- expected\n{expected}--- actual\n{actual}",
             path.display());
