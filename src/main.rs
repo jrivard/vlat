@@ -464,6 +464,11 @@ async fn main() {
         if args.session_name.is_none() {
             args.no_session = true;
         }
+        // A short stats window so the demo's episodes (trends, ok now, ...)
+        // show within minutes - unless the user picked one.
+        if matches.value_source("window") != Some(clap::parser::ValueSource::CommandLine) {
+            args.window = vlat::demo::DEMO_WINDOW_SECS;
+        }
     } else if args.demo_count.is_some() {
         eprintln!("vlat: --demo-count requires --demo");
         process::exit(1);

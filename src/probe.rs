@@ -405,6 +405,7 @@ pub fn spawn_probe_task(task: ProbeTask) {
 pub fn spawn_demo_task(
     task_id:     usize,
     profile:     crate::demo::Profile,
+    script:      crate::demo::Script,
     interval:    u64,
     tx:          mpsc::UnboundedSender<ProbeResult>,
     start_tx:    mpsc::UnboundedSender<ProbeStarted>,
@@ -414,8 +415,8 @@ pub fn spawn_demo_task(
     stop_at:     Option<time::Instant>,
 ) {
     tokio::spawn(async move {
-        let mut rng            = crate::demo::Rng::seeded_with(task_id as u64);
-        let mut down_remaining = 0u32;
+        let rng       = crate::demo::Rng::seeded_with(task_id as u64);
+        let mut model = crate::demo::DemoModel::new(profile, script, interval, rng);
 
         let first_tick = time::Instant::now() + start_delay;
         let mut ticker = time::interval_at(first_tick, Duration::from_millis(interval));
@@ -435,7 +436,7 @@ pub fn spawn_demo_task(
 
             if start_tx.send(ProbeStarted { task_id, seq: current_seq }).is_err() { break; }
 
-            let outcome = crate::demo::decide(&profile, &mut rng, &mut down_remaining);
+            let outcome = model.next_outcome();
             let msg = ProbeResult {
                 task_id, seq: current_seq, outcome, dup: false,
                 bytes_sent: 0, bytes_received: 0,

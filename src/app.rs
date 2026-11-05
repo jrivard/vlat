@@ -640,7 +640,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
             next_task_id += 1;
             let (per_cancel_tx, per_cancel_rx) = watch::channel(false);
             spawn_demo_task(
-                tid, dt.profile, target_intervals[slot],
+                tid, dt.profile, dt.script, target_intervals[slot],
                 probe_tx.clone(), start_tx.clone(), per_cancel_rx,
                 Duration::from_millis(stagger_ms * slot as u64),
                 args.count, probe_deadline,

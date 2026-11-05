@@ -63,7 +63,9 @@ pub const GRADE_LOSSY_STAY_PCT: f64       = 3.0;
 pub const GRADE_STRUGGLING_ENTER_PCT: f64 = 25.0;
 pub const GRADE_STRUGGLING_STAY_PCT: f64  = 20.0;
 // An outage is this many consecutive drops; 2+ outages in the window = flapping.
-pub const GRADE_OUTAGE_MIN_DROPS: u32     = 2;
+// 3, not 2: heavy random loss produces pairs of drops by chance, and that's
+// "struggling", not on/off flapping.
+pub const GRADE_OUTAGE_MIN_DROPS: u32     = 3;
 pub const GRADE_FLAPPING_OUTAGES: usize   = 2;
 // Quality grades use (at most) the most recent replies in the window.
 pub const GRADE_QUALITY_MIN_SAMPLES: usize = 10;
@@ -78,8 +80,8 @@ pub const GRADE_DEGRADED_STAY_RATIO: f64  = 1.5;
 pub const GRADE_DEGRADED_ENTER_MS: f64    = 5.0;
 pub const GRADE_DEGRADED_STAY_MS: f64     = 3.0;
 // jittery: median probe-to-probe jitter vs median RTT.
-pub const GRADE_JITTERY_ENTER_RATIO: f64  = 0.5;
-pub const GRADE_JITTERY_STAY_RATIO: f64   = 0.35;
+pub const GRADE_JITTERY_ENTER_RATIO: f64  = 0.3;
+pub const GRADE_JITTERY_STAY_RATIO: f64   = 0.2;
 pub const GRADE_JITTERY_ENTER_MS: f64     = 2.0;
 pub const GRADE_JITTERY_STAY_MS: f64      = 1.5;
 // spiky: p99 vs median RTT - mostly fine, with occasional big outliers.

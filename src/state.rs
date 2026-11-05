@@ -314,8 +314,11 @@ impl TargetState {
     }
 
     /// Called when a probe is sent. Advances the timeline immediately.
-    pub fn record_sent(&mut self, seq: usize) {
-        if self.first_sent_at.is_none() { self.first_sent_at = Some(Instant::now()); }
+    pub fn record_sent(&mut self, seq: usize) { self.record_sent_at(Instant::now(), seq); }
+
+    /// `record_sent` with an explicit clock (tests and simulations).
+    pub fn record_sent_at(&mut self, now: Instant, seq: usize) {
+        if self.first_sent_at.is_none() { self.first_sent_at = Some(now); }
         // If the result already arrived (race: ProbeResult before ProbeStarted), skip.
         if self.early_results.remove(&seq) { return; }
         self.pending_map.insert(seq, self.history.len());
@@ -325,6 +328,11 @@ impl TargetState {
 
     /// Called when a probe result arrives (hit or drop).
     pub fn record_result(&mut self, seq: usize, outcome: Result<f64, ()>, window_secs: u64, dup: bool) {
+        self.record_result_at(Instant::now(), seq, outcome, window_secs, dup);
+    }
+
+    /// `record_result` with an explicit clock (tests and simulations).
+    pub fn record_result_at(&mut self, now: Instant, seq: usize, outcome: Result<f64, ()>, window_secs: u64, dup: bool) {
         let idx = match self.pending_map.remove(&seq) {
             Some(idx) => idx,
             None => {
@@ -344,7 +352,6 @@ impl TargetState {
         match outcome {
             Ok(rtt_ms) => {
                 self.last_was_drop = false;
-                let now = Instant::now();
                 self.last_up = Some(now);
                 if self.first_success_idx.is_none() { self.first_success_idx = Some(idx); }
 
@@ -455,7 +462,6 @@ impl TargetState {
                 self.drop_flash  = 6;
                 self.drops      += 1;
                 self.win_drops  += 1;
-                let now = Instant::now();
                 self.win_drop_times.push(now);
                 self.last_drop_at = Some(now);
                 self.history[idx] = Sample::Drop;
@@ -470,14 +476,13 @@ impl TargetState {
                 }
             }
         }
-        if outcome.is_ok() { self.update_baseline(); }
-        self.regrade();
+        if outcome.is_ok() { self.update_baseline(now); }
+        self.regrade_at(now);
     }
 
     /// Moves `baseline_rtt` toward the current window median, weighted by the
     /// time since the last update (so it means the same at any probe rate).
-    fn update_baseline(&mut self) {
-        let now = Instant::now();
+    fn update_baseline(&mut self, now: Instant) {
         let mut recent: Vec<f64> = self.recent_rtts();
         if recent.is_empty() { return; }
         recent.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));

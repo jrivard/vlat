@@ -21,8 +21,8 @@
 //!   | `waiting for reply` | nothing has replied or timed out yet                         |
 //!   | `unreachable` | probes have timed out, and none has ever replied             |
 //!   | `down`        | the latest resolved probe was lost (agrees with the badge)   |
-//!   | `flapping`    | 2+ outages (2+ drops in a row each) in the window            |
 //!   | `struggling`  | window loss >= 25% (stays until < 20%)                       |
+//!   | `flapping`    | 2+ outages (3+ drops in a row each) in the window            |
 //!   | `lossy`       | window loss >= 5% (stays until < 3%)                         |
 //!   | `flaky`       | 2+ separate drop events in the window                        |
 //!   | `recovering`  | 1 drop event (a single drop or one outage) in the window     |
@@ -34,7 +34,7 @@
 //!   probe in `TargetState::regrade`, which remembers the previous grade.
 //! - After `ok`, `ok now` or `recovering`, at most one quality word may follow,
 //!   first match of: `slow` (median >= --warn-rtt), `degraded` (median >= 2x
-//!   the target's own hour-scale baseline), `jittery` (median jitter >= half
+//!   the target's own hour-scale baseline), `jittery` (median jitter >= 0.3x
 //!   the median), `spiky` (p99 >= 4x median). E.g. `ok, jittery`. It's left
 //!   off worse verdicts, where it would add nothing.
 //! - A trend word (`improving` / `worsening`) is added only where direction
@@ -116,10 +116,10 @@ pub enum Now {
     Unreachable,
     /// Replying, and has never lost a probe, or not for [`ALL_CLEAR_SECS`].
     Ok,
-    /// Replying, but 2+ outages within the stats window.
-    Flapping,
     /// Replying, but heavy loss in the stats window.
     Struggling,
+    /// Replying, but 2+ outages within the stats window.
+    Flapping,
     /// Replying, but sustained loss in the stats window.
     Lossy,
     /// Replying, but 2+ separate drop events within the stats window.
@@ -226,8 +226,8 @@ impl StatusSummary {
             Some(_) if state.is_currently_down() => Now::Down,
             Some(_) => match state.last_drop_at {
                 None => Now::Ok,
-                Some(_) if state.win_outage_times.len() >= crate::constants::GRADE_FLAPPING_OUTAGES => Now::Flapping,
                 Some(_) if state.grade.loss == LossGrade::Struggling => Now::Struggling,
+                Some(_) if state.win_outage_times.len() >= crate::constants::GRADE_FLAPPING_OUTAGES => Now::Flapping,
                 Some(_) if state.grade.loss == LossGrade::Lossy => Now::Lossy,
                 Some(_) if state.win_drop_event_times.len() >= 2 => Now::Flaky,
                 Some(_) if !state.win_drop_event_times.is_empty() => Now::Recovering,
