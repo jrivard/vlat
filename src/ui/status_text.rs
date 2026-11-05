@@ -34,7 +34,7 @@
 //!   probe in `TargetState::regrade`, which remembers the previous grade.
 //! - After `ok`, `ok now` or `recovering`, at most one quality word may follow,
 //!   first match of: `slow` (median >= --warn-rtt), `degraded` (median >= 2x
-//!   the target's own hour-scale baseline), `jittery` (median jitter >= 0.3x
+//!   the target's own hour-scale baseline, after a 2-minute warm-up), `jittery` (median jitter >= 0.3x
 //!   the median), `spiky` (p99 >= 4x median). E.g. `ok, jittery`. It's left
 //!   off worse verdicts, where it would add nothing.
 //! - A trend word (`improving` / `worsening`) is added only where direction
@@ -169,6 +169,46 @@ impl Trend {
             (Trend::Improving, false) => "\u{2198}", (Trend::Worsening, false) => "\u{2197}",
             (Trend::Improving, true) => "v", (Trend::Worsening, true) => "^",
         }
+    }
+}
+
+/// What the `quality` column shows for a target.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum QualityCell {
+    /// Too few probes resolved in the window to judge yet.
+    NoData,
+    /// Enough probes resolved in the window, and none of them replied - it
+    /// never has, or it's been down the whole window.
+    NoReply,
+    /// Graded, and nothing flagged.
+    Good,
+    /// A quality word, with the latency trend when it's `slow` or `degraded`
+    /// (the same trend the status line shows after `degraded`).
+    Word(Quality, Option<Trend>),
+}
+
+impl QualityCell {
+    pub fn text(self, ascii: bool) -> String {
+        match self {
+            QualityCell::NoData => "~".to_string(),
+            QualityCell::NoReply => "no reply".to_string(),
+            QualityCell::Good => "good".to_string(),
+            QualityCell::Word(q, None) => q.word().to_string(),
+            QualityCell::Word(q, Some(t)) => format!("{}{}", q.word(), t.arrow(ascii)),
+        }
+    }
+}
+
+/// The `quality` column's value: [`probe_quality`] plus a "good" / not-enough-
+/// data distinction. Like `probe_quality`, independent of the verdict.
+pub fn probe_quality_cell(state: &TargetState) -> QualityCell {
+    let min = crate::constants::GRADE_QUALITY_MIN_SAMPLES;
+    if state.window.is_empty() && state.win_drops as usize >= min { return QualityCell::NoReply; }
+    if state.window.len() < min { return QualityCell::NoData; }
+    match probe_quality(state) {
+        None => QualityCell::Good,
+        Some(q @ (Quality::Slow | Quality::Degraded)) => QualityCell::Word(q, probe_latency_trend(state)),
+        Some(q) => QualityCell::Word(q, None),
     }
 }
 
@@ -457,7 +497,10 @@ mod tests {
                 .map(|&(a, _)| at(a)).collect();
             let mut rtts: Vec<f64> = s.window.iter().map(|&(_, v)| v).collect();
             rtts.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            if !rtts.is_empty() { s.baseline_rtt = self.baseline.unwrap_or(rtts[rtts.len() / 2]); }
+            if !rtts.is_empty() {
+                s.baseline_rtt = self.baseline.unwrap_or(rtts[rtts.len() / 2]);
+                s.baseline_since = Some(now - Duration::from_secs(3_600)); // a settled, warmed-up baseline
+            }
             s.regrade_at(now);
             (s, now)
         }
@@ -485,7 +528,10 @@ mod tests {
             s.win_outage_times = drops.iter().filter(|&&i| streak_pos(i, k)).map(|&i| at(i)).collect();
             let mut rtts: Vec<f64> = s.window.iter().map(|&(_, v)| v).collect();
             rtts.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            if !rtts.is_empty() { s.baseline_rtt = self.baseline.unwrap_or(rtts[rtts.len() / 2]); }
+            if !rtts.is_empty() {
+                s.baseline_rtt = self.baseline.unwrap_or(rtts[rtts.len() / 2]);
+                s.baseline_since = Some(now - Duration::from_secs(3_600)); // a settled, warmed-up baseline
+            }
             s.regrade_at(now);
             (s, now)
         }
@@ -520,6 +566,8 @@ mod tests {
             sc("several in flight", "???", 2.5, 0.0, 0.0),
             sc("first probe timed out", "x", 1.2, 0.0, 1.2),
             sc("never replied", "xxxxx", 5.0, 0.0, 0.0),
+            sc("never replied, 12 lost", rep('x', 12), 12.0, 0.0, 0.0),
+            sc("down the whole window", ".".to_string() + &rep('x', 20), 0.0, 0.0, 0.0).timed().window(15.0),
             sc("first reply", ".", 0.5, 0.0, 0.0),
             sc("healthy", "..", 135.0, 1.0, 0.0),
             sc("healthy, long run", rep('.', 1_500), 86_400.0 * 2.0 + 3_600.0 * 5.0, 1.0, 0.0),
@@ -659,6 +707,24 @@ mod tests {
         let (s, _) = scenarios().into_iter().find(|s| s.name == "latency rising, but not degraded (no word)").unwrap().build();
         assert_eq!(probe_latency_trend(&s), Some(Trend::Worsening));
         assert_eq!(Trend::Worsening.word(), "worsening");
+    }
+
+    #[test]
+    fn quality_cell_distinguishes_no_data_good_and_words() {
+        let cell = |name: &str| { let (s, _) = scenarios().into_iter().find(|s| s.name == name).unwrap().build(); probe_quality_cell(&s) };
+        assert_eq!(cell("healthy"), QualityCell::NoData, "2 replies is too few to judge");
+        assert_eq!(cell("never replied"), QualityCell::NoData, "5 lost is too few to call it");
+        assert_eq!(cell("never replied, 12 lost"), QualityCell::NoReply);
+        assert_eq!(cell("down the whole window"), QualityCell::NoReply, "replied once, but not in the window");
+        assert_eq!(QualityCell::NoReply.text(false), "no reply");
+        assert_eq!(cell("healthy, long run"), QualityCell::Good);
+        assert_eq!(cell("jittery"), QualityCell::Word(Quality::Jittery, None));
+        assert_eq!(cell("degraded, worsening"), QualityCell::Word(Quality::Degraded, Some(Trend::Worsening)));
+        assert_eq!(cell("flaky hides quality"), QualityCell::Word(Quality::Jittery, None), "independent of the verdict");
+        assert_eq!(QualityCell::NoData.text(false), "~");
+        assert_eq!(QualityCell::Good.text(false), "good");
+        assert_eq!(QualityCell::Word(Quality::Degraded, Some(Trend::Worsening)).text(false), "degraded\u{2197}");
+        assert_eq!(QualityCell::Word(Quality::Degraded, Some(Trend::Worsening)).text(true), "degraded^");
     }
 
     #[test]

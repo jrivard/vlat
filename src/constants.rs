@@ -75,6 +75,8 @@ pub const GRADE_SLOW_STAY_FRAC: f64       = 0.9;
 // degraded: window median vs the target's own slow-moving baseline, both as a
 // ratio and an absolute gap (so 0.3ms -> 0.7ms on a LAN isn't "degraded").
 pub const GRADE_BASELINE_TAU_SECS: f64    = 3_600.0;
+// No "degraded" until the baseline is this old (it has nothing to compare to yet).
+pub const GRADE_BASELINE_WARMUP_SECS: f64 = 120.0;
 pub const GRADE_DEGRADED_ENTER_RATIO: f64 = 2.0;
 pub const GRADE_DEGRADED_STAY_RATIO: f64  = 1.5;
 pub const GRADE_DEGRADED_ENTER_MS: f64    = 5.0;

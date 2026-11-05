@@ -671,7 +671,7 @@ pub struct Args {
 
     /// Columns and visual elements to display. Default set includes the recent sparkline
     /// and range bar; numeric extras are off by default. Stat values: mtr std p01 p10
-    /// p50 p95 p99 cv srtt seen lost recent bar status.
+    /// p50 p95 p99 cv srtt seen lost recent bar status quality.
     /// Identity values (auto-shown unless overridden): mode name port addr resolve.
     /// Pseudo-values: all (all columns), none (reset to empty), default (default set).
     /// 'none' may be combined: --columns none,mtr shows only mtr; 'all' is exclusive.
@@ -1037,11 +1037,14 @@ pub enum ExtraStat {
     Recent,
     /// Show the inline range bar on every target row (on by default)
     Bar,
-    /// Probe/uptime summary: probe count and elapsed time, plus a note once it's
-    /// worth mentioning - "down" while down, or "last drop" if up but has dropped
-    /// before. Same text shared with the single-target view's status line;
-    /// excludes the up/down badge itself.
+    /// Status summary, e.g. "lossy, worsening · 20 lost (6.7%), last failure 2m ago".
+    /// Same text as the single-target view's status line; excludes the up/down
+    /// badge itself.
     Status,
+    /// How well it answers when it does: slow, degraded, jittery, spiky, or
+    /// "good"; "no reply" if nothing in the window answered; "~" until there's
+    /// enough to judge
+    Quality,
 }
 
 /// Canonical display order of the stat columns used by 'all' and the 'x' dialog.
@@ -1054,7 +1057,7 @@ pub const EXTRA_STAT_ALL: &[ExtraStat] = &[
     ExtraStat::P01, ExtraStat::P10, ExtraStat::P50, ExtraStat::P95, ExtraStat::P99,
     ExtraStat::Cv, ExtraStat::Srtt, ExtraStat::Seen, ExtraStat::Lost,
     ExtraStat::Recent, ExtraStat::Bar,
-    ExtraStat::Status,
+    ExtraStat::Status, ExtraStat::Quality,
 ];
 
 /// The default set: sparkline and range bar are on; numeric extras are off.

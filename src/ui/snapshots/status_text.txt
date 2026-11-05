@@ -2,6 +2,8 @@ first probe in flight                          | waiting for reply
 several in flight                              | waiting for reply
 first probe timed out                          | unreachable
 never replied                                  | unreachable
+never replied, 12 lost                         | unreachable
+down the whole window                          | down · 20 lost (95%), last success 20s ago
 first reply                                    | ok · no loss · 1 sent over 0s
 healthy                                        | ok · no loss · 2 sent over 2m 15s
 healthy, long run                              | ok · no loss · 1k sent over 2d 5h

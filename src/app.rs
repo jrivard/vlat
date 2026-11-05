@@ -363,7 +363,7 @@ fn extra_stat_cli_name(stat: &crate::cli::ExtraStat) -> &'static str {
         ExtraStat::Srtt   => "srtt",   ExtraStat::Seen => "seen",
         ExtraStat::Lost   => "lost",
         ExtraStat::Recent => "recent", ExtraStat::Bar  => "bar",
-        ExtraStat::Status => "status",
+        ExtraStat::Status => "status", ExtraStat::Quality => "quality",
         _ => "?",
     }
 }

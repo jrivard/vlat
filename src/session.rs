@@ -1253,7 +1253,7 @@ fn stat_cli_name(stat: &ExtraStat) -> &'static str {
         ExtraStat::Srtt   => "srtt",   ExtraStat::Seen => "seen",
         ExtraStat::Lost   => "lost",
         ExtraStat::Recent => "recent", ExtraStat::Bar    => "bar",
-        ExtraStat::Status => "status",
+        ExtraStat::Status => "status", ExtraStat::Quality => "quality",
         _ => "?",
     }
 }
@@ -1267,7 +1267,7 @@ fn stat_from_name(name: &str) -> Option<ExtraStat> {
         "srtt" => ExtraStat::Srtt,     "seen" => ExtraStat::Seen,
         "lost" => ExtraStat::Lost,
         "recent" => ExtraStat::Recent, "bar" => ExtraStat::Bar,
-        "status" => ExtraStat::Status,
+        "status" => ExtraStat::Status, "quality" => ExtraStat::Quality,
         _ => return None,
     })
 }
@@ -1293,6 +1293,15 @@ fn base_stat_from_name(name: &str) -> Option<BaseStat> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn every_extra_stat_name_round_trips() {
+        for stat in crate::cli::EXTRA_STAT_ALL {
+            let name = super::stat_cli_name(stat);
+            assert_ne!(name, "?", "{stat:?} has no session name");
+            assert_eq!(super::stat_from_name(name).as_ref(), Some(stat), "{name}");
+        }
+    }
+
     use super::*;
 
     /// All-default settings should produce no CLI tokens at all - only

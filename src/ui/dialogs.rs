@@ -1470,9 +1470,10 @@ pub fn explain_content_lines(ascii: bool) -> Vec<Line<'static>> {
             ("t", "srtt  ", "RFC 6298 smoothed RTT"),
             ("u", "seen  ", "time since the last successful reply"),
             ("d", "lost  ", "time since the last drop (~ = none yet)"),
-            ("i", "status", "probe count + elapsed, plus down/last-drop once notable"),
+            ("i", "status", "verdict, loss record and coverage, e.g. lossy, worsening"),
+            ("q", "quality", "slow / degraded / jittery / spiky / good / no reply  (~ = too soon)"),
         ] {
-            lines.push(Line::from(vec![raw("    "), span(sym, bld), raw("  "), raw(name), raw("  "), raw(desc)]));
+            lines.push(Line::from(vec![raw("    "), span(sym, bld), raw("  "), raw(format!("{name:<7}")), raw("  "), raw(desc)]));
         }
     } else {
         for (sym, name, desc) in [
@@ -1487,9 +1488,10 @@ pub fn explain_content_lines(ascii: bool) -> Vec<Line<'static>> {
             ("\u{03c4}", "srtt  ", "RFC 6298 smoothed RTT"),
             ("\u{2191}", "seen  ", "time since the last successful reply"),
             ("\u{2193}", "lost  ", "time since the last drop (~ = none yet)"),
-            ("\u{2139}", "status", "probe count + elapsed, plus down/last-drop once notable"),
+            ("\u{2139}", "status", "verdict, loss record and coverage, e.g. lossy, worsening"),
+            ("\u{25c7}", "quality", "slow / degraded / jittery / spiky / good / no reply  (~ = too soon)"),
         ] {
-            lines.push(Line::from(vec![raw("    "), span(sym, bld), raw("  "), raw(name), raw("  "), raw(desc)]));
+            lines.push(Line::from(vec![raw("    "), span(sym, bld), raw("  "), raw(format!("{name:<7}")), raw("  "), raw(desc)]));
         }
     }
     lines.push(Line::from(vec![raw("  Identity columns \u{2014} automatic by default, force on with "), span("--columns", bld), raw(", off via "), span("none", bld), raw(":")]));
@@ -2084,7 +2086,7 @@ pub fn draw_explain_dialog(f: &mut Frame, area: Rect, scroll: u16, ascii: bool, 
 }
 
 /// Number of items in the column toggle dialog (5 identity + 4 base + 14 extra).
-pub const STAT_TOGGLE_COUNT: usize = 23;
+pub const STAT_TOGGLE_COUNT: usize = 24;
 
 /// Full rendered height of the column toggle dialog: 3 header lines, the items,
 /// 4 group separators, 1 trailing blank, plus 2 border rows.
@@ -2180,13 +2182,13 @@ pub fn draw_stat_column_toggle_dialog(
          "~", "r", "j", "x",
          "w", "s", "0", "1", "p", "5", "9", "%", "t", "u", "d",
          "o", "|",
-         "i"]
+         "i", "q"]
     } else {
         [" ", " ", ":", " ", "\u{21bb}",
          "\u{2248}", "\u{21d5}", "\u{03b4}", "\u{2717}",
          "\u{03a9}", "\u{00b1}", "\u{2080}", "\u{2081}", "\u{00bd}", "\u{2085}", "\u{2089}", "%", "\u{03c4}", "\u{2191}", "\u{2193}",
          "\u{25cb}", "\u{258f}",
-         "\u{2139}"]
+         "\u{2139}", "\u{25c7}"]
     };
 
     // Named section separator — rule chars use col_key_rule, label uses plain DIM,
@@ -2198,7 +2200,7 @@ pub fn draw_stat_column_toggle_dialog(
     // (name, description, is_enabled)
     // Indices 0-4:  identity columns (enabled = effective state from `identity`)
     // Indices 5-8:  base stats (enabled = NOT in hidden_base)
-    // Indices 9-22: extra stats (enabled = in extra_stats)
+    // Indices 9-23: extra stats (enabled = in extra_stats)
     let rows: [(&str, &str, bool); STAT_TOGGLE_COUNT] = [
         ("mode  ", "probe-type badge  (auto: mixed modes)",   identity[0]),
         ("name  ", "custom label or hostname",                identity[1]),
@@ -2222,7 +2224,8 @@ pub fn draw_stat_column_toggle_dialog(
         ("lost  ", "time since last drop",                  extra_stats.contains(&ExtraStat::Lost)),
         ("recent", "per-probe sparkline on target row",     extra_stats.contains(&ExtraStat::Recent)),
         ("bar   ", "inline range bar on target row",        extra_stats.contains(&ExtraStat::Bar)),
-        ("status", "verdict \u{00b7} sent count \u{00b7} elapsed", extra_stats.contains(&ExtraStat::Status)),
+        ("status", "verdict \u{00b7} loss record \u{00b7} coverage", extra_stats.contains(&ExtraStat::Status)),
+        ("quality", "slow / degraded / jittery / spiky / good", extra_stats.contains(&ExtraStat::Quality)),
     ];
 
     let mut body: Vec<Line> = vec![
@@ -2270,7 +2273,7 @@ pub fn draw_stat_column_toggle_dialog(
                 Span::styled(" [", sel_fg),
                 Span::styled(if *enabled { mark_on } else { mark_off }, sel_fg),
                 Span::styled("] ", sel_fg),
-                Span::styled((*name).to_owned(), sel_fg),
+                Span::styled(format!("{name:<7}"), sel_fg),
                 Span::styled(" ", sel_fg),
                 Span::styled(sym, sel_fg),
                 Span::styled("  ", sel_fg),
@@ -2291,7 +2294,7 @@ pub fn draw_stat_column_toggle_dialog(
                 Span::styled(" [", dim_style),
                 Span::styled(mark, mark_sty),
                 Span::styled("] ", dim_style),
-                Span::styled((*name).to_owned(), nm_sty),
+                Span::styled(format!("{name:<7}"), nm_sty),
                 Span::styled(" ", dim_style),
                 Span::styled(sym, sym_style),
                 Span::styled("  ", dim_style),

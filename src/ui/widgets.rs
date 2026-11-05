@@ -27,7 +27,7 @@ use crate::cli::{Args, BaseStat, ExtraStat};
 use crate::constants::{BAR_ANIM_SECS, GRAPH_ANIM_SECS, TIER_FAST_PCT, TIER_HIGH_PCT};
 use crate::state::{GraphColCache, MtrTrend, SparklineColCache, TargetState};
 use crate::types::Sample;
-use super::{ColWidths, RttColWidth, fmt_count, fmt_cv, fmt_since, fmt_rtt, fmt_rtt_nodec, probe_status_spans, Theme};
+use super::{ColWidths, RttColWidth, fmt_count, fmt_cv, fmt_since, fmt_rtt, fmt_rtt_nodec, probe_status_spans, Quality, QualityCell, Theme};
 
 pub fn trend_spark_span(trend: MtrTrend, ascii: bool, theme: &Theme) -> Span<'static> {
     let (ch, style) = if ascii {
@@ -616,6 +616,7 @@ pub fn build_stats_keys_line(
             ExtraStat::Seen   => if let Some(seen_w) = cw.seen    { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "seen",   w = 1 + seen_w),         dim)); }
             ExtraStat::Lost   => if let Some(lost_w) = cw.lost    { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "lost",   w = 1 + lost_w),         dim)); }
             ExtraStat::Status => if let Some(status_w) = cw.status { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "status", w = 1 + status_w),      dim)); }
+            ExtraStat::Quality => if let Some(q_w) = cw.quality { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "quality", w = 1 + q_w), dim)); }
             _ => {}
         }
     }
@@ -747,7 +748,8 @@ pub fn build_stats_line<'a>(
                 ExtraStat::Srtt   => if let Some(ref col) = cw.srtt   { spans.push(Span::raw(sp.clone())); spans.push(Span::styled(sym("t", "\u{03c4}", "srtt"), dim)); push_mtr_placeholder(&mut spans, d, dim, col); }
                 ExtraStat::Seen   => if let Some(seen_w) = cw.seen    { spans.push(Span::raw(sp.clone())); spans.push(Span::styled(sym("u", "\u{2191}", "seen"), dim)); spans.push(Span::styled(format!("{:>w$}", d, w = seen_w), dim)); }
                 ExtraStat::Lost   => if let Some(lost_w) = cw.lost    { spans.push(Span::raw(sp.clone())); spans.push(Span::styled(sym("d", "\u{2193}", "lost"), dim)); spans.push(Span::styled(format!("{:>w$}", d, w = lost_w), dim)); }
-                ExtraStat::Status => if let Some(status_w) = cw.status { spans.push(Span::raw(sp.clone())); if verbose_labels { spans.push(Span::styled("status ", dim)); } spans.push(Span::styled(format!("{:<w$}", d, w = status_w), dim)); }
+                ExtraStat::Status => if let Some(status_w) = cw.status { spans.push(Span::raw(sp.clone())); if verbose_labels { spans.push(Span::styled("status ", dim)); } spans.push(Span::styled(format!("{:<w$}", d, w = status_w + 1), dim)); }
+                ExtraStat::Quality => if let Some(q_w) = cw.quality { spans.push(Span::raw(sp.clone())); if verbose_labels { spans.push(Span::styled("quality ", dim)); } spans.push(Span::styled(format!("{:<w$}", d, w = q_w + 1), dim)); }
                 _ => {}
             }
         }
@@ -922,7 +924,22 @@ pub fn build_stats_line<'a>(
                 let parts = probe_status_spans(s, Instant::now(), interval_ms, ascii, theme, bright);
                 let text_w: usize = parts.iter().map(|p| p.content.chars().count()).sum();
                 spans.extend(parts);
-                if text_w < status_w { spans.push(Span::raw(" ".repeat(status_w - text_w))); }
+                // +1: glyph-less columns still take the 1-col glyph slot the header
+                // and width budget reserve, so later columns line up with their labels.
+                if text_w < status_w + 1 { spans.push(Span::raw(" ".repeat(status_w + 1 - text_w))); }
+            }
+            ExtraStat::Quality => if let Some(q_w) = cw.quality {
+                // Self-explanatory word, so no glyph (like status). Left-aligned free text.
+                if verbose_labels { spans.push(Span::styled("quality ", dim)); }
+                let cell = super::probe_quality_cell(s);
+                let style = match cell {
+                    QualityCell::NoData => dim,
+                    QualityCell::NoReply => Style::default().fg(theme.drop_color),
+                    QualityCell::Good => Style::default().fg(theme.rtt_good).add_modifier(Modifier::DIM),
+                    QualityCell::Word(Quality::Slow | Quality::Degraded, _) => Style::default().fg(theme.rtt_warn),
+                    QualityCell::Word(_, _) => Style::default().fg(theme.ip_change),
+                };
+                spans.push(Span::styled(format!("{:<w$}", cell.text(ascii), w = q_w + 1), style)); // +1: see status
             }
             _ => { spans.pop(); } // remove the gap we pushed for unrecognised/pseudo variants
         }
@@ -2699,6 +2716,40 @@ pub fn render_area_graph_multi(
     });
 
     render_scale_annotation(f, area, &layout, args, states, y_label_w);
+}
+
+#[cfg(test)]
+mod quality_column_tests {
+    use super::*;
+    use crate::cli::ExtraStat;
+
+    fn text(line: &Line) -> String { line.spans.iter().map(|s| s.content.as_ref()).collect() }
+
+    #[test]
+    fn quality_header_lines_up_with_its_value_after_status() {
+        let mut s = TargetState::new("127.0.0.1".to_string());
+        for seq in 0..20usize {
+            s.record_sent(seq);
+            s.record_result(seq, Ok(if seq % 2 == 0 { 5.0 } else { 25.0 }), 0, false);
+        }
+        let states = vec![s];
+        let extras = vec![ExtraStat::Status, ExtraStat::Quality];
+        let cw = super::super::compute_col_widths(&states, false, &extras, &[], false, &crate::cli::ColumnVis::default(), 1_000);
+        let theme = crate::cli::ThemeName::Default.to_theme();
+        let pfx = KeysPrefix {
+            lead: 0, probe: 0, name: 0, addr: 0, trailer: 0, resolve: 0, status: 0, pings_gap: 0, pings: 0,
+            inline_range_w: 0, inline_range_label: String::new(), inline_range_spans: vec![],
+        };
+        let hdr = text(&build_stats_keys_line(&pfx, &cw, 2, false, false, false, false, &theme));
+        let row = text(&build_stats_line(&states[0], false, false, 50.0, &cw, false, false, false, &theme, false, false, 0, 2, false, 1_000));
+        // Last match: the status text before it may contain the same word.
+        let col = |s: &str, needle: &str| s.chars().collect::<Vec<_>>().windows(needle.len()).rposition(|w| w.iter().collect::<String>() == needle);
+        // Compare offsets from the status column, so a label wider than its value
+        // earlier in the line (e.g. "jitter" over a 5-char value) doesn't matter.
+        let h = col(&hdr, "quality").zip(col(&hdr, "status")).map(|(q, st)| q - st);
+        let r = col(&row, "jittery").zip(col(&row, "ok,")).map(|(q, st)| q - st);
+        assert!(h.is_some() && h == r, "header {h:?} vs value {r:?}\n{hdr:?}\n{row:?}");
+    }
 }
 
 #[cfg(test)]

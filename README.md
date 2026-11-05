@@ -240,7 +240,7 @@ While `vlat` is running, you can use the following keys:
 - `--view <mode>`: Start in a specific view (`list`, `single`, `graph`, `worm`, `radar`, `ekg`, `bars`, `cards`, `bubble`, `scatter`, `pong`). Default: `single` (falls back to `list` with more than one target).
 - `--max-range <ms>`: Fix Y-axis maximum (disables auto-scaling).
 - `--span <duration>`: Time range shown by the graph (e.g., `10m`).
-- `--columns <name,...>`: Columns to display. Stat columns (`mtr`, `std`, `p01`, `p10`, `p50`, `p95`, `p99`, `cv`, `srtt`, `seen`, `lost`, `status`, `recent`, `bar`) are off by default except the `recent` sparkline and range `bar`. Identity columns (`mode`, `name`, `port`, `addr`, `resolve`) follow automatic display rules; naming one forces it on, and `none` hides everything (values after `none` add back, e.g. `--columns none,addr,p99`). `all` shows every column; `default` is the default set and composes (e.g. `--columns default,mtr`). All columns can also be toggled at runtime with the `x` key.
+- `--columns <name,...>`: Columns to display. Stat columns (`mtr`, `std`, `p01`, `p10`, `p50`, `p95`, `p99`, `cv`, `srtt`, `seen`, `lost`, `status`, `quality`, `recent`, `bar`) are off by default except the `recent` sparkline and range `bar`. Identity columns (`mode`, `name`, `port`, `addr`, `resolve`) follow automatic display rules; naming one forces it on, and `none` hides everything (values after `none` add back, e.g. `--columns none,addr,p99`). `all` shows every column; `default` is the default set and composes (e.g. `--columns default,mtr`). All columns can also be toggled at runtime with the `x` key.
 
 Use `--help` for full option list.
 Use `--explain` to explain all statistics and views.

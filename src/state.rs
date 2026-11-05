@@ -181,6 +181,8 @@ pub struct TargetState {
     /// the first reply.
     pub baseline_rtt: f64,
     pub baseline_at: Option<Instant>,
+    /// When the baseline was first set (for its warm-up).
+    pub baseline_since: Option<Instant>,
     /// Loss and quality grades for the status text, re-graded (with
     /// hysteresis) whenever a probe resolves or the window changes.
     pub grade: StatusGrade,
@@ -307,6 +309,7 @@ impl TargetState {
             warn_rtt:        None,
             baseline_rtt:    0.0,
             baseline_at:     None,
+            baseline_since:  None,
             grade:           StatusGrade::default(),
             win_drop_event_times: Vec::new(),
             win_outage_times: Vec::new(),
@@ -487,13 +490,18 @@ impl TargetState {
         if recent.is_empty() { return; }
         recent.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let med = median_sorted(&recent);
-        match self.baseline_at {
-            None => self.baseline_rtt = med,
-            Some(t) => {
+        match (self.baseline_at, self.baseline_since) {
+            (Some(t), Some(since)) => {
+                // While young, the time constant is the baseline's own age - a
+                // running average of what it has seen - so one unusually fast or
+                // slow first reply can't anchor it for an hour.
                 let dt = now.saturating_duration_since(t).as_secs_f64();
-                let alpha = 1.0 - (-dt / crate::constants::GRADE_BASELINE_TAU_SECS).exp();
+                let age = now.saturating_duration_since(since).as_secs_f64().max(dt).max(1e-9);
+                let tau = crate::constants::GRADE_BASELINE_TAU_SECS.min(age);
+                let alpha = 1.0 - (-dt / tau).exp();
                 self.baseline_rtt += alpha * (med - self.baseline_rtt);
             }
+            _ => { self.baseline_rtt = med; self.baseline_since = Some(now); }
         }
         self.baseline_at = Some(now);
     }
@@ -531,7 +539,9 @@ impl TargetState {
             let mut jit: Vec<f64> = self.jitter_window[jstart..].to_vec();
             jit.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             let jmed = median_sorted(&jit);
-            let base = self.baseline_rtt;
+            // No baseline to compare to until it has warmed up.
+            let warm = self.baseline_since.is_some_and(|t| now.saturating_duration_since(t).as_secs_f64() >= GRADE_BASELINE_WARMUP_SECS);
+            let base = if warm { self.baseline_rtt } else { 0.0 };
             let q = prev.quality;
             QualityFlags {
                 slow: self.warn_rtt.is_some_and(|w| hyst(q.slow, med >= w, med >= w * GRADE_SLOW_STAY_FRAC)),

@@ -868,6 +868,7 @@ fn compute_single_layout(area: Rect, states: &[TargetState], args: &Args, col_wi
             StatItem::Extra(ExtraStat::Srtt)   => (5, effective_cw.srtt.as_ref().map_or(0, |c| c.active_w())),
             StatItem::Extra(ExtraStat::Seen)   => (5, effective_cw.seen.unwrap_or(0)),   // "seen "
             StatItem::Extra(ExtraStat::Lost)   => (5, effective_cw.lost.unwrap_or(0)),   // "lost "
+            StatItem::Extra(ExtraStat::Quality) => (8, effective_cw.quality.map_or(0, |w| w + 1)), // "quality " + padded word
             StatItem::Extra(_) => (0, 0),
         };
         if label_w == 0 && val_w == 0 { 0 } else { gap + label_w + val_w }
@@ -2104,6 +2105,28 @@ mod single_view_layout_tests {
 
         let out = render_single_state(100, 20, &[], state);
         assert!(!out.contains("last seen") && !out.contains("last down"), "no down suffix while currently up: {out:?}");
+    }
+
+    #[test]
+    fn quality_column_shows_its_word_in_the_single_view() {
+        let jittery = || {
+            let mut state = TargetState::new("127.0.0.1".to_string());
+            state.current_ip = Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)));
+            for seq in 0..20usize {
+                state.record_sent(seq);
+                state.record_result(seq, Ok(if seq % 2 == 0 { 5.0 } else { 25.0 }), 0, false);
+            }
+            state
+        };
+        let out = render_single_state(120, 20, &["--columns", "default,quality"], jittery());
+        assert!(out.contains("quality jittery"), "labelled word in the stats rows: {out:?}");
+
+        // Too few replies to judge yet.
+        let mut few = TargetState::new("127.0.0.1".to_string());
+        few.current_ip = Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)));
+        for seq in 0..3usize { few.record_sent(seq); few.record_result(seq, Ok(10.0), 0, false); }
+        let out = render_single_state(120, 20, &["--columns", "default,quality"], few);
+        assert!(out.contains("quality ~"), "{out:?}");
     }
 
     #[test]
