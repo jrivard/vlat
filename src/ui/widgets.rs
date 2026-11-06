@@ -27,7 +27,7 @@ use crate::cli::{Args, BaseStat, ExtraStat};
 use crate::constants::{BAR_ANIM_SECS, GRAPH_ANIM_SECS, TIER_FAST_PCT, TIER_HIGH_PCT};
 use crate::state::{GraphColCache, MtrTrend, SparklineColCache, TargetState};
 use crate::types::Sample;
-use super::{ColWidths, RttColWidth, fmt_count, fmt_cv, fmt_since, fmt_rtt, fmt_rtt_nodec, probe_status_spans, Quality, QualityCell, Theme};
+use super::{ColWidths, RttColWidth, fmt_count, fmt_cv, fmt_jitpct, fmt_since, fmt_rtt, fmt_rtt_nodec, probe_status_spans, Quality, QualityCell, Theme};
 
 pub fn trend_spark_span(trend: MtrTrend, ascii: bool, theme: &Theme) -> Span<'static> {
     let (ch, style) = if ascii {
@@ -617,6 +617,7 @@ pub fn build_stats_keys_line(
             ExtraStat::Lost   => if let Some(lost_w) = cw.lost    { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "lost",   w = 1 + lost_w),         dim)); }
             ExtraStat::Status => if let Some(status_w) = cw.status { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "status", w = 1 + status_w),      dim)); }
             ExtraStat::Quality => if let Some(q_w) = cw.quality { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "quality", w = 1 + q_w), dim)); }
+            ExtraStat::Jitpct => if let Some(jp_w) = cw.jitpct  { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "jit%",   w = 1 + jp_w),           dim)); }
             _ => {}
         }
     }
@@ -750,6 +751,7 @@ pub fn build_stats_line<'a>(
                 ExtraStat::Lost   => if let Some(lost_w) = cw.lost    { spans.push(Span::raw(sp.clone())); spans.push(Span::styled(sym("d", "\u{2193}", "lost"), dim)); spans.push(Span::styled(format!("{:>w$}", d, w = lost_w), dim)); }
                 ExtraStat::Status => if let Some(status_w) = cw.status { spans.push(Span::raw(sp.clone())); if verbose_labels { spans.push(Span::styled("status ", dim)); } spans.push(Span::styled(format!("{:<w$}", d, w = status_w + 1), dim)); }
                 ExtraStat::Quality => if let Some(q_w) = cw.quality { spans.push(Span::raw(sp.clone())); if verbose_labels { spans.push(Span::styled("quality ", dim)); } spans.push(Span::styled(format!("{:<w$}", d, w = q_w + 1), dim)); }
+                ExtraStat::Jitpct => if let Some(jp_w) = cw.jitpct  { spans.push(Span::raw(sp.clone())); spans.push(Span::styled(sym("J", "\u{0394}", "jit%"), dim)); spans.push(Span::styled(format!("{:>w$}", d, w = jp_w), dim)); }
                 _ => {}
             }
         }
@@ -940,6 +942,18 @@ pub fn build_stats_line<'a>(
                     QualityCell::Word(_, _) => Style::default().fg(theme.ip_change),
                 };
                 spans.push(Span::styled(format!("{:<w$}", cell.text(ascii), w = q_w + 1), style)); // +1: see status
+            }
+            ExtraStat::Jitpct => if let Some(jp_w) = cw.jitpct {
+                // Always the graded window (it's the figure the `jittery` grade
+                // judges), whatever the stats window setting. Coloured like the
+                // quality column's "jittery" while that grade is on - which also
+                // needs the absolute floor, so a high % on a sub-ms RTT stays plain.
+                spans.push(Span::styled(sym("J", "\u{0394}", "jit%"), dim)); // Δ
+                let pct = s.win_jitter_pct();
+                let style = if pct.is_none() { dim }
+                    else if s.grade.quality.jittery { Style::default().fg(theme.ip_change) }
+                    else { bright };
+                spans.push(Span::styled(format!("{:>w$}", fmt_jitpct(pct), w = jp_w), style));
             }
             _ => { spans.pop(); } // remove the gap we pushed for unrecognised/pseudo variants
         }
@@ -2749,6 +2763,32 @@ mod quality_column_tests {
         let h = col(&hdr, "quality").zip(col(&hdr, "status")).map(|(q, st)| q - st);
         let r = col(&row, "jittery").zip(col(&row, "ok,")).map(|(q, st)| q - st);
         assert!(h.is_some() && h == r, "header {h:?} vs value {r:?}\n{hdr:?}\n{row:?}");
+    }
+
+    #[test]
+    fn jitpct_header_lines_up_with_its_value() {
+        let mut s = TargetState::new("127.0.0.1".to_string());
+        for seq in 0..20usize {
+            s.record_sent(seq);
+            s.record_result(seq, Ok(if seq % 2 == 0 { 5.0 } else { 25.0 }), 0, false);
+        }
+        let states = vec![s];
+        let extras = vec![ExtraStat::Cv, ExtraStat::Jitpct];
+        let cw = super::super::compute_col_widths(&states, false, &extras, &[], false, &crate::cli::ColumnVis::default(), 1_000);
+        let theme = crate::cli::ThemeName::Default.to_theme();
+        let pfx = KeysPrefix {
+            lead: 0, probe: 0, name: 0, addr: 0, trailer: 0, resolve: 0, status: 0, pings_gap: 0, pings: 0,
+            inline_range_w: 0, inline_range_label: String::new(), inline_range_spans: vec![],
+        };
+        let hdr = text(&build_stats_keys_line(&pfx, &cw, 2, false, false, false, false, &theme));
+        let row = text(&build_stats_line(&states[0], false, false, 50.0, &cw, false, false, false, &theme, false, false, 0, 2, false, 1_000));
+        let col = |s: &str, needle: &str| s.chars().collect::<Vec<_>>().windows(needle.chars().count()).position(|w| w.iter().collect::<String>() == needle);
+        // Offsets from the cv column, so a label wider than its value earlier in
+        // the line (e.g. "jitter" over a 5-char value) doesn't matter.
+        let h = col(&hdr, "jit%").zip(col(&hdr, "cv")).map(|(j, c)| j - c);
+        let r = col(&row, "\u{0394}").zip(col(&row, "%")).map(|(j, c)| j - c);
+        assert!(h.is_some() && h == r, "header {h:?} vs value {r:?}\n{hdr:?}\n{row:?}");
+        assert!(row.contains("\u{0394}133%"), "{row:?}");
     }
 }
 

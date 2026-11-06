@@ -116,9 +116,10 @@ fn sort_idx(mode: &SortMode) -> usize {
         SortMode::P95    => 10,
         SortMode::P99    => 11,
         SortMode::Cv     => 12,
-        SortMode::Srtt   => 13,
-        SortMode::Seen   => 14,
-        SortMode::Lost   => 15,
+        SortMode::Jitpct => 13,
+        SortMode::Srtt   => 14,
+        SortMode::Seen   => 15,
+        SortMode::Lost   => 16,
     }
 }
 
@@ -137,8 +138,9 @@ fn sort_mode_at_idx(idx: usize) -> SortMode {
         10 => SortMode::P95,
         11 => SortMode::P99,
         12 => SortMode::Cv,
-        13 => SortMode::Srtt,
-        14 => SortMode::Seen,
+        13 => SortMode::Jitpct,
+        14 => SortMode::Srtt,
+        15 => SortMode::Seen,
         _  => SortMode::Lost,
     }
 }
@@ -364,6 +366,7 @@ fn extra_stat_cli_name(stat: &crate::cli::ExtraStat) -> &'static str {
         ExtraStat::Lost   => "lost",
         ExtraStat::Recent => "recent", ExtraStat::Bar  => "bar",
         ExtraStat::Status => "status", ExtraStat::Quality => "quality",
+        ExtraStat::Jitpct => "jitpct",
         _ => "?",
     }
 }
@@ -3028,7 +3031,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                             }
                         }
                         SortMode::P50 | SortMode::P95 | SortMode::P99
-                        | SortMode::P01 | SortMode::P10 | SortMode::Cv | SortMode::Srtt => {
+                        | SortMode::P01 | SortMode::P10 | SortMode::Cv | SortMode::Jitpct | SortMode::Srtt => {
                             let n = sort_order.len();
                             let win_sort_key = |slot: usize| -> f64 {
                                 let s = &states[slot];
@@ -3040,6 +3043,8 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                                     SortMode::P01  => s.win_p01(),
                                     SortMode::P10  => s.win_p10(),
                                     SortMode::Cv   => s.win_cv(),
+                                    // Too few replies to judge yet: below the ones that can be.
+                                    SortMode::Jitpct => s.win_jitter_pct().unwrap_or(f64::MAX),
                                     SortMode::Srtt => if s.srtt > 0.0 { s.srtt } else { f64::MAX },
                                     _              => unreachable!(),
                                 }
@@ -3848,6 +3853,7 @@ fn print_summary(states: &[TargetState], mode_labels: &[String], exec_cmds: &[St
     let show_p95     = has_extra(&ExtraStat::P95);
     let show_p99     = has_extra(&ExtraStat::P99);
     let show_cv      = has_extra(&ExtraStat::Cv);
+    let show_jitpct  = has_extra(&ExtraStat::Jitpct);
     let show_srtt    = has_extra(&ExtraStat::Srtt);
     let show_changes = any_changes;
     // ExtraStat::Bar and ExtraStat::Recent (the live view's inline range bar
@@ -3905,6 +3911,7 @@ fn print_summary(states: &[TargetState], mode_labels: &[String], exec_cmds: &[St
                 if cv <= 0.0 { "—".to_string() }
                 else if cv < 100.0 { format!("{:.1}%", cv) } else { format!("{:.0}%", cv) }
             }
+            "jit%"   => s.win_jitter_pct().map_or_else(|| "—".to_string(), |p| format!("{:.0}%", p)),
             "srtt"   => if s.srtt > 0.0 { format!("{:.1}ms", s.srtt) } else { "—".to_string() },
             _ => String::new(),
         }
@@ -4004,7 +4011,7 @@ fn print_summary(states: &[TargetState], mode_labels: &[String], exec_cmds: &[St
     for (name, on) in [
         ("stddev", show_std), ("mtr", show_mtr), ("p01", show_p01), ("p10", show_p10),
         ("p50", show_p50), ("p95", show_p95), ("p99", show_p99), ("cv%", show_cv),
-        ("srtt", show_srtt),
+        ("jit%", show_jitpct), ("srtt", show_srtt),
     ] {
         if !on { continue; }
         let vals: Vec<String> = all.iter().map(|(s, _, _, _)| fmt_ext_val(name, s)).collect();

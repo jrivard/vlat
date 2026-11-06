@@ -295,6 +295,7 @@ pub fn bubble_metric(state: &TargetState, sort: &SortMode) -> f64 {
         SortMode::P01    => state.win_p01(),
         SortMode::P10    => state.win_p10(),
         SortMode::Cv     => state.win_cv(),
+        SortMode::Jitpct => state.win_jitter_pct().unwrap_or(0.0),
         SortMode::Srtt   => state.srtt,
         SortMode::Mtr    => state.win_mtr().unwrap_or_else(|| state.win_avg()),
         SortMode::Seen   => state.last_up

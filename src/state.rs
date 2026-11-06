@@ -512,6 +512,28 @@ impl TargetState {
         self.window[start..].iter().map(|&(_, v)| v).collect()
     }
 
+    /// Median probe-to-probe jitter over the samples the quality grade uses.
+    fn grade_jitter_median(&self) -> f64 {
+        let start = self.jitter_window.len().saturating_sub(crate::constants::GRADE_QUALITY_MAX_SAMPLES);
+        let mut jit: Vec<f64> = self.jitter_window[start..].to_vec();
+        jit.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        median_sorted(&jit)
+    }
+
+    /// Relative jitter: median probe-to-probe jitter as a percentage of median
+    /// RTT, over the same recent replies the `jittery` grade judges (so it's
+    /// the number that grade's thresholds are compared to). `None` until there
+    /// are enough replies to grade. Medians, so one outlier barely moves it -
+    /// unlike `win_cv`, which is stddev / mean.
+    pub fn win_jitter_pct(&self) -> Option<f64> {
+        let mut rtts = self.recent_rtts();
+        if rtts.len() < crate::constants::GRADE_QUALITY_MIN_SAMPLES { return None; }
+        rtts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let med = median_sorted(&rtts);
+        if med <= 0.0 { return None; }
+        Some(self.grade_jitter_median() / med * 100.0)
+    }
+
     /// Recomputes `grade` from the window, keeping each grade on until its
     /// (lower) STAY threshold is crossed. Thresholds are in `constants.rs`.
     pub fn regrade(&mut self) { self.regrade_at(Instant::now()); }
@@ -535,10 +557,7 @@ impl TargetState {
             rtts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             let med = median_sorted(&rtts);
             let p99 = rtts[((rtts.len() as f64 * 0.99) as usize).min(rtts.len() - 1)];
-            let jstart = self.jitter_window.len().saturating_sub(GRADE_QUALITY_MAX_SAMPLES);
-            let mut jit: Vec<f64> = self.jitter_window[jstart..].to_vec();
-            jit.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let jmed = median_sorted(&jit);
+            let jmed = self.grade_jitter_median();
             // No baseline to compare to until it has warmed up.
             let warm = self.baseline_since.is_some_and(|t| now.saturating_duration_since(t).as_secs_f64() >= GRADE_BASELINE_WARMUP_SECS);
             let base = if warm { self.baseline_rtt } else { 0.0 };
@@ -905,6 +924,31 @@ pub fn scale_bucket(max_ms: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jitter_pct_is_median_based_and_matches_the_jittery_grade() {
+        let fill = |rtts: &[f64]| {
+            let mut s = TargetState::new("127.0.0.1".to_string());
+            for (seq, &r) in rtts.iter().enumerate() { s.record_sent(seq); s.record_result(seq, Ok(r), 0, false); }
+            s
+        };
+        // Too few replies to judge.
+        assert_eq!(fill(&[10.0; 5]).win_jitter_pct(), None);
+
+        // Steady 10ms with one 1000ms outlier: cv blows up, relative jitter stays ~0.
+        let mut steady = vec![10.0; 40];
+        steady[20] = 1_000.0;
+        let s = fill(&steady);
+        assert!(s.win_cv() > 100.0, "cv {}", s.win_cv());
+        assert!(s.win_jitter_pct().unwrap() < 1.0, "jit% {:?}", s.win_jitter_pct());
+        assert!(!s.grade.quality.jittery);
+
+        // Alternating 5/25ms: median RTT 15, every step 20ms -> 133%, and graded jittery.
+        let alt: Vec<f64> = (0..40).map(|i| if i % 2 == 0 { 5.0 } else { 25.0 }).collect();
+        let s = fill(&alt);
+        assert!((s.win_jitter_pct().unwrap() - 133.3).abs() < 0.1, "{:?}", s.win_jitter_pct());
+        assert!(s.grade.quality.jittery);
+    }
 
     // Enough window to prevent time-based eviction within any unit test run.
     const BIG_WINDOW: u64 = 86_400;

@@ -499,6 +499,8 @@ pub enum SortMode {
     P10,
     /// Lowest coefficient of variation (stddev/avg) to top
     Cv,
+    /// Lowest relative jitter (median jitter / median RTT) to top
+    Jitpct,
     /// Lowest smoothed RTT (RFC 6298 SRTT) to top
     Srtt,
     /// Most recently responded (host up) to top
@@ -523,6 +525,7 @@ impl SortMode {
             SortMode::P01    => "p01",
             SortMode::P10    => "p10",
             SortMode::Cv     => "cv",
+            SortMode::Jitpct => "jitpct",
             SortMode::Srtt   => "srtt",
             SortMode::Seen   => "seen",
             SortMode::Lost   => "lost",
@@ -671,7 +674,7 @@ pub struct Args {
 
     /// Columns and visual elements to display. Default set includes the recent sparkline
     /// and range bar; numeric extras are off by default. Stat values: mtr std p01 p10
-    /// p50 p95 p99 cv srtt seen lost recent bar status quality.
+    /// p50 p95 p99 cv srtt seen lost recent bar status quality jitpct.
     /// Identity values (auto-shown unless overridden): mode name port addr resolve.
     /// Pseudo-values: all (all columns), none (reset to empty), default (default set).
     /// 'none' may be combined: --columns none,mtr shows only mtr; 'all' is exclusive.
@@ -1045,6 +1048,9 @@ pub enum ExtraStat {
     /// "good"; "no reply" if nothing in the window answered; "~" until there's
     /// enough to judge
     Quality,
+    /// Relative jitter: median probe-to-probe jitter / median RTT, as a
+    /// percentage - the figure the "jittery" quality grade is judged on  (Δ / J)
+    Jitpct,
 }
 
 /// Canonical display order of the stat columns used by 'all' and the 'x' dialog.
@@ -1057,7 +1063,7 @@ pub const EXTRA_STAT_ALL: &[ExtraStat] = &[
     ExtraStat::P01, ExtraStat::P10, ExtraStat::P50, ExtraStat::P95, ExtraStat::P99,
     ExtraStat::Cv, ExtraStat::Srtt, ExtraStat::Seen, ExtraStat::Lost,
     ExtraStat::Recent, ExtraStat::Bar,
-    ExtraStat::Status, ExtraStat::Quality,
+    ExtraStat::Status, ExtraStat::Quality, ExtraStat::Jitpct,
 ];
 
 /// The default set: sparkline and range bar are on; numeric extras are off.

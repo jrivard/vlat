@@ -80,6 +80,15 @@ fn print_explain() {
     println!("    {}  srtt    RFC 6298 smoothed RTT",                      bld("τ"));
     println!("    {}  seen    time since the last successful reply",       bld("↑"));
     println!("    {}  lost    time since the last drop  (~ = none yet)",   bld("↓"));
+    println!("    {}  status  verdict, loss record and coverage, e.g. lossy, worsening", bld("ℹ"));
+    println!("    {}  quality slow / degraded / jittery / spiky / good / no reply  (~ = too soon)", bld("◇"));
+    println!("    {}  jitpct  relative jitter (median jitter / median RTT %)  (~ = too soon)", bld("Δ"));
+    println!();
+    println!("  cv vs jitpct - both are variation relative to RTT, but not the same kind:");
+    for (term, text) in vlat::ui::dialogs::cv_vs_jitpct_notes(false) {
+        println!("    {}  {}", bld(&format!("{term:<7}")), text);
+    }
+    println!();
     println!("  Identity columns - automatic by default, force with {} / hide via {}:", bld("--columns"), bld("none"));
     println!("    {}     probe-type badge  (auto: shown when targets have mixed modes)", bld("mode"));
     println!("    {}     custom label or hostname  (auto: shown when one exists)",       bld("name"));

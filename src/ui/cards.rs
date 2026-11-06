@@ -90,7 +90,7 @@ fn stat_cell_count(args: &Args) -> usize {
     let extras = args.extra_stats.iter().filter(|e| matches!(e,
         ExtraStat::Mtr | ExtraStat::Std | ExtraStat::P01 | ExtraStat::P10 | ExtraStat::P50
         | ExtraStat::P95 | ExtraStat::P99 | ExtraStat::Cv | ExtraStat::Srtt | ExtraStat::Seen
-        | ExtraStat::Lost | ExtraStat::Status | ExtraStat::Quality
+        | ExtraStat::Lost | ExtraStat::Status | ExtraStat::Quality | ExtraStat::Jitpct
     )).count();
     base + extras
 }
@@ -164,6 +164,7 @@ fn stat_cells(state: &TargetState, args: &Args, theme: &super::Theme) -> Vec<(&'
             ExtraStat::Lost => v.push(("lost", fmt_since(state.last_drop_at, Instant::now()), val)),
             ExtraStat::Status => v.push(("stat", probe_status_text(state, Instant::now(), args.interval, args.ascii), val)),
             ExtraStat::Quality => v.push(("qual", super::probe_quality_cell(state).text(args.ascii), val)),
+            ExtraStat::Jitpct => v.push(("jit%", super::fmt_jitpct(state.win_jitter_pct()), val)),
             // Recent / Bar are dedicated rows; identity / meta variants never appear here.
             _ => {}
         }

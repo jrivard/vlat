@@ -154,6 +154,7 @@ pub const HELP_SORTS: &[(&str, &str)] = &[
     ("p95",    "lowest 95th-percentile RTT to top"),
     ("p99",    "lowest 99th-percentile RTT to top"),
     ("cv",     "lowest coefficient of variation (std/avg) to top"),
+    ("jitpct", "lowest relative jitter (jitter/RTT medians) to top"),
     ("srtt",   "lowest smoothed RTT (RFC\u{00a0}6298 SRTT) to top"),
     ("seen",   "most recently responded (host up) to top"),
     ("lost",   "longest without a drop to top"),
@@ -163,18 +164,18 @@ pub const HELP_SORTS: &[(&str, &str)] = &[
 /// Reuses the exact glyph the 'c' column dialog shows for the matching stat, so a
 /// sort mode and its column read as the same thing across both dialogs.
 const SORT_SYMBOLS_ASCII: &[&str] = &[
-    " ", "a", "~", "x", "j", "w", "s", "0", "1", "p", "5", "9", "%", "t", "u", "d",
+    " ", "a", "~", "x", "j", "w", "s", "0", "1", "p", "5", "9", "%", "J", "t", "u", "d",
 ];
 const SORT_SYMBOLS_UNICODE: &[&str] = &[
     " ", "a", "\u{2248}", "\u{2717}", "\u{03b4}", "\u{03a9}", "\u{00b1}",
-    "\u{2080}", "\u{2081}", "\u{00bd}", "\u{2085}", "\u{2089}", "%", "\u{03c4}", "\u{2191}", "\u{2193}",
+    "\u{2080}", "\u{2081}", "\u{00bd}", "\u{2085}", "\u{2089}", "%", "\u{0394}", "\u{03c4}", "\u{2191}", "\u{2193}",
 ];
 
 /// Section layout for the sort picker: (display name, start index into HELP_SORTS, item count)
 pub const SORT_GROUPS: &[(&str, usize, usize)] = &[
     ("basic",  0, 2),   // none, name
     ("stats",  2, 5),   // avg, loss, jitter, mtr, std
-    ("detail", 7, 9),   // p01, p10, p50, p95, p99, cv, srtt, seen, lost
+    ("detail", 7, 10),  // p01, p10, p50, p95, p99, cv, jitpct, srtt, seen, lost
 ];
 
 pub const HELP_THEMES: &[&str] = &[
@@ -1399,6 +1400,29 @@ fn raw(text: impl Into<String>) -> Span<'static> {
     Span::raw(text.into())
 }
 
+/// The "cv vs jitpct" note shared by `vlat --explain` and the in-app explain
+/// dialog: (bold term, text) rows; an empty term continues the row above.
+/// Thresholds come from `constants.rs` so the text can't drift from the grade.
+pub fn cv_vs_jitpct_notes(ascii: bool) -> Vec<(&'static str, String)> {
+    use crate::constants::*;
+    let (ge, dash) = if ascii { (">=", "-") } else { ("\u{2265}", "\u{2014}") };
+    let pct = |r: f64| format!("{:.0}%", r * 100.0);
+    vec![
+        ("cv    ", "how spread out the RTTs are overall (stddev / avg). Order doesn't".into()),
+        ("      ", "matter, so slow drift and rare big outliers both push it up.".into()),
+        ("jitpct", "how much RTT jumps from one reply to the next (median jitter / median".into()),
+        ("      ", "RTT). Medians, so one outlier barely moves it, and neither does slow".into()),
+        ("      ", "drift. High = a choppy link (bad for voice, video, games).".into()),
+        ("e.g.  ", "steady 10ms with one 1000ms spike: cv over 100%, jitpct about 0%.".into()),
+        ("      ", "Alternating 5ms/25ms: both high (jitpct 133%).".into()),
+        ("jittery", format!("quality word: jitpct {ge} {} and median jitter {ge} {}ms {dash} the ms floor",
+            pct(GRADE_JITTERY_ENTER_RATIO), GRADE_JITTERY_ENTER_MS)),
+        ("      ", format!("keeps fast LAN hosts \"good\". Clears below {} or {}ms.",
+            pct(GRADE_JITTERY_STAY_RATIO), GRADE_JITTERY_STAY_MS)),
+        ("spiky ", format!("is the outlier check: p99 {ge} {}x median.", GRADE_SPIKY_ENTER_RATIO)),
+    ]
+}
+
 pub fn explain_content_lines(ascii: bool) -> Vec<Line<'static>> {
     let hdr    = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
     let bld    = Style::default().add_modifier(Modifier::BOLD);
@@ -1472,6 +1496,7 @@ pub fn explain_content_lines(ascii: bool) -> Vec<Line<'static>> {
             ("d", "lost  ", "time since the last drop (~ = none yet)"),
             ("i", "status", "verdict, loss record and coverage, e.g. lossy, worsening"),
             ("q", "quality", "slow / degraded / jittery / spiky / good / no reply  (~ = too soon)"),
+            ("J", "jitpct", "median jitter / median RTT % - what \"jittery\" is judged on  (~ = too soon)"),
         ] {
             lines.push(Line::from(vec![raw("    "), span(sym, bld), raw("  "), raw(format!("{name:<7}")), raw("  "), raw(desc)]));
         }
@@ -1490,10 +1515,17 @@ pub fn explain_content_lines(ascii: bool) -> Vec<Line<'static>> {
             ("\u{2193}", "lost  ", "time since the last drop (~ = none yet)"),
             ("\u{2139}", "status", "verdict, loss record and coverage, e.g. lossy, worsening"),
             ("\u{25c7}", "quality", "slow / degraded / jittery / spiky / good / no reply  (~ = too soon)"),
+            ("\u{0394}", "jitpct", "median jitter / median RTT % - what \"jittery\" is judged on  (~ = too soon)"),
         ] {
             lines.push(Line::from(vec![raw("    "), span(sym, bld), raw("  "), raw(format!("{name:<7}")), raw("  "), raw(desc)]));
         }
     }
+    lines.push(Line::from(""));
+    lines.push(Line::from(raw("  cv vs jitpct \u{2014} both are variation relative to RTT, but not the same kind:")));
+    for (term, text) in cv_vs_jitpct_notes(ascii) {
+        lines.push(Line::from(vec![raw("    "), span(format!("{term:<7}"), bld), raw("  "), raw(text)]));
+    }
+    lines.push(Line::from(""));
     lines.push(Line::from(vec![raw("  Identity columns \u{2014} automatic by default, force on with "), span("--columns", bld), raw(", off via "), span("none", bld), raw(":")]));
     for (name, desc) in [
         ("mode   ", "probe-type badge  (auto: shown when targets have mixed modes)"),
@@ -2085,12 +2117,12 @@ pub fn draw_explain_dialog(f: &mut Frame, area: Rect, scroll: u16, ascii: bool, 
     );
 }
 
-/// Number of items in the column toggle dialog (5 identity + 4 base + 14 extra).
-pub const STAT_TOGGLE_COUNT: usize = 24;
+/// Number of items in the column toggle dialog (5 identity + 4 base + 16 extra).
+pub const STAT_TOGGLE_COUNT: usize = 25;
 
 /// Full rendered height of the column toggle dialog: 3 header lines, the items,
-/// 4 group separators, 1 trailing blank, plus 2 border rows.
-pub const STAT_TOGGLE_DIALOG_H: u16 = 3 + STAT_TOGGLE_COUNT as u16 + 4 + 1 + 2;
+/// 5 group separators, 1 trailing blank, plus 2 border rows.
+pub const STAT_TOGGLE_DIALOG_H: u16 = 3 + STAT_TOGGLE_COUNT as u16 + 5 + 1 + 2;
 
 /// Row index of `bar` in the column dialog - the single view never draws the range bar.
 pub const STAT_TOGGLE_BAR_ROW: usize = 21;
@@ -2182,13 +2214,15 @@ pub fn draw_stat_column_toggle_dialog(
          "~", "r", "j", "x",
          "w", "s", "0", "1", "p", "5", "9", "%", "t", "u", "d",
          "o", "|",
-         "i", "q"]
+         "i", "q",
+         "J"]
     } else {
         [" ", " ", ":", " ", "\u{21bb}",
          "\u{2248}", "\u{21d5}", "\u{03b4}", "\u{2717}",
          "\u{03a9}", "\u{00b1}", "\u{2080}", "\u{2081}", "\u{00bd}", "\u{2085}", "\u{2089}", "%", "\u{03c4}", "\u{2191}", "\u{2193}",
          "\u{25cb}", "\u{258f}",
-         "\u{2139}", "\u{25c7}"]
+         "\u{2139}", "\u{25c7}",
+         "\u{0394}"]
     };
 
     // Named section separator — rule chars use col_key_rule, label uses plain DIM,
@@ -2200,7 +2234,7 @@ pub fn draw_stat_column_toggle_dialog(
     // (name, description, is_enabled)
     // Indices 0-4:  identity columns (enabled = effective state from `identity`)
     // Indices 5-8:  base stats (enabled = NOT in hidden_base)
-    // Indices 9-23: extra stats (enabled = in extra_stats)
+    // Indices 9-24: extra stats (enabled = in extra_stats; EXTRA_STAT_ALL order)
     let rows: [(&str, &str, bool); STAT_TOGGLE_COUNT] = [
         ("mode  ", "probe-type badge  (auto: mixed modes)",   identity[0]),
         ("name  ", "custom label or hostname",                identity[1]),
@@ -2226,6 +2260,7 @@ pub fn draw_stat_column_toggle_dialog(
         ("bar   ", "inline range bar on target row",        extra_stats.contains(&ExtraStat::Bar)),
         ("status", "verdict \u{00b7} loss record \u{00b7} coverage", extra_stats.contains(&ExtraStat::Status)),
         ("quality", "slow / degraded / jittery / spiky / good", extra_stats.contains(&ExtraStat::Quality)),
+        ("jitpct", "median jitter / median RTT  (jittery basis)", extra_stats.contains(&ExtraStat::Jitpct)),
     ];
 
     let mut body: Vec<Line> = vec![
@@ -2248,6 +2283,7 @@ pub fn draw_stat_column_toggle_dialog(
         if i == 9  { body.push(section_sep!("extra stats")); }
         if i == 20 { body.push(section_sep!("visual")); }
         if i == 22 { body.push(section_sep!("text")); }
+        if i == 24 { body.push(section_sep!("grading")); }
 
         let is_cursor  = i == cursor;
         let is_narrow  = *enabled && (space_hidden >> i) & 1 == 1;

@@ -150,6 +150,7 @@ pub fn render_window_label(f: &mut Frame, area: Rect, _states: &[TargetState], a
         SortMode::P01    => "  \u{21c5}\u{2080}\u{2081}",         // ⇅₀₁
         SortMode::P10    => "  \u{21c5}\u{2081}\u{2080}",         // ⇅₁₀
         SortMode::Cv     => "  \u{21c5}cv",                       // ⇅cv
+        SortMode::Jitpct => "  \u{21c5}\u{0394}",                 // ⇅Δ
         SortMode::Srtt   => "  \u{21c5}\u{03c4}",                 // ⇅τ
         SortMode::Seen   => "  \u{21c5}\u{2191}",                 // ⇅↑
         SortMode::Lost   => "  \u{21c5}\u{2193}",                 // ⇅↓
@@ -869,6 +870,7 @@ fn compute_single_layout(area: Rect, states: &[TargetState], args: &Args, col_wi
             StatItem::Extra(ExtraStat::Seen)   => (5, effective_cw.seen.unwrap_or(0)),   // "seen "
             StatItem::Extra(ExtraStat::Lost)   => (5, effective_cw.lost.unwrap_or(0)),   // "lost "
             StatItem::Extra(ExtraStat::Quality) => (8, effective_cw.quality.map_or(0, |w| w + 1)), // "quality " + padded word
+            StatItem::Extra(ExtraStat::Jitpct) => (5, effective_cw.jitpct.unwrap_or(0)), // "jit% "
             StatItem::Extra(_) => (0, 0),
         };
         if label_w == 0 && val_w == 0 { 0 } else { gap + label_w + val_w }
