@@ -397,7 +397,6 @@ fn settings_tokens(args: &Args, rt: &RuntimeSettings) -> Vec<Vec<String>> {
     opt!("--debug-log", args.debug_log.as_ref());
     flag!("--alert", args.alert);
     opt!("--warn-rtt", args.warn_rtt);
-    flag!("--no-icmp-warn", args.no_icmp_warn);
     flag!("--allow-elevated-exec", args.allow_elevated_exec);
     out
 }
@@ -1100,7 +1099,7 @@ fn trunc_label(s: &str, w: usize) -> String {
 
 /// Greedy word-wrap of `s` to `width` columns. Always returns at least one
 /// (possibly empty) line.
-fn wrap_text(s: &str, width: usize) -> Vec<String> {
+pub(crate) fn wrap_text(s: &str, width: usize) -> Vec<String> {
     if width == 0 { return vec![s.to_string()]; }
     let mut lines = Vec::new();
     let mut cur = String::new();

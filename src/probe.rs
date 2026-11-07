@@ -24,7 +24,7 @@ use std::{
 use surge_ping::{Client, Config, ICMP, PingIdentifier, PingSequence};
 use tokio::{io::{AsyncReadExt, AsyncWriteExt}, sync::{mpsc, watch}, time};
 use tokio::net::TcpStream as TokioTcpStream;
-use crate::cli::{Args, PingMode};
+use crate::cli::PingMode;
 use crate::types::{ProbeResult, ProbeStarted};
 
 #[derive(Clone, Debug)]
@@ -163,47 +163,33 @@ async fn icmp6_dup_listener(seen: Arc<Mutex<IcmpSeenMap>>) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Returns `(v4_client, v6_client, effective_mode)`.
+/// Open the raw ICMP client(s) needed by ICMP targets.
 /// When `bind_ip` is set only the matching address-family client is created.
-/// When it is unset both are attempted; if both fail the mode falls back to UDP.
-pub fn setup_ping_mode(args: &Args, bind_ip: Option<std::net::IpAddr>) -> (Option<Client>, Option<Client>, PingMode) {
-    match args.mode.as_ref().unwrap_or(&PingMode::Icmp) {
-        PingMode::Icmp => {
-            if let Some(ip) = bind_ip {
-                let kind     = if ip.is_ipv6() { ICMP::V6 } else { ICMP::V4 };
-                let sock_addr = socket2::SockAddr::from(std::net::SocketAddr::new(ip, 0));
-                let config   = Config { kind, bind: Some(sock_addr), ..Config::default() };
-                match Client::new(&config) {
-                    Ok(c) if ip.is_ipv6() => (None, Some(c), PingMode::Icmp),
-                    Ok(c)                 => (Some(c), None, PingMode::Icmp),
-                    Err(e)                => {
-                        crate::logfile::write(&format!("probe: ICMP unavailable with bind address {}: {}, falling back to UDP", ip, e));
-                        (None, None, PingMode::Udp)
-                    }
-                }
-            } else {
-                let v4 = Client::new(&Config { kind: ICMP::V4, ..Config::default() }).ok();
-                let v6 = Client::new(&Config { kind: ICMP::V6, ..Config::default() }).ok();
-                if v4.is_none() && v6.is_none() {
-                    crate::logfile::write("probe: ICMP unavailable (requires root or CAP_NET_RAW), falling back to UDP");
-                    (None, None, PingMode::Udp)
-                } else {
-                    (v4, v6, PingMode::Icmp)
-                }
+/// When it is unset both are attempted and at least one must succeed.
+/// There is deliberately no UDP fallback: on failure the caller reports an error.
+pub fn setup_icmp(bind_ip: Option<std::net::IpAddr>) -> Result<(Option<Client>, Option<Client>), String> {
+    if let Some(ip) = bind_ip {
+        let kind      = if ip.is_ipv6() { ICMP::V6 } else { ICMP::V4 };
+        let sock_addr = socket2::SockAddr::from(std::net::SocketAddr::new(ip, 0));
+        let config    = Config { kind, bind: Some(sock_addr), ..Config::default() };
+        match Client::new(&config) {
+            Ok(c) if ip.is_ipv6() => Ok((None, Some(c))),
+            Ok(c)                 => Ok((Some(c), None)),
+            Err(e)                => {
+                crate::logfile::write(&format!("probe: ICMP unavailable with bind address {}: {}", ip, e));
+                Err(format!("cannot open ICMP socket bound to {}: {}", ip, e))
             }
         }
-        PingMode::Udp   => (None, None, PingMode::Udp),
-        PingMode::Tcp   => (None, None, PingMode::Tcp),
-        PingMode::Http  => (None, None, PingMode::Http),
-        PingMode::Https => (None, None, PingMode::Https),
-        PingMode::Dns   => (None, None, PingMode::Dns),
-        PingMode::Tls   => (None, None, PingMode::Tls),
-        PingMode::Ntp   => (None, None, PingMode::Ntp),
-        PingMode::Ssh   => (None, None, PingMode::Ssh),
-        PingMode::Smtp  => (None, None, PingMode::Smtp),
-        PingMode::Smtps => (None, None, PingMode::Smtps),
-        PingMode::Exec  => (None, None, PingMode::Exec),
-        PingMode::Quic  => (None, None, PingMode::Quic),
+    } else {
+        let v4 = Client::new(&Config { kind: ICMP::V4, ..Config::default() });
+        let v6 = Client::new(&Config { kind: ICMP::V6, ..Config::default() });
+        match (v4, v6) {
+            (Err(e), Err(_)) => {
+                crate::logfile::write(&format!("probe: ICMP unavailable: {}", e));
+                Err(format!("cannot open ICMP socket: {}", e))
+            }
+            (v4, v6) => Ok((v4.ok(), v6.ok())),
+        }
     }
 }
 

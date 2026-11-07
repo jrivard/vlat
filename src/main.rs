@@ -293,7 +293,8 @@ fn print_explain() {
     // ICMP permissions
     println!();
     println!("{}", hdr("ICMP permissions:"));
-    println!("  vlat tries ICMP first and falls back to UDP automatically.");
+    println!("  ICMP is the default mode; if it is unavailable vlat exits with an error.");
+    println!("  Use --mode udp (or host:udp / host:tcp:443 per target) to probe without privileges.");
     println!("  To enable ICMP:");
     println!("    sudo vlat ...");
     println!("    sudo setcap cap_net_raw+ep $(which vlat)");

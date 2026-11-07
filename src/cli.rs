@@ -22,7 +22,7 @@ use crate::ui::Theme;
 pub const AFTER_HELP: &str = "\
 EXAMPLES:
   Standard form:
-    vlat example.net                       # single target, ICMP (or UDP fallback)
+    vlat example.net                       # single target, ICMP (needs root or CAP_NET_RAW)
     vlat 192.168.1.1 10.0.0.1              # two targets side-by-side
     vlat example.net:tcp:443               # per-target mode and port
     vlat example.net:tcp:443 192.168.1.1 example.net:udp  # mixed modes per target
@@ -150,7 +150,7 @@ ARGUMENT FILES:
   Usage: vlat @targets.txt -w 60s
 
 PROBE TYPES:
-  icmp    Raw ICMP echo - requires root or CAP_NET_RAW; falls back to udp if unavailable
+  icmp    Raw ICMP echo - requires root or CAP_NET_RAW; exits with an error if unavailable
   udp     UDP probe - success on ICMP Port Unreachable reply; no root needed
   tcp     TCP handshake - measures connect RTT; connection refused counts as a drop
   http    HTTP GET / over plain TCP - any valid HTTP response counts as success (path: --http-path / hpath=)
@@ -595,7 +595,7 @@ pub struct Args {
     pub targets: Vec<String>,
 
     // ── Core behavior ─────────────────────────────────────────────────────────
-    /// Probe method (default: icmp with udp fallback when unavailable)
+    /// Probe method (default: icmp; exits with an error if ICMP is unavailable)
     #[arg(short, long, value_enum)]
     pub mode: Option<PingMode>,
 
@@ -815,8 +815,9 @@ pub struct Args {
     pub warn_rtt: Option<f64>,
 
     // ── Rarely touched ────────────────────────────────────────────────────────
-    /// Suppress the ICMP permission warning dialog at startup
-    #[arg(long)]
+    /// Deprecated no-op: vlat no longer falls back to UDP or shows an ICMP
+    /// warning dialog.  Still accepted so older saved sessions keep loading.
+    #[arg(long, hide = true)]
     pub no_icmp_warn: bool,
 
     /// Allow exec probes to run with elevated privileges (root or CAP_NET_RAW); shows a startup warning
@@ -950,14 +951,14 @@ impl Args {
                 self.tls_cert.as_deref().unwrap_or("-"),
                 tls_ver,
                 self.exec_cmd.as_deref().unwrap_or("-")),
-            format!("config: output={} output-format={} summary-json={} summary-json-interval={}s alert={} warn-rtt={} no-icmp-warn={} allow-elevated-exec={}",
+            format!("config: output={} output-format={} summary-json={} summary-json-interval={}s alert={} warn-rtt={} allow-elevated-exec={}",
                 self.output.as_deref().unwrap_or("-"),
                 self.output_format.as_ref().map(|f| format!("{:?}", f).to_lowercase()).unwrap_or_else(|| "auto".to_string()),
                 self.summary_json.as_deref().unwrap_or("-"),
                 self.summary_json_interval.unwrap_or(crate::constants::SUMMARY_JSON_DEFAULT_SECS),
                 self.alert,
                 self.warn_rtt.map(|r| format!("{:.0}ms", r)).unwrap_or_else(|| "-".to_string()),
-                self.no_icmp_warn, self.allow_elevated_exec),
+                self.allow_elevated_exec),
         ]
     }
 

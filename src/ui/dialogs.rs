@@ -1848,7 +1848,8 @@ pub fn explain_content_lines(ascii: bool) -> Vec<Line<'static>> {
     // ICMP permissions
     lines.push(Line::from(""));
     lines.push(Line::from(span("ICMP permissions:", hdr)));
-    lines.push(Line::from("  vlat tries ICMP first and falls back to UDP automatically."));
+    lines.push(Line::from("  ICMP is the default mode; if it is unavailable vlat exits with an error."));
+    lines.push(Line::from("  Use --mode udp (or host:udp / host:tcp:443 per target) to probe without privileges."));
     lines.push(Line::from("  To enable ICMP:"));
     lines.push(Line::from("    sudo vlat ..."));
     lines.push(Line::from("    sudo setcap cap_net_raw+ep $(which vlat)"));

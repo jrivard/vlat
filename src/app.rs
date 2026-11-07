@@ -53,7 +53,7 @@ use crate::{
     cli::{Args, OutputFormat, PingMode, SortMode, ThemeName, ViewMode},
     constants::{DIALOG_ROWS, FAST_TICK_MS, FREEZE_NOTICE_SECS, HELP_DISMISS_SECS, SCALE_DECREASE_HOLD_SECS, SORT_NOTICE_SECS, THEME_NOTICE_SECS, VIEW_NOTICE_SECS, UI_TICK_MS, WARNING_DISMISS_SECS},
     output::{detect_format, open_csv, open_json, write_summary_json_snapshot, OutputFile},
-    probe::{setup_ping_mode, spawn_demo_task, spawn_probe_task, IcmpDupTracker, TlsConfig, TlsVerify, TlsVersion},
+    probe::{setup_icmp, spawn_demo_task, spawn_probe_task, IcmpDupTracker, TlsConfig, TlsVerify, TlsVersion},
     resolver::{parse_and_resolve, parse_target_spec, expand_target_specs, expand_dual_stack, fire_resolve, build_dns_resolver, resolve_ip, ip_prefs, DnsResolver},
     state::TargetState,
     types::{InitResolveResult, ProbeResult, ProbeStarted, ResolveResult},
@@ -180,6 +180,84 @@ fn eff_interval(ov: Option<u64>, global: u64) -> u64 { ov.unwrap_or(global) }
 fn eff_timeout(ov: Option<f64>, global: f64) -> f64 { ov.unwrap_or(global) }
 fn eff_resolve(no_dns_refresh: bool, ov: Option<u64>, global: u64) -> u64 {
     if no_dns_refresh { 0 } else { ov.unwrap_or(global) }
+}
+
+/// Startup error for when a target needs ICMP but raw sockets can't be opened.
+/// vlat never silently swaps ICMP for UDP, so tell the user how to get ICMP
+/// working or how to pick a different probe mode explicitly.
+///
+/// `icmp_targets` holds `(spec, host)` pairs; the first host seeds the examples.
+fn print_icmp_unavailable_error(reason: &str, icmp_targets: &[(String, String)]) {
+    use std::io::IsTerminal;
+    // Wrap to the terminal width; when stderr is redirected, don't wrap at all.
+    let width = if std::io::stderr().is_terminal() { term_size().0 as usize } else { usize::MAX };
+    for line in icmp_unavailable_lines(reason, icmp_targets, width) {
+        eprintln!("{}", line);
+    }
+}
+
+/// Build the ICMP-unavailable error text wrapped to `width` columns.  Prose is
+/// word-wrapped with a hanging indent; commands are never split (they must stay
+/// copy-pasteable), and switch from `cmd   # note` columns to a stacked
+/// `# note` / `cmd` layout when the columns would not fit.
+fn icmp_unavailable_lines(reason: &str, icmp_targets: &[(String, String)], width: usize) -> Vec<String> {
+    const MAX_LISTED: usize = 5;
+    let mut out = Vec::new();
+    let prose = |out: &mut Vec<String>, first: &str, rest: &str, text: &str| {
+        let avail = width.saturating_sub(first.chars().count()).max(20);
+        for (i, l) in crate::session::wrap_text(text, avail).into_iter().enumerate() {
+            out.push(format!("{}{}", if i == 0 { first } else { rest }, l));
+        }
+    };
+
+    let mut listed = icmp_targets.iter().take(MAX_LISTED).map(|(spec, _)| spec.as_str()).collect::<Vec<_>>().join(", ");
+    if icmp_targets.len() > MAX_LISTED {
+        listed.push_str(&format!(", ... ({} more)", icmp_targets.len() - MAX_LISTED));
+    }
+    let host = icmp_targets.first().map(|(_, h)| h.as_str()).unwrap_or("example.net");
+    // IPv6 literals need brackets in URL form.
+    let url_host = if host.contains(':') { format!("[{}]", host) } else { host.to_string() };
+
+    prose(&mut out, "error: ", "  ", &format!("ICMP is unavailable ({})", reason));
+    prose(&mut out, "  ", "  ", "ICMP is the default probe mode and needs root, CAP_NET_RAW, or (Linux) unprivileged ping.");
+    prose(&mut out, "  target(s) using ICMP: ", "    ", &listed);
+
+    let fixes = [
+        ("sudo setcap cap_net_raw+ep $(which vlat)".to_string(),                  "grant raw-socket capability once (Linux)"),
+        ("sudo sysctl -w net.ipv4.ping_group_range=\"0 2147483647\"".to_string(), "or allow unprivileged ping (Linux)"),
+        ("sudo vlat ...".to_string(),                                             "or run as root / Administrator"),
+    ];
+    let modes = [
+        (format!("vlat --mode udp {}", host),        "all targets via UDP"),
+        (format!("vlat udp://{}", url_host),         "one target via UDP"),
+        (format!("vlat tcp://{}:443", url_host),     "one target via TCP connect"),
+    ];
+    let cmd_w  = fixes.iter().chain(modes.iter()).map(|(c, _)| c.chars().count()).max().unwrap_or(0);
+    let note_w = fixes.iter().chain(modes.iter()).map(|(_, n)| n.chars().count()).max().unwrap_or(0);
+    let columns = 4 + cmd_w + 5 + note_w <= width;
+    let commands = |out: &mut Vec<String>, rows: &[(String, &str)]| {
+        for (cmd, note) in rows {
+            if columns {
+                out.push(format!("    {:<w$}   # {}", cmd, note, w = cmd_w));
+            } else {
+                let avail = width.saturating_sub(6).max(20);
+                for l in crate::session::wrap_text(note, avail) {
+                    out.push(format!("    # {}", l));
+                }
+                out.push(format!("    {}", cmd));
+            }
+        }
+    };
+
+    out.push(String::new());
+    out.push("  to enable ICMP:".to_string());
+    commands(&mut out, &fixes);
+    out.push(String::new());
+    prose(&mut out, "  ", "  ", "or choose a probe mode that needs no privileges:");
+    commands(&mut out, &modes);
+    out.push(String::new());
+    prose(&mut out, "  more info: ", "    ", "vlat --explain (probe modes, ICMP permissions)");
+    out
 }
 
 fn mode_label_str(mode: &PingMode, port: u16, args: &Args) -> String {
@@ -463,22 +541,34 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
     };
 
     // --demo runs synthetic targets (see crate::demo) instead of real ones -
-    // skip the real-probe-only ICMP capability probe entirely rather than
-    // pointlessly attempting (and logging a fallback for) a raw socket no
-    // demo task will ever use.
+    // no demo task ever uses a raw socket, so skip the ICMP capability probe.
     let demo_count: Option<usize> = args.demo.then(|| args.demo_count.unwrap_or(5));
-    let (icmp_client_v4, icmp_client_v6, active_mode) = if demo_count.is_some() {
-        (None, None, PingMode::Icmp)
-    } else {
-        setup_ping_mode(&args, bind_ip)
-    };
     let target_count = demo_count.unwrap_or(args.targets.len());
-    let icmp_available = matches!(active_mode, PingMode::Icmp);
 
-    if demo_count.is_none() && !icmp_available && args.mode == Some(PingMode::Icmp) {
-        eprintln!("error: ICMP mode requested but unavailable (requires root or CAP_NET_RAW)");
-        process::exit(1);
-    }
+    // Open raw ICMP sockets only if some target actually probes with ICMP (the
+    // default mode).  There is no UDP fallback: if ICMP is needed but
+    // unavailable, exit with an error explaining how to fix it.
+    let icmp_targets: Vec<(String, String)> = if demo_count.is_some() {
+        Vec::new()
+    } else {
+        args.targets.iter()
+            .filter_map(|spec| parse_target_spec(spec, &args).ok()
+                .filter(|p| p.mode == PingMode::Icmp)
+                .map(|p| (spec.clone(), p.host.to_string())))
+            .collect()
+    };
+    let icmp_available = !icmp_targets.is_empty();
+    let (icmp_client_v4, icmp_client_v6) = if icmp_available {
+        match setup_icmp(bind_ip) {
+            Ok(clients) => clients,
+            Err(e) => {
+                print_icmp_unavailable_error(&e, &icmp_targets);
+                process::exit(1);
+            }
+        }
+    } else {
+        (None, None)
+    };
 
     // Reject exact duplicate target specs up front.
     {
@@ -689,13 +779,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
             eprint!("\r\x1B[2K");
         }
         let rt = rt_result?;
-        let eff_mode = match rt.mode {
-            PingMode::Icmp if !icmp_available => {
-                crate::logfile::write(&format!("probe: target '{}' requested ICMP but it is unavailable, using UDP", rt.label));
-                PingMode::Udp
-            }
-            ref m => m.clone(),
-        };
+        let eff_mode = rt.mode.clone();
         let eff_port = rt.port;
         let mode_label = mode_label_str(&eff_mode, eff_port, &args);
         let exec_cmd_str = rt.exec_cmd.or_else(|| args.exec_cmd.clone()).unwrap_or_default();
@@ -742,13 +826,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
             target_ip_prefs.push(ip_prefs(parsed.overrides.ip_version, &args));
             http_path_arcs.push(Arc::new(http_path_str));
             exec_cmd_arcs.push(Arc::new(exec_cmd_str.clone()));
-            let eff_mode = match mode {
-                PingMode::Icmp if !icmp_available => {
-                    crate::logfile::write(&format!("probe: target '{}' requested ICMP but it is unavailable, using UDP", host));
-                    PingMode::Udp
-                }
-                m => m,
-            };
+            let eff_mode = mode;
             let eff_port = port;
             let mode_label = mode_label_str(&eff_mode, eff_port, &args);
             let input_is_ip = host.parse::<std::net::IpAddr>().is_ok();
@@ -1286,12 +1364,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
 
 
 
-    let mut dialog = if !icmp_available && args.mode.is_none() && !args.no_icmp_warn {
-        DialogMode::Warning {
-            dismiss_at: std::time::Instant::now() + Duration::from_secs(WARNING_DISMISS_SECS),
-            message: "ICMP unavailable \u{2014} falling back to UDP.  Run 'vlat --explain' for more info".to_string(),
-        }
-    } else if has_exec_targets && is_elevated() && args.allow_elevated_exec {
+    let mut dialog = if has_exec_targets && is_elevated() && args.allow_elevated_exec {
         DialogMode::Warning {
             dismiss_at: std::time::Instant::now() + Duration::from_secs(WARNING_DISMISS_SECS),
             message: "WARNING: exec probes running as root \u{2014} shell commands inherit elevated privileges".to_string(),
@@ -4118,5 +4191,57 @@ mod exit_summary_tests {
         }
         let line = single_exit_summary_line(&s, 125, &theme(), false);
         assert!(line.contains('\x1b'), "colors should be emitted when no_color is false: {line:?}");
+    }
+}
+
+#[cfg(test)]
+mod icmp_error_tests {
+    use super::*;
+
+    fn icmp_err(width: usize) -> Vec<String> {
+        let targets = vec![
+            ("1.1.1.1".to_string(), "1.1.1.1".to_string()),
+            ("www.example.com,label=web".to_string(), "www.example.com".to_string()),
+        ];
+        icmp_unavailable_lines("cannot open ICMP socket: Operation not permitted (os error 1)", &targets, width)
+    }
+
+    #[test]
+    fn wide_uses_aligned_columns_and_url_examples() {
+        let lines = icmp_err(200);
+        assert!(lines.iter().any(|l| l.starts_with("    vlat udp://1.1.1.1 ") && l.contains("# one target via UDP")), "{lines:#?}");
+        assert!(lines.iter().any(|l| l.starts_with("    vlat tcp://1.1.1.1:443 ")), "{lines:#?}");
+        let cols: Vec<usize> = lines.iter().filter_map(|l| l.find("   # ")).collect();
+        assert!(cols.len() == 6 && cols.windows(2).all(|w| w[0] == w[1]), "notes not aligned: {lines:#?}");
+    }
+
+    #[test]
+    fn narrow_wraps_prose_and_stacks_commands() {
+        for width in [40usize, 60, 100] {
+            let lines = icmp_err(width);
+            for l in &lines {
+                // Commands are never split; everything else must fit.
+                let is_cmd = l.starts_with("    vlat ") || l.starts_with("    sudo ");
+                assert!(is_cmd || l.chars().count() <= width, "width {width}: {l:?} too long");
+            }
+            // Stacked layout: note line directly above its command.
+            let i = lines.iter().position(|l| l == "    vlat udp://1.1.1.1").expect("udp example");
+            assert_eq!(lines[i - 1], "    # one target via UDP");
+        }
+    }
+
+    #[test]
+    fn brackets_ipv6_in_url_examples() {
+        let lines = icmp_unavailable_lines("x", &[("2001:db8::1".to_string(), "2001:db8::1".to_string())], 200);
+        assert!(lines.iter().any(|l| l.contains("udp://[2001:db8::1] ")), "{lines:#?}");
+        assert!(lines.iter().any(|l| l.contains("tcp://[2001:db8::1]:443")), "{lines:#?}");
+    }
+
+    #[test]
+    fn url_examples_parse_as_udp_and_tcp() {
+        let args = <Args as clap::Parser>::parse_from(["vlat", "x"]);
+        assert_eq!(parse_target_spec("udp://1.1.1.1", &args).unwrap().mode, PingMode::Udp);
+        let p = parse_target_spec("tcp://[2001:db8::1]:443", &args).unwrap();
+        assert_eq!((p.mode, p.port), (PingMode::Tcp, 443));
     }
 }

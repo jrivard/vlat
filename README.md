@@ -59,8 +59,9 @@ Alternatively, install directly from crates.io:
 cargo install vlat
 ```
 
-\* On Linux, `cap_net_raw` capability is needed for ICMP. If ICMP is unavailable and no
-explicit `--mode` was set, vlat falls back to UDP.
+\* On Linux, `cap_net_raw` capability is needed for ICMP. If ICMP is needed but
+unavailable, vlat exits with an error; use `--mode udp` (or a per-target mode such as
+`host:udp` or `host:tcp:443`) to probe without privileges.
 
 ```sh
 # Linux: grant capability to the binary (recommended)
@@ -83,7 +84,7 @@ Omit targets to pick a saved session from a menu instead (see [Sessions](#sessio
 ### Basic examples
 
 ```sh
-# Ping a single host (ICMP if available, UDP fallback)
+# Ping a single host (ICMP; needs cap_net_raw or root)
 vlat example.org
 
 # Ping multiple hosts
