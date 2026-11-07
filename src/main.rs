@@ -83,6 +83,7 @@ fn print_explain() {
     println!("    {}  status  verdict, loss record and coverage, e.g. lossy, worsening  (*)", bld("ℹ"));
     println!("    {}  quality slow / degraded / jittery / spiky / good / no reply  (~ = too soon)  (*)", bld("◇"));
     println!("    {}  jitpct  relative jitter: median jitter / median RTT %  (~ = too soon)", bld("Δ"));
+    println!("    {}  loss    packet loss %  (~ = nothing sent yet)", bld("ℓ"));
     println!("    (*) {}", vlat::ui::dialogs::TEXT_COLUMNS_WINDOW_NOTE);
     println!();
     println!("  cv vs jitpct - both are variation relative to RTT, but not the same kind:");

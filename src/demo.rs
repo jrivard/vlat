@@ -410,7 +410,7 @@ mod tests {
             let now = t0 + Duration::from_secs(i as u64);
             s.record_sent_at(now, i);
             s.record_result_at(now, i, model.next_outcome(), DEMO_WINDOW_SECS, false);
-            StatusSummary::from_state(&s, now, 1_000).parts()[0].clone()
+            StatusSummary::from_state(&s, now, 1_000, true).parts()[0].clone()
         }).collect()
     }
 

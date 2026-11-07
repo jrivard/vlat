@@ -431,6 +431,7 @@ pub struct ColWidths {
     pub status: Option<usize>,      // max width of probe_status_text(), e.g. "ok · no loss · 31 sent over 30s"
     pub quality: Option<usize>,     // max width of probe_quality_cell() text, e.g. "degraded↗"
     pub jitpct: Option<usize>,      // max width of fmt_jitpct() string, e.g. "61%"
+    pub loss:   Option<usize>,      // max width of fmt_loss_col() string, e.g. "0.25%"
     pub stat_order: Vec<ExtraStat>, // display order of active extra stat columns
     pub hidden_base_stats: Vec<BaseStat>, // base stats the user has hidden at runtime
 }
@@ -462,7 +463,8 @@ impl ColWidths {
             + self.seen.map_or(0,            |w| w + gap + 1)
             + self.lost.map_or(0,            |w| w + gap + 1)
             + self.status.map_or(0,          |w| w + gap + 1)
-            + self.jitpct.map_or(0,          |w| w + gap + 1);
+            + self.jitpct.map_or(0,          |w| w + gap + 1)
+            + self.loss.map_or(0,            |w| w + gap + 1);
         let show_drops = show_drp && !hide(BaseStat::Drops);
         base + extras
             + if show_drops { self.drp + gap + 1 } else { 0 }
@@ -494,7 +496,7 @@ impl ColWidths {
                     ExtraStat::P95  => if let Some(ref mut c) = cw.p95  { if c.frac_w > 0 { c.frac_w = 0; stripped = true; break; } }
                     ExtraStat::P99  => if let Some(ref mut c) = cw.p99  { if c.frac_w > 0 { c.frac_w = 0; stripped = true; break; } }
                     ExtraStat::Srtt => if let Some(ref mut c) = cw.srtt { if c.frac_w > 0 { c.frac_w = 0; stripped = true; break; } }
-                    _ => {} // Cv/Jitpct/Seen/Lost/Status have no frac_w; All/Default/None never appear
+                    _ => {} // Cv/Jitpct/Loss/Seen/Lost/Status have no frac_w; All/Default/None never appear
                 }
             }
             if stripped { continue; }
@@ -581,6 +583,7 @@ pub fn compute_space_hidden(
             ExtraStat::Status => (22, cw.status.map(|w| gap + 1 + w)),
             ExtraStat::Quality => (23, cw.quality.map(|w| gap + 1 + w)),
             ExtraStat::Jitpct => (24, cw.jitpct.map(|w| gap + 1 + w)),
+            ExtraStat::Loss   => (25, cw.loss.map(|w| gap + 1 + w)),
             _ => continue,
         };
         if let Some(w) = w_opt {
@@ -645,6 +648,8 @@ pub fn compute_no_data(states: &[TargetState], extras: &[ExtraStat], hidden_base
     if want(&ExtraStat::Quality) && !any_graded { mask |= 1 << 23; }
     let any_jitpct = states.iter().any(|s| s.win_jitter_pct().is_some() || s.life_jitter_pct().is_some());
     if want(&ExtraStat::Jitpct) && !any_jitpct { mask |= 1 << 24; }
+    let any_sent = states.iter().any(|s| s.total_sent > 0);
+    if want(&ExtraStat::Loss) && !any_sent { mask |= 1 << 25; }
 
     mask
 }
@@ -675,6 +680,7 @@ pub fn compute_col_widths(states: &[TargetState], stats_window: bool, extras: &[
     let mut status_w = 1usize;
     let mut quality_w = "quality".len(); // the header label is the widest fixed text
     let mut jitpct_w = 3usize;   // min: header "jit%" = glyph slot + 3
+    let mut loss_w   = 4usize;   // min: header "loss%" = glyph slot + 4
     let now = Instant::now();
     for s in states {
         // name column: custom label, or hostname (non-IP host string), or blank for pure IP targets
@@ -786,13 +792,16 @@ pub fn compute_col_widths(states: &[TargetState], stats_window: bool, extras: &[
             lost_w = lost_w.max(fmt_since(s.last_drop_at, now).len());
         }
         if want(&ExtraStat::Status) {
-            status_w = status_w.max(probe_status_text(s, now, interval_ms, false).chars().count()); // separator width is the same in --ascii
+            status_w = status_w.max(probe_status_text(s, now, interval_ms, stats_window, false).chars().count()); // separator width is the same in --ascii
         }
         if want(&ExtraStat::Quality) {
             quality_w = quality_w.max(probe_quality_cell(s).text(false).chars().count()); // arrows are 1 col in --ascii too
         }
         if want(&ExtraStat::Jitpct) {
             jitpct_w = jitpct_w.max(fmt_jitpct(s.jitter_pct(stats_window)).len());
+        }
+        if want(&ExtraStat::Loss) {
+            loss_w = loss_w.max(fmt_loss_col(s.loss_pct(stats_window)).len());
         }
     }
     ColWidths {
@@ -817,6 +826,7 @@ pub fn compute_col_widths(states: &[TargetState], stats_window: bool, extras: &[
         status:     if want(&ExtraStat::Status) { Some(status_w) } else { None },
         quality:    if want(&ExtraStat::Quality) { Some(quality_w) } else { None },
         jitpct:     if want(&ExtraStat::Jitpct) { Some(jitpct_w) } else { None },
+        loss:       if want(&ExtraStat::Loss)   { Some(loss_w) }   else { None },
         stat_order: extras.to_vec(),
         hidden_base_stats: hidden_base.to_vec(),
     }
@@ -905,6 +915,7 @@ fn col_widths_max(a: &ColWidths, b: &ColWidths) -> ColWidths {
         status:        match (a.status, b.status) { (Some(x), Some(y)) => Some(x.max(y)), (x, y) => x.or(y) },
         quality:       match (a.quality, b.quality) { (Some(x), Some(y)) => Some(x.max(y)), (x, y) => x.or(y) },
         jitpct:        match (a.jitpct, b.jitpct) { (Some(x), Some(y)) => Some(x.max(y)), (x, y) => x.or(y) },
+        loss:          match (a.loss, b.loss) { (Some(x), Some(y)) => Some(x.max(y)), (x, y) => x.or(y) },
         // Visibility/order reflect the user's current toggle state and shouldn't be
         // held back by the width hysteresis below - only numeric widths get that.
         stat_order:    b.stat_order.clone(),
@@ -977,6 +988,20 @@ pub fn fmt_jitpct(pct: Option<f64>) -> String {
     pct.map_or_else(|| "~".to_string(), |p| format!("{:.0}%", p))
 }
 
+/// Packet-loss percentage for the loss column: finer than `fmt_loss` (the
+/// status text's), so small but real loss doesn't round away - two decimals
+/// under 10%, one under 100%. `None` (nothing sent yet) is "~"; exact zero is
+/// "0%", so any nonzero loss reads differently from none at all.
+pub fn fmt_loss_col(pct: Option<f64>) -> String {
+    match pct {
+        None => "~".to_string(),
+        Some(p) if p <= 0.0 => "0%".to_string(),
+        Some(p) if p < 10.0 => format!("{:.2}%", p),
+        Some(p) if p < 100.0 => format!("{:.1}%", p.min(99.9)), // never rounds up to a false "100.0%"
+        Some(_) => "100%".to_string(),
+    }
+}
+
 /// Compact "time since" string, e.g. "now", "5s", "12m", "3h", "2d" - used for the
 /// seen (last reply) and lost (last drop) columns. None (no such event yet) formats
 /// as "~", matching the other stat columns' placeholder.
@@ -1025,6 +1050,20 @@ pub fn lerp_rgb(r0: u8, g0: u8, b0: u8, r1: u8, g1: u8, b1: u8, t: f64) -> (u8, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- fmt_loss_col ---
+
+    #[test]
+    fn loss_col_precision() {
+        assert_eq!(fmt_loss_col(None), "~");
+        assert_eq!(fmt_loss_col(Some(0.0)), "0%");
+        assert_eq!(fmt_loss_col(Some(0.003)), "0.00%"); // nonzero still differs from "0%"
+        assert_eq!(fmt_loss_col(Some(0.25)), "0.25%");
+        assert_eq!(fmt_loss_col(Some(6.666)), "6.67%");
+        assert_eq!(fmt_loss_col(Some(33.33)), "33.3%");
+        assert_eq!(fmt_loss_col(Some(99.97)), "99.9%"); // no false "100.0%"
+        assert_eq!(fmt_loss_col(Some(100.0)), "100%");
+    }
 
     // --- fmt_count ---
 

@@ -909,6 +909,7 @@ fn compute_single_layout(area: Rect, states: &[TargetState], args: &Args, col_wi
             StatItem::Extra(ExtraStat::Lost)   => (5, effective_cw.lost.unwrap_or(0)),   // "lost "
             StatItem::Extra(ExtraStat::Quality) => (8, effective_cw.quality.map_or(0, |w| w + 1)), // "quality " + padded word
             StatItem::Extra(ExtraStat::Jitpct) => (5, effective_cw.jitpct.unwrap_or(0)), // "jit% "
+            StatItem::Extra(ExtraStat::Loss)   => (6, effective_cw.loss.unwrap_or(0)),   // "loss% "
             StatItem::Extra(_) => (0, 0),
         };
         if label_w == 0 && val_w == 0 { 0 } else { gap + label_w + val_w }
@@ -1046,7 +1047,7 @@ pub fn draw_single_ui(f: &mut Frame, states: &[TargetState], ctx: &ViewCtx) {
 
             if args.single_status {
                 line.spans.push(Span::raw("  "));
-                line.spans.extend(super::probe_status_spans(state, Instant::now(), args.interval, args.ascii, &args.theme, Style::default()));
+                line.spans.extend(super::probe_status_spans(state, Instant::now(), args.interval, args.is_window(), args.ascii, &args.theme, Style::default()));
             }
         }
 
@@ -1145,7 +1146,7 @@ pub fn draw_single_ui(f: &mut Frame, states: &[TargetState], ctx: &ViewCtx) {
         // args.single_status) - it lives here on the header line, not in the stat rows below.
         if args.single_status {
             line.spans.push(Span::raw("  "));
-            line.spans.extend(super::probe_status_spans(state, Instant::now(), args.interval, args.ascii, &args.theme, Style::default()));
+            line.spans.extend(super::probe_status_spans(state, Instant::now(), args.interval, args.is_window(), args.ascii, &args.theme, Style::default()));
         }
 
         let w = horiz[1].width as usize;

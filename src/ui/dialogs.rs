@@ -1392,7 +1392,7 @@ fn raw(text: impl Into<String>) -> Span<'static> {
 /// How the text columns relate to the window setting - shared by `vlat
 /// --explain`, the in-app explain dialog and the rolling-window section.
 pub const TEXT_COLUMNS_WINDOW_NOTE: &str =
-    "status and quality describe recent behaviour: the last 5m (or the whole window, if shorter)";
+    "status and quality describe recent behaviour: the last 5m (or the whole window, if shorter); status's loss count and % cover the window";
 
 fn fmt_secs_short(secs: u64) -> String {
     if secs.is_multiple_of(3600) { format!("{}h", secs / 3600) } else if secs.is_multiple_of(60) { format!("{}m", secs / 60) } else { format!("{secs}s") }
@@ -1497,6 +1497,7 @@ pub fn explain_content_lines(ascii: bool) -> Vec<Line<'static>> {
             ("i", "status", "verdict, loss record and coverage, e.g. lossy, worsening  (*)"),
             ("q", "quality", "slow / degraded / jittery / spiky / good / no reply  (~ = too soon)  (*)"),
             ("J", "jitpct", "relative jitter: median jitter / median RTT %  (~ = too soon)"),
+            ("L", "loss  ", "packet loss %  (~ = nothing sent yet)"),
         ] {
             lines.push(Line::from(vec![raw("    "), span(sym, bld), raw("  "), raw(format!("{name:<7}")), raw("  "), raw(desc)]));
         }
@@ -1516,6 +1517,7 @@ pub fn explain_content_lines(ascii: bool) -> Vec<Line<'static>> {
             ("\u{2139}", "status", "verdict, loss record and coverage, e.g. lossy, worsening  (*)"),
             ("\u{25c7}", "quality", "slow / degraded / jittery / spiky / good / no reply  (~ = too soon)  (*)"),
             ("\u{0394}", "jitpct", "relative jitter: median jitter / median RTT %  (~ = too soon)"),
+            ("\u{2113}", "loss  ", "packet loss %  (~ = nothing sent yet)"),
         ] {
             lines.push(Line::from(vec![raw("    "), span(sym, bld), raw("  "), raw(format!("{name:<7}")), raw("  "), raw(desc)]));
         }
@@ -2215,12 +2217,12 @@ pub fn draw_explain_dialog(f: &mut Frame, area: Rect, scroll: u16, ascii: bool, 
     );
 }
 
-/// Number of items in the column toggle dialog (5 identity + 4 base + 16 extra).
-pub const STAT_TOGGLE_COUNT: usize = 25;
+/// Number of items in the column toggle dialog (5 identity + 4 base + 17 extra).
+pub const STAT_TOGGLE_COUNT: usize = 26;
 
 /// Full rendered height of the column toggle dialog: 3 header lines, the items,
-/// 5 group separators, 1 trailing blank, plus 2 border rows.
-pub const STAT_TOGGLE_DIALOG_H: u16 = 3 + STAT_TOGGLE_COUNT as u16 + 5 + 1 + 2;
+/// 6 group separators, 1 trailing blank, plus 2 border rows.
+pub const STAT_TOGGLE_DIALOG_H: u16 = 3 + STAT_TOGGLE_COUNT as u16 + 6 + 1 + 2;
 
 /// Row index of `bar` in the column dialog - the single view never draws the range bar.
 pub const STAT_TOGGLE_BAR_ROW: usize = 21;
@@ -2313,14 +2315,14 @@ pub fn draw_stat_column_toggle_dialog(
          "w", "s", "0", "1", "p", "5", "9", "%", "t", "u", "d",
          "o", "|",
          "i", "q",
-         "J"]
+         "J", "L"]
     } else {
         [" ", " ", ":", " ", "\u{21bb}",
          "\u{2248}", "\u{21d5}", "\u{03b4}", "\u{2717}",
          "\u{03a9}", "\u{00b1}", "\u{2080}", "\u{2081}", "\u{00bd}", "\u{2085}", "\u{2089}", "%", "\u{03c4}", "\u{2191}", "\u{2193}",
          "\u{25cb}", "\u{258f}",
          "\u{2139}", "\u{25c7}",
-         "\u{0394}"]
+         "\u{0394}", "\u{2113}"]
     };
 
     // Named section separator — rule chars use col_key_rule, label uses plain DIM,
@@ -2332,7 +2334,7 @@ pub fn draw_stat_column_toggle_dialog(
     // (name, description, is_enabled)
     // Indices 0-4:  identity columns (enabled = effective state from `identity`)
     // Indices 5-8:  base stats (enabled = NOT in hidden_base)
-    // Indices 9-24: extra stats (enabled = in extra_stats; EXTRA_STAT_ALL order)
+    // Indices 9-25: extra stats (enabled = in extra_stats; EXTRA_STAT_ALL order)
     let rows: [(&str, &str, bool); STAT_TOGGLE_COUNT] = [
         ("mode  ", "probe-type badge  (auto: mixed modes)",   identity[0]),
         ("name  ", "custom label or hostname",                identity[1]),
@@ -2359,6 +2361,7 @@ pub fn draw_stat_column_toggle_dialog(
         ("status", "verdict \u{00b7} loss record \u{00b7} coverage", extra_stats.contains(&ExtraStat::Status)),
         ("quality", "slow / degraded / jittery / spiky / good", extra_stats.contains(&ExtraStat::Quality)),
         ("jitpct", "relative jitter: median jitter / median RTT", extra_stats.contains(&ExtraStat::Jitpct)),
+        ("loss  ", "packet loss %", extra_stats.contains(&ExtraStat::Loss)),
     ];
 
     let mut body: Vec<Line> = vec![
@@ -2382,6 +2385,7 @@ pub fn draw_stat_column_toggle_dialog(
         if i == 20 { body.push(section_sep!("visual")); }
         if i == 22 { body.push(section_sep!("text")); }
         if i == 24 { body.push(section_sep!("grading")); }
+        if i == 25 { body.push(section_sep!("loss")); }
 
         let is_cursor  = i == cursor;
         let is_narrow  = *enabled && (space_hidden >> i) & 1 == 1;

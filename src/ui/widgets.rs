@@ -27,7 +27,7 @@ use crate::cli::{Args, BaseStat, ExtraStat};
 use crate::constants::{BAR_ANIM_SECS, GRAPH_ANIM_SECS, TIER_FAST_PCT, TIER_HIGH_PCT};
 use crate::state::{GraphColCache, MtrTrend, SparklineColCache, TargetState};
 use crate::types::Sample;
-use super::{ColWidths, RttColWidth, fmt_count, fmt_cv, fmt_jitpct, fmt_since, fmt_rtt, fmt_rtt_nodec, probe_status_spans, Quality, QualityCell, Theme};
+use super::{ColWidths, RttColWidth, fmt_count, fmt_cv, fmt_jitpct, fmt_loss_col, fmt_since, fmt_rtt, fmt_rtt_nodec, probe_status_spans, Quality, QualityCell, Theme};
 
 pub fn trend_spark_span(trend: MtrTrend, ascii: bool, theme: &Theme) -> Span<'static> {
     let (ch, style) = if ascii {
@@ -618,6 +618,7 @@ pub fn build_stats_keys_line(
             ExtraStat::Status => if let Some(status_w) = cw.status { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "status", w = 1 + status_w),      dim)); }
             ExtraStat::Quality => if let Some(q_w) = cw.quality { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "quality", w = 1 + q_w), dim)); }
             ExtraStat::Jitpct => if let Some(jp_w) = cw.jitpct  { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "jit%",   w = 1 + jp_w),           dim)); }
+            ExtraStat::Loss   => if let Some(ls_w) = cw.loss    { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "loss%",  w = 1 + ls_w),           dim)); }
             _ => {}
         }
     }
@@ -752,6 +753,7 @@ pub fn build_stats_line<'a>(
                 ExtraStat::Status => if let Some(status_w) = cw.status { spans.push(Span::raw(sp.clone())); if verbose_labels { spans.push(Span::styled("status ", dim)); } spans.push(Span::styled(format!("{:<w$}", d, w = status_w + 1), dim)); }
                 ExtraStat::Quality => if let Some(q_w) = cw.quality { spans.push(Span::raw(sp.clone())); if verbose_labels { spans.push(Span::styled("quality ", dim)); } spans.push(Span::styled(format!("{:<w$}", d, w = q_w + 1), dim)); }
                 ExtraStat::Jitpct => if let Some(jp_w) = cw.jitpct  { spans.push(Span::raw(sp.clone())); spans.push(Span::styled(sym("J", "\u{0394}", "jit%"), dim)); spans.push(Span::styled(format!("{:>w$}", d, w = jp_w), dim)); }
+                ExtraStat::Loss   => if let Some(ls_w) = cw.loss    { spans.push(Span::raw(sp.clone())); spans.push(Span::styled(sym("L", "\u{2113}", "loss%"), dim)); spans.push(Span::styled(format!("{:>w$}", d, w = ls_w), dim)); }
                 _ => {}
             }
         }
@@ -923,7 +925,7 @@ pub fn build_stats_line<'a>(
                 // only the single-target verbose view gets a word label. Left-aligned,
                 // unlike the numeric columns, since it's free text.
                 if verbose_labels { spans.push(Span::styled("status ", dim)); }
-                let parts = probe_status_spans(s, Instant::now(), interval_ms, ascii, theme, bright);
+                let parts = probe_status_spans(s, Instant::now(), interval_ms, stats_window, ascii, theme, bright);
                 let text_w: usize = parts.iter().map(|p| p.content.chars().count()).sum();
                 spans.extend(parts);
                 // +1: glyph-less columns still take the 1-col glyph slot the header
@@ -957,6 +959,16 @@ pub fn build_stats_line<'a>(
                     else if hot { Style::default().fg(theme.ip_change) }
                     else { bright };
                 spans.push(Span::styled(format!("{:>w$}", fmt_jitpct(pct), w = jp_w), style));
+            }
+            ExtraStat::Loss => if let Some(ls_w) = cw.loss {
+                // Window or lifetime, like the drops column, and coloured the same way.
+                spans.push(Span::styled(sym("L", "\u{2113}", "loss%"), dim)); // ℓ
+                let pct = s.loss_pct(stats_window);
+                let style = match pct {
+                    Some(p) if p > 0.0 => Style::default().fg(theme.drop_num_color(p / 100.0)).add_modifier(Modifier::BOLD),
+                    _ => dim,
+                };
+                spans.push(Span::styled(format!("{:>w$}", fmt_loss_col(pct), w = ls_w), style));
             }
             _ => { spans.pop(); } // remove the gap we pushed for unrecognised/pseudo variants
         }

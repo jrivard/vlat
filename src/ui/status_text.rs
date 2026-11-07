@@ -244,9 +244,10 @@ pub struct StatusSummary {
     /// Only on `Flapping`/`Struggling`/`Lossy` (loss trend) or after the
     /// `Degraded` quality word (latency trend).
     pub trend: Option<Trend>,
-    /// Lifetime drops.
+    /// Drops over the stats window (the whole run in lifetime mode, `-w 0`),
+    /// matching the drops and loss columns.
     pub lost: u64,
-    /// Lifetime loss, only when worth showing (strictly between 1% and 99%).
+    /// Loss over the same span, only when worth showing (strictly between 1% and 99%).
     pub loss_pct: Option<f64>,
     /// The most recent event opposite to the verdict: the last failure while
     /// ok (`None` if there has been none), the last success while down.
@@ -256,7 +257,10 @@ pub struct StatusSummary {
 }
 
 impl StatusSummary {
-    pub fn from_state(state: &TargetState, now: Instant, interval_ms: u64) -> Self {
+    /// `window`: the loss record covers the stats window (`Args::is_window`),
+    /// else the whole run. The verdict, quality and trend always judge the
+    /// grading span regardless.
+    pub fn from_state(state: &TargetState, now: Instant, interval_ms: u64, window: bool) -> Self {
         let settle = settle_secs(interval_ms);
         let age = |t: Instant| now.saturating_duration_since(t).as_secs_f64();
         let when = |t: Instant| match age(t) { a if a >= settle => When::Ago(a), _ => When::JustNow };
@@ -290,12 +294,12 @@ impl StatusSummary {
             Now::Down => state.last_up.map(|t| (Event::Success, when(t))),
             _ => state.last_drop_at.map(|t| (Event::Failure, when(t))),
         };
-        let pct = state.life_loss_pct();
+        let pct = state.loss_pct(window).unwrap_or(0.0);
         StatusSummary {
             now: verdict,
             quality,
             trend,
-            lost: state.drops as u64,
+            lost: state.drop_count(window),
             loss_pct: (pct > 1.0 && pct < 99.0).then_some(pct),
             last,
             sent: state.history.len() as u64, // includes probes still in flight
@@ -326,7 +330,11 @@ impl StatusSummary {
             // Had trouble once, but long enough ago that it's not news.
             parts.push(format!("no loss for {}", format_elapsed(a)));
         } else if !matches!(self.now, Now::Waiting | Now::Unreachable) {
-            let mut record = if self.lost == 0 { "no loss".to_string() } else {
+            // A failure older than the stats window: say the window is clean
+            // rather than a bare "no loss" next to "last failure 20m ago".
+            let mut record = if self.lost == 0 && self.last.is_some_and(|(e, _)| e == Event::Failure) {
+                "no loss in window".to_string()
+            } else if self.lost == 0 { "no loss".to_string() } else {
                 let pct = self.loss_pct.map(|p| format!(" ({})", fmt_loss(p))).unwrap_or_default();
                 format!("{} lost{}", fmt_count(self.lost), pct)
             };
@@ -343,7 +351,7 @@ impl StatusSummary {
 
         // Coverage only on a plain "ok": it's the reassuring "watched this long, no
         // trouble". Anywhere else the earlier slots are the news, and it's clutter.
-        if self.now == Now::Ok && self.lost == 0 {
+        if self.now == Now::Ok && self.last.is_none() {
             parts.push(format!("{} sent over {}", fmt_count(self.sent), format_elapsed(self.watched_secs)));
         }
         parts
@@ -351,16 +359,16 @@ impl StatusSummary {
 }
 
 /// Plain-text probe-status summary, segments joined with `status_sep`.
-pub fn probe_status_text(state: &TargetState, now: Instant, interval_ms: u64, ascii: bool) -> String {
-    StatusSummary::from_state(state, now, interval_ms).parts().join(status_sep(ascii))
+pub fn probe_status_text(state: &TargetState, now: Instant, interval_ms: u64, window: bool, ascii: bool) -> String {
+    StatusSummary::from_state(state, now, interval_ms, window).parts().join(status_sep(ascii))
 }
 
 /// Probe-status summary as spans: segments in `style`, separators in the theme's
 /// dim `status_sep` color.
-pub fn probe_status_spans(state: &TargetState, now: Instant, interval_ms: u64, ascii: bool, theme: &Theme, style: Style) -> Vec<Span<'static>> {
+pub fn probe_status_spans(state: &TargetState, now: Instant, interval_ms: u64, window: bool, ascii: bool, theme: &Theme, style: Style) -> Vec<Span<'static>> {
     let sep_style = Style::default().fg(theme.c(theme.status_sep));
     let mut spans = Vec::with_capacity(5);
-    for (i, part) in StatusSummary::from_state(state, now, interval_ms).parts().into_iter().enumerate() {
+    for (i, part) in StatusSummary::from_state(state, now, interval_ms, window).parts().into_iter().enumerate() {
         if i > 0 { spans.push(Span::styled(status_sep(ascii), sep_style)); }
         spans.push(Span::styled(part, style));
     }
@@ -552,11 +560,11 @@ mod tests {
         fn baseline(self, ms: f64) -> Self { Scenario { baseline: Some(ms), ..self } }
         fn summary(&self) -> StatusSummary {
             let (s, now) = self.build();
-            StatusSummary::from_state(&s, now, self.interval_ms)
+            StatusSummary::from_state(&s, now, self.interval_ms, true)
         }
         fn text(&self) -> String {
             let (s, now) = self.build();
-            probe_status_text(&s, now, self.interval_ms, false)
+            probe_status_text(&s, now, self.interval_ms, true, false)
         }
     }
 
@@ -742,7 +750,7 @@ mod tests {
         // Same answer as the status line wherever the line shows it...
         for sc in scenarios() {
             let (s, now) = sc.build();
-            let line = StatusSummary::from_state(&s, now, sc.interval_ms).quality;
+            let line = StatusSummary::from_state(&s, now, sc.interval_ms, true).quality;
             if line.is_some() { assert_eq!(probe_quality(&s), line, "{}", sc.name); }
         }
         // ...and still available where the line hides it.
@@ -787,8 +795,8 @@ mod tests {
         s.record_sent(0);
         s.record_result(0, Ok(10.0), 0, false);
         let now = s.first_sent_at.unwrap() + Duration::from_secs(135);
-        assert_eq!(probe_status_text(&s, now, 1_000, false), "ok \u{00b7} no loss \u{00b7} 1 sent over 2m 15s");
-        assert_eq!(probe_status_text(&s, now, 1_000, true), "ok - no loss - 1 sent over 2m 15s");
+        assert_eq!(probe_status_text(&s, now, 1_000, true, false), "ok \u{00b7} no loss \u{00b7} 1 sent over 2m 15s");
+        assert_eq!(probe_status_text(&s, now, 1_000, true, true), "ok - no loss - 1 sent over 2m 15s");
     }
 
     #[test]
@@ -798,7 +806,7 @@ mod tests {
         s.record_result(0, Ok(10.0), 0, false);
         let theme = crate::cli::ThemeName::Default.to_theme();
         let base = Style::default().fg(Color::White);
-        let spans = probe_status_spans(&s, Instant::now(), 1_000, false, &theme, base);
+        let spans = probe_status_spans(&s, Instant::now(), 1_000, true, false, &theme, base);
         assert_eq!(spans.len(), 5);
         let sep = Style::default().fg(theme.c(theme.status_sep));
         for (i, sp) in spans.iter().enumerate() {

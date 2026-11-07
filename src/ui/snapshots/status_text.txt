@@ -3,14 +3,14 @@ several in flight                              | waiting for reply
 first probe timed out                          | unreachable
 never replied                                  | unreachable
 never replied, 12 lost                         | unreachable
-down the whole window                          | down · 20 lost (95%), last success 20s ago
+down the whole window                          | down · 15 lost, last success 20s ago
 first reply                                    | ok · no loss · 1 sent over 0s
 healthy                                        | ok · no loss · 2 sent over 2m 15s
 healthy, long run                              | ok · no loss · 1k sent over 2d 5h
 one drop, unsettled, back up                   | recovering · 1 lost (50%), last failure just now
 one drop, settled                              | recovering · 1 lost (50%), last failure 30s ago
 two drops, last 45s ago (flaky)                | flaky · 2 lost (40%), last failure 45s ago
-two drops 10m apart (1 in window)              | recovering · 2 lost (40%), last failure 45s ago
+two drops 10m apart (1 in window)              | recovering · 1 lost (25%), last failure 45s ago
 flaky, many drops                              | flaky · 5 lost (45%), last failure just now
 loss 2.5%                                      | recovering · 1 lost (2.5%), last failure 39s ago
 loss 0.5% (hidden)                             | recovering · 1 lost, last failure 3m 19s ago
@@ -21,11 +21,11 @@ down, 99.5% lost (pct hidden)                  | down · 199 lost, last success 
 down again after recovering                    | down · 4 lost (67%), last success 20s ago
 slow poller, drop 40s ago (unsettled)          | recovering · 1 lost (50%), last failure just now
 slow poller, drop 90s ago                      | recovering · 1 lost (50%), last failure 1m 30s ago
-slow poller, drop 20m ago                      | ok now · 1 lost (50%), last failure 20m ago
+slow poller, drop 20m ago                      | ok now · no loss in window, last failure 20m ago
 recovering, 4m 59s since failure               | recovering · 1 lost (50%), last failure 4m ago
-ok now, 5m since failure                       | ok now · 1 lost (50%), last failure 5m ago
-short --window 10s, drop 30s ago               | ok now · 1 lost (50%), last failure 30s ago
-ok now, 59m since failure                      | ok now · 1 lost (33%), last failure 59m ago
+ok now, 5m since failure                       | ok now · no loss in window, last failure 5m ago
+short --window 10s, drop 30s ago               | ok now · no loss in window, last failure 30s ago
+ok now, 59m since failure                      | ok now · no loss in window, last failure 59m ago
 all clear, 1h since failure                    | ok · no loss for 1h 0m
 all clear, days later                          | ok · no loss for 4d
 loss 4.9% (just under lossy)                   | flaky · 5 lost (4.9%), last failure just now

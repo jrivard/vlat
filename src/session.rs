@@ -1273,7 +1273,7 @@ fn stat_cli_name(stat: &ExtraStat) -> &'static str {
         ExtraStat::Lost   => "lost",
         ExtraStat::Recent => "recent", ExtraStat::Bar    => "bar",
         ExtraStat::Status => "status", ExtraStat::Quality => "quality",
-        ExtraStat::Jitpct => "jitpct",
+        ExtraStat::Jitpct => "jitpct", ExtraStat::Loss => "loss",
         _ => "?",
     }
 }
@@ -1288,7 +1288,7 @@ fn stat_from_name(name: &str) -> Option<ExtraStat> {
         "lost" => ExtraStat::Lost,
         "recent" => ExtraStat::Recent, "bar" => ExtraStat::Bar,
         "status" => ExtraStat::Status, "quality" => ExtraStat::Quality,
-        "jitpct" => ExtraStat::Jitpct,
+        "jitpct" => ExtraStat::Jitpct, "loss" => ExtraStat::Loss,
         _ => return None,
     })
 }

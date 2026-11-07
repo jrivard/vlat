@@ -864,6 +864,22 @@ impl TargetState {
         if self.total_sent == 0 { return 0.0; }
         self.drops as f64 / self.total_sent as f64 * 100.0
     }
+
+    /// Loss % over the stats window when `window`, else the whole run; `None`
+    /// until there is something to judge (nothing resolved in the window /
+    /// nothing sent yet), so "no data" stays distinct from "no loss".
+    pub fn loss_pct(&self, window: bool) -> Option<f64> {
+        if window {
+            (self.window.len() + self.win_drops as usize > 0).then(|| self.win_loss_pct())
+        } else {
+            (self.total_sent > 0).then(|| self.life_loss_pct())
+        }
+    }
+
+    /// Drop count over the stats window when `window`, else the whole run.
+    pub fn drop_count(&self, window: bool) -> u64 {
+        if window { self.win_drops as u64 } else { self.drops as u64 }
+    }
     pub fn life_mtr(&self) -> Option<f64> {
         let avg = self.avg_latency();
         if avg == 0.0 { return None; }
@@ -1282,6 +1298,13 @@ mod tests {
         s.record_sent(2); s.record_result(2, Ok(50.0), BIG_WINDOW, false);
         s.record_sent(3); s.record_result(3, Err(()), BIG_WINDOW, false);
         assert!((s.life_loss_pct() - 50.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn loss_pct_is_none_until_there_is_data() {
+        let s = TargetState::new("x".to_string());
+        assert_eq!(s.loss_pct(true), None);
+        assert_eq!(s.loss_pct(false), None);
     }
 
     #[test]

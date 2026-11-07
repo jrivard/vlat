@@ -680,7 +680,7 @@ pub struct Args {
 
     /// Columns and visual elements to display. Default set includes the recent sparkline
     /// and range bar; numeric extras are off by default. Stat values: mtr std p01 p10
-    /// p50 p95 p99 cv srtt seen lost recent bar status quality jitpct.
+    /// p50 p95 p99 cv srtt seen lost recent bar status quality jitpct loss.
     /// Identity values (auto-shown unless overridden): mode name port addr resolve.
     /// Pseudo-values: all (all columns), none (reset to empty), default (default set).
     /// 'none' may be combined: --columns none,mtr shows only mtr; 'all' is exclusive.
@@ -1049,7 +1049,8 @@ pub enum ExtraStat {
     Bar,
     /// Status summary, e.g. "lossy, worsening · 20 lost (6.7%), last failure 2m ago".
     /// Same text as the single-target view's status line; excludes the up/down
-    /// badge itself. Judges the last 5m (or the whole window, if shorter).
+    /// badge itself. Judges the last 5m (or the whole window, if shorter); the
+    /// loss count and % cover the window (or the whole run with -w 0).
     Status,
     /// How well it answers when it does: slow, degraded, jittery, spiky, or
     /// "good"; "no reply" if nothing in the window answered; "~" until there's
@@ -1059,6 +1060,9 @@ pub enum ExtraStat {
     /// percentage, over the window or lifetime like the other numbers. The
     /// "jittery" quality word applies the same test to the last 5m  (Δ / J)
     Jitpct,
+    /// Packet loss as a percentage, over the window or lifetime like the other
+    /// numbers; finer precision than the status text, e.g. "0.25%"  (ℓ / L)
+    Loss,
 }
 
 /// Canonical display order of the stat columns used by 'all' and the 'x' dialog.
@@ -1071,7 +1075,7 @@ pub const EXTRA_STAT_ALL: &[ExtraStat] = &[
     ExtraStat::P01, ExtraStat::P10, ExtraStat::P50, ExtraStat::P95, ExtraStat::P99,
     ExtraStat::Cv, ExtraStat::Srtt, ExtraStat::Seen, ExtraStat::Lost,
     ExtraStat::Recent, ExtraStat::Bar,
-    ExtraStat::Status, ExtraStat::Quality, ExtraStat::Jitpct,
+    ExtraStat::Status, ExtraStat::Quality, ExtraStat::Jitpct, ExtraStat::Loss,
 ];
 
 /// The default set: sparkline and range bar are on; numeric extras are off.
