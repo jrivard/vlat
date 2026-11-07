@@ -13,8 +13,9 @@
 //! | record   | how much has it lost overall? | `no loss [for <T>]`, `N lost [(P%)], last <failure/success> <when>` |
 //! | coverage | how much have we watched?     | `N sent over <elapsed>`                                   |
 //!
-//! - The verdict is the first matching row ("window" = the stats window,
-//!   `--window`, 5m in lifetime mode; adjustable at runtime with `w`):
+//! - The verdict is the first matching row ("window" = the grading span: the
+//!   last `GRADE_SPAN_SECS` (5m) of the stats window, or all of it if shorter -
+//!   so it stays about recent behaviour whatever `--window` is):
 //!
 //!   | verdict       | when                                                         |
 //!   |---------------|--------------------------------------------------------------|
@@ -203,8 +204,8 @@ impl QualityCell {
 /// data distinction. Like `probe_quality`, independent of the verdict.
 pub fn probe_quality_cell(state: &TargetState) -> QualityCell {
     let min = crate::constants::GRADE_QUALITY_MIN_SAMPLES;
-    if state.window.is_empty() && state.win_drops as usize >= min { return QualityCell::NoReply; }
-    if state.window.len() < min { return QualityCell::NoData; }
+    if state.span.replies == 0 && state.span.drops >= min { return QualityCell::NoReply; }
+    if state.span.replies < min { return QualityCell::NoData; }
     match probe_quality(state) {
         None => QualityCell::Good,
         Some(q @ (Quality::Slow | Quality::Degraded)) => QualityCell::Word(q, probe_latency_trend(state)),
@@ -267,10 +268,10 @@ impl StatusSummary {
             Some(_) => match state.last_drop_at {
                 None => Now::Ok,
                 Some(_) if state.grade.loss == LossGrade::Struggling => Now::Struggling,
-                Some(_) if state.win_outage_times.len() >= crate::constants::GRADE_FLAPPING_OUTAGES => Now::Flapping,
+                Some(_) if state.span.outages >= crate::constants::GRADE_FLAPPING_OUTAGES => Now::Flapping,
                 Some(_) if state.grade.loss == LossGrade::Lossy => Now::Lossy,
-                Some(_) if state.win_drop_event_times.len() >= 2 => Now::Flaky,
-                Some(_) if !state.win_drop_event_times.is_empty() => Now::Recovering,
+                Some(_) if state.span.drop_events >= 2 => Now::Flaky,
+                Some(_) if state.span.drop_events > 0 => Now::Recovering,
                 Some(t) if age(t) < ALL_CLEAR_SECS as f64 => Now::OkNow,
                 Some(_) => Now::Ok,
             },
@@ -480,6 +481,14 @@ mod tests {
             let t0 = s.first_sent_at.unwrap();
             let now = t0 + Duration::from_secs_f64(self.watched);
             if s.last_up.is_some() { s.last_up = Some(now - Duration::from_secs_f64(self.up_ago)); }
+            // Replies were recorded all at once at the start; move them to end at
+            // the last reply, as a real run would have them (the grades judge
+            // only the last few minutes).
+            if let (Some(&(last, _)), Some(up)) = (s.window.last(), s.last_up) {
+                let shift = up.saturating_duration_since(last);
+                for e in s.window.iter_mut() { e.0 += shift; }
+                for e in s.jitter_window.iter_mut() { e.0 += shift; }
+            }
             if s.last_drop_at.is_some() { s.last_drop_at = Some(now - Duration::from_secs_f64(self.drop_ago)); }
             // Drop streaks, most recent first, `drop_spacing` apart, pruned to the
             // window the way record_result does.

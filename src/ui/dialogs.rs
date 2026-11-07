@@ -368,7 +368,7 @@ pub fn draw_freeze_notice_dialog(f: &mut Frame, area: Rect, ascii: bool, theme: 
 
 pub fn draw_window_input_dialog(f: &mut Frame, area: Rect, input: &str, current_secs: u64, theme: &Theme) {
     let cur = crate::cli::format_window_hms(current_secs);
-    let default_hint = if current_secs == 0 { "300" } else { "0" };
+    let default_hint = if current_secs == 0 { crate::cli::format_window_hms(crate::constants::DEFAULT_WINDOW_SECS) } else { "0".to_string() };
     let title = " w \u{2014} set window ";
     let body = vec![
         Line::from(format!("  Current: {}  \u{2014}  Enter new value (e.g. 5m, 1h30m, 300).", cur)),
@@ -1400,6 +1400,15 @@ fn raw(text: impl Into<String>) -> Span<'static> {
     Span::raw(text.into())
 }
 
+/// How the text columns relate to the window setting - shared by `vlat
+/// --explain`, the in-app explain dialog and the rolling-window section.
+pub const TEXT_COLUMNS_WINDOW_NOTE: &str =
+    "status and quality describe recent behaviour: the last 5m (or the whole window, if shorter)";
+
+fn fmt_secs_short(secs: u64) -> String {
+    if secs.is_multiple_of(3600) { format!("{}h", secs / 3600) } else if secs.is_multiple_of(60) { format!("{}m", secs / 60) } else { format!("{secs}s") }
+}
+
 /// The "cv vs jitpct" note shared by `vlat --explain` and the in-app explain
 /// dialog: (bold term, text) rows; an empty term continues the row above.
 /// Thresholds come from `constants.rs` so the text can't drift from the grade.
@@ -1417,8 +1426,10 @@ pub fn cv_vs_jitpct_notes(ascii: bool) -> Vec<(&'static str, String)> {
         ("      ", "Alternating 5ms/25ms: both high (jitpct 133%).".into()),
         ("jittery", format!("quality word: jitpct {ge} {} and median jitter {ge} {}ms {dash} the ms floor",
             pct(GRADE_JITTERY_ENTER_RATIO), GRADE_JITTERY_ENTER_MS)),
-        ("      ", format!("keeps fast LAN hosts \"good\". Clears below {} or {}ms.",
+        ("      ", format!("keeps fast LAN hosts \"good\". Clears below {} or {}ms. It judges",
             pct(GRADE_JITTERY_STAY_RATIO), GRADE_JITTERY_STAY_MS)),
+        ("      ", format!("the last {}, so it can differ from the jitpct column (window or lifetime).",
+            fmt_secs_short(GRADE_SPAN_SECS))),
         ("spiky ", format!("is the outlier check: p99 {ge} {}x median.", GRADE_SPIKY_ENTER_RATIO)),
     ]
 }
@@ -1494,9 +1505,9 @@ pub fn explain_content_lines(ascii: bool) -> Vec<Line<'static>> {
             ("t", "srtt  ", "RFC 6298 smoothed RTT"),
             ("u", "seen  ", "time since the last successful reply"),
             ("d", "lost  ", "time since the last drop (~ = none yet)"),
-            ("i", "status", "verdict, loss record and coverage, e.g. lossy, worsening"),
-            ("q", "quality", "slow / degraded / jittery / spiky / good / no reply  (~ = too soon)"),
-            ("J", "jitpct", "median jitter / median RTT % - what \"jittery\" is judged on  (~ = too soon)"),
+            ("i", "status", "verdict, loss record and coverage, e.g. lossy, worsening  (*)"),
+            ("q", "quality", "slow / degraded / jittery / spiky / good / no reply  (~ = too soon)  (*)"),
+            ("J", "jitpct", "relative jitter: median jitter / median RTT %  (~ = too soon)"),
         ] {
             lines.push(Line::from(vec![raw("    "), span(sym, bld), raw("  "), raw(format!("{name:<7}")), raw("  "), raw(desc)]));
         }
@@ -1513,13 +1524,14 @@ pub fn explain_content_lines(ascii: bool) -> Vec<Line<'static>> {
             ("\u{03c4}", "srtt  ", "RFC 6298 smoothed RTT"),
             ("\u{2191}", "seen  ", "time since the last successful reply"),
             ("\u{2193}", "lost  ", "time since the last drop (~ = none yet)"),
-            ("\u{2139}", "status", "verdict, loss record and coverage, e.g. lossy, worsening"),
-            ("\u{25c7}", "quality", "slow / degraded / jittery / spiky / good / no reply  (~ = too soon)"),
-            ("\u{0394}", "jitpct", "median jitter / median RTT % - what \"jittery\" is judged on  (~ = too soon)"),
+            ("\u{2139}", "status", "verdict, loss record and coverage, e.g. lossy, worsening  (*)"),
+            ("\u{25c7}", "quality", "slow / degraded / jittery / spiky / good / no reply  (~ = too soon)  (*)"),
+            ("\u{0394}", "jitpct", "relative jitter: median jitter / median RTT %  (~ = too soon)"),
         ] {
             lines.push(Line::from(vec![raw("    "), span(sym, bld), raw("  "), raw(format!("{name:<7}")), raw("  "), raw(desc)]));
         }
     }
+    lines.push(Line::from(format!("    (*) {}", TEXT_COLUMNS_WINDOW_NOTE)));
     lines.push(Line::from(""));
     lines.push(Line::from(raw("  cv vs jitpct \u{2014} both are variation relative to RTT, but not the same kind:")));
     for (term, text) in cv_vs_jitpct_notes(ascii) {
@@ -1714,7 +1726,7 @@ pub fn explain_content_lines(ascii: bool) -> Vec<Line<'static>> {
     lines.push(Line::from(span("Rolling window  (-w):", hdr)));
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
-        raw("  Stats can be computed over a sliding time window (10s\u{2013}24h) or lifetime (default)."),
+        raw("  Stats are computed over a sliding time window (10s\u{2013}24h; default 1h) or lifetime (-w 0)."),
     ]));
     lines.push(Line::from("  Only probes sent within the window are counted; older results expire automatically."));
     lines.push(Line::from("  Set the window with -w:  vlat -w 60s   vlat -w 10m   vlat -w 1h   vlat -w 0 (lifetime)"));
@@ -1726,10 +1738,14 @@ pub fn explain_content_lines(ascii: bool) -> Vec<Line<'static>> {
         ("max", "worst RTT seen in the window"),
         ("jtr", "average jitter (mean abs. diff. between consecutive RTTs)"),
         ("mtr", "mean time to reliability \u{2014} avg \u{00f7} (1 \u{2212} loss rate)"),
+        ("drp", "drops and loss % in the window"),
         ("RTT color", "green/red trend is relative to the window average"),
     ] {
         lines.push(Line::from(vec![raw("    "), span(name, bld), raw("  "), raw(what)]));
     }
+    lines.push(Line::from("  Every numeric column (cv, jitpct, p50, ...) and every sort key follows the setting."));
+    lines.push(Line::from("  Lifetime percentiles (p01\u{2013}p99, jitpct) use a compact histogram: within 1%, exact min/max."));
+    lines.push(Line::from(format!("  Text columns: {}.", TEXT_COLUMNS_WINDOW_NOTE)));
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
         raw("  Press "),
@@ -1741,7 +1757,7 @@ pub fn explain_content_lines(ascii: bool) -> Vec<Line<'static>> {
         span("--span", bld),
         raw(" to set the graph time-axis width, and "),
         span("-w", bld),
-        raw(" to set the starting window (default 0 = lifetime)."),
+        raw(" to set the starting window (default 1h; 0 = lifetime)."),
     ]));
 
     // Sorting
@@ -1786,12 +1802,12 @@ pub fn explain_content_lines(ascii: bool) -> Vec<Line<'static>> {
 
     lines.push(Line::from(""));
     lines.push(Line::from(span("Output columns \u{2014} summary (shown on exit):", hdr)));
-    lines.push(Line::from("  (all values cover the full session lifetime except mtr, which uses the final window)"));
+    lines.push(Line::from("  (every value covers the whole session, whatever the -w window)"));
     lines.push(Line::from(""));
     for (name, desc) in [
         ("avg     ", "lifetime average RTT"),
         ("stddev  ", "standard deviation of RTT \u{2014} spread around the average"),
-        ("mtr     ", "mean time to reliability using the final window (same formula as live mtr)"),
+        ("mtr     ", "mean time to reliability: avg \u{00f7} (1 \u{2212} loss), over the session"),
         ("jitter  ", "lifetime average jitter"),
         ("min     ", "lifetime minimum RTT"),
         ("max     ", "lifetime maximum RTT"),
@@ -2260,7 +2276,7 @@ pub fn draw_stat_column_toggle_dialog(
         ("bar   ", "inline range bar on target row",        extra_stats.contains(&ExtraStat::Bar)),
         ("status", "verdict \u{00b7} loss record \u{00b7} coverage", extra_stats.contains(&ExtraStat::Status)),
         ("quality", "slow / degraded / jittery / spiky / good", extra_stats.contains(&ExtraStat::Quality)),
-        ("jitpct", "median jitter / median RTT  (jittery basis)", extra_stats.contains(&ExtraStat::Jitpct)),
+        ("jitpct", "relative jitter: median jitter / median RTT", extra_stats.contains(&ExtraStat::Jitpct)),
     ];
 
     let mut body: Vec<Line> = vec![

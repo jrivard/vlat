@@ -189,7 +189,7 @@ fn scatter_is_down(state: &TargetState, is_window: bool) -> bool {
     if is_window {
         state.window.is_empty() && state.win_drops > 0
     } else {
-        state.lifetime_rtts.is_empty() && state.drops > 0
+        !state.has_life_rtts() && state.drops > 0
     }
 }
 

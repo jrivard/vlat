@@ -864,31 +864,31 @@ pub fn build_stats_line<'a>(
             ExtraStat::P01 => if let Some(ref col) = cw.p01 {
                 spans.push(Span::styled(sym("0", "\u{2080}", "p01"), dim)); // ₀
                 if stats_window && !s.window.is_empty()           { push_rtt_val(&mut spans, s.win_p01(),    col, bright, mid); }
-                else if !stats_window && !s.lifetime_rtts.is_empty() { push_rtt_val(&mut spans, s.life_p01(), col, bright, mid); }
+                else if !stats_window && s.has_life_rtts() { push_rtt_val(&mut spans, s.life_p01(), col, bright, mid); }
                 else                                               { push_mtr_placeholder(&mut spans, d, dim, col); }
             }
             ExtraStat::P10 => if let Some(ref col) = cw.p10 {
                 spans.push(Span::styled(sym("1", "\u{2081}", "p10"), dim)); // ₁
                 if stats_window && !s.window.is_empty()           { push_rtt_val(&mut spans, s.win_p10(),    col, bright, mid); }
-                else if !stats_window && !s.lifetime_rtts.is_empty() { push_rtt_val(&mut spans, s.life_p10(), col, bright, mid); }
+                else if !stats_window && s.has_life_rtts() { push_rtt_val(&mut spans, s.life_p10(), col, bright, mid); }
                 else                                               { push_mtr_placeholder(&mut spans, d, dim, col); }
             }
             ExtraStat::P50 => if let Some(ref col) = cw.p50 {
                 spans.push(Span::styled(sym("p", "\u{00bd}", "p50"), dim)); // ½
                 if stats_window && !s.window.is_empty()           { push_rtt_val(&mut spans, s.win_median(),  col, bright, mid); }
-                else if !stats_window && !s.lifetime_rtts.is_empty() { push_rtt_val(&mut spans, s.life_median(), col, bright, mid); }
+                else if !stats_window && s.has_life_rtts() { push_rtt_val(&mut spans, s.life_median(), col, bright, mid); }
                 else                                               { push_mtr_placeholder(&mut spans, d, dim, col); }
             }
             ExtraStat::P95 => if let Some(ref col) = cw.p95 {
                 spans.push(Span::styled(sym("5", "\u{2085}", "p95"), dim)); // ₅
                 if stats_window && !s.window.is_empty()           { push_rtt_val(&mut spans, s.win_p95(),    col, bright, mid); }
-                else if !stats_window && !s.lifetime_rtts.is_empty() { push_rtt_val(&mut spans, s.life_p95(), col, bright, mid); }
+                else if !stats_window && s.has_life_rtts() { push_rtt_val(&mut spans, s.life_p95(), col, bright, mid); }
                 else                                               { push_mtr_placeholder(&mut spans, d, dim, col); }
             }
             ExtraStat::P99 => if let Some(ref col) = cw.p99 {
                 spans.push(Span::styled(sym("9", "\u{2089}", "p99"), dim)); // ₉
                 if stats_window && !s.window.is_empty()           { push_rtt_val(&mut spans, s.win_p99(),    col, bright, mid); }
-                else if !stats_window && !s.lifetime_rtts.is_empty() { push_rtt_val(&mut spans, s.life_p99(), col, bright, mid); }
+                else if !stats_window && s.has_life_rtts() { push_rtt_val(&mut spans, s.life_p99(), col, bright, mid); }
                 else                                               { push_mtr_placeholder(&mut spans, d, dim, col); }
             }
             ExtraStat::Cv => if let Some(cv_w) = cw.cv {
@@ -944,14 +944,17 @@ pub fn build_stats_line<'a>(
                 spans.push(Span::styled(format!("{:<w$}", cell.text(ascii), w = q_w + 1), style)); // +1: see status
             }
             ExtraStat::Jitpct => if let Some(jp_w) = cw.jitpct {
-                // Always the graded window (it's the figure the `jittery` grade
-                // judges), whatever the stats window setting. Coloured like the
-                // quality column's "jittery" while that grade is on - which also
-                // needs the absolute floor, so a high % on a sub-ms RTT stays plain.
+                // Window or lifetime, like the other numeric columns. Coloured like
+                // the quality column's "jittery" when it's past that grade's
+                // thresholds (incl. the ms floor, so a high % on a sub-ms RTT stays
+                // plain). Checked against the value shown, not the grade: the
+                // grade judges only the last few minutes (with hysteresis), which
+                // can differ from the window or lifetime this column covers.
                 spans.push(Span::styled(sym("J", "\u{0394}", "jit%"), dim)); // Δ
-                let pct = s.win_jitter_pct();
+                let pct = s.jitter_pct(stats_window);
+                let hot = s.jitter_over_threshold(stats_window);
                 let style = if pct.is_none() { dim }
-                    else if s.grade.quality.jittery { Style::default().fg(theme.ip_change) }
+                    else if hot { Style::default().fg(theme.ip_change) }
                     else { bright };
                 spans.push(Span::styled(format!("{:>w$}", fmt_jitpct(pct), w = jp_w), style));
             }

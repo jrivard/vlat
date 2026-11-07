@@ -80,9 +80,10 @@ fn print_explain() {
     println!("    {}  srtt    RFC 6298 smoothed RTT",                      bld("τ"));
     println!("    {}  seen    time since the last successful reply",       bld("↑"));
     println!("    {}  lost    time since the last drop  (~ = none yet)",   bld("↓"));
-    println!("    {}  status  verdict, loss record and coverage, e.g. lossy, worsening", bld("ℹ"));
-    println!("    {}  quality slow / degraded / jittery / spiky / good / no reply  (~ = too soon)", bld("◇"));
-    println!("    {}  jitpct  relative jitter (median jitter / median RTT %)  (~ = too soon)", bld("Δ"));
+    println!("    {}  status  verdict, loss record and coverage, e.g. lossy, worsening  (*)", bld("ℹ"));
+    println!("    {}  quality slow / degraded / jittery / spiky / good / no reply  (~ = too soon)  (*)", bld("◇"));
+    println!("    {}  jitpct  relative jitter: median jitter / median RTT %  (~ = too soon)", bld("Δ"));
+    println!("    (*) {}", vlat::ui::dialogs::TEXT_COLUMNS_WINDOW_NOTE);
     println!();
     println!("  cv vs jitpct - both are variation relative to RTT, but not the same kind:");
     for (term, text) in vlat::ui::dialogs::cv_vs_jitpct_notes(false) {
@@ -190,7 +191,7 @@ fn print_explain() {
     println!();
     println!("{}", hdr("Rolling window  (-w):"));
     println!();
-    println!("  Stats can be computed over a sliding time window (10s–24h) or lifetime (default).");
+    println!("  Stats are computed over a sliding time window (10s–24h; default 1h) or lifetime (-w 0).");
     println!("  Only probes sent within the window are counted; older results expire automatically.");
     println!("  Set the window with -w:  vlat -w 60s   vlat -w 10m   vlat -w 1h   vlat -w 0 (lifetime)");
     println!();
@@ -202,15 +203,19 @@ fn print_explain() {
         ("p95      ", "95th-percentile RTT in the window"),
         ("jtr      ", "average jitter (mean abs. diff. between consecutive RTTs)"),
         ("mtr      ", "mean time to reliability - avg ÷ (1 − loss rate)"),
+        ("drp      ", "drops and loss % in the window"),
         ("RTT color", "green/red trend is relative to the window average"),
     ] {
         println!("    {}  {}", bld(name), what);
     }
+    println!("  Every numeric column (cv, jitpct, p50, ...) and every sort key follows the setting.");
+    println!("  Lifetime percentiles (p01–p99, jitpct) use a compact histogram: within 1%, exact min/max.");
+    println!("  Text columns: {}.", vlat::ui::dialogs::TEXT_COLUMNS_WINDOW_NOTE);
     println!();
     println!("  Not window-based (lifetime totals):");
     for (name, what) in [
-        ("drp            ", "all drops since the session started"),
         ("sent / received", "probe counts for the full session"),
+        ("exit summary   ", "every column of the table printed on exit"),
     ] {
         println!("    {}  {}", bld(name), what);
     }
@@ -242,12 +247,12 @@ fn print_explain() {
 
     println!();
     println!("{}", hdr("Output columns - summary (shown on exit):"));
-    println!("  (all values cover the full session lifetime except mtr, which uses the final window)");
+    println!("  (every value covers the whole session, whatever the -w window)");
     println!();
     for (name, desc) in [
         ("avg     ", "lifetime average RTT"),
         ("stddev  ", "standard deviation of RTT - spread around the average"),
-        ("mtr     ", "mean time to reliability using the final window (same formula as live mtr)"),
+        ("mtr     ", "mean time to reliability: avg ÷ (1 − loss), over the session"),
         ("jitter  ", "lifetime average jitter"),
         ("min     ", "lifetime minimum RTT"),
         ("max     ", "lifetime maximum RTT"),

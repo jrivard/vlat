@@ -14,6 +14,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+use crate::hist::LogHistogram;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
@@ -87,11 +88,16 @@ pub struct TargetState {
     pub custom_label:   bool,
     pub exec_cmd:       String,
     pub window:         Vec<(Instant, f64)>,
-    pub lifetime_rtts:  Vec<f64>,
+    /// Every reply's RTT over the run, as a fixed-size histogram (lifetime
+    /// percentiles; see `hist.rs`). Saved with the session.
+    pub life_rtt_hist:  LogHistogram,
     pub history:        Vec<Sample>,
     pub pending_map:    HashMap<usize, usize>, // seq → history index
     pub early_results:  HashSet<usize>,        // seqs where result arrived before start
-    pub jitter_window:  Vec<f64>,
+    /// Probe-to-probe jitter in the window, each tagged with the time of the
+    /// *earlier* reply of its pair, so a jump spanning a reply that has left
+    /// the window leaves with it.
+    pub jitter_window:  Vec<(Instant, f64)>,
     pub latency_sum:    f64,
     pub jitter_sum:     f64,
     pub jitter_count:   u64,
@@ -186,6 +192,82 @@ pub struct TargetState {
     /// Loss and quality grades for the status text, re-graded (with
     /// hysteresis) whenever a probe resolves or the window changes.
     pub grade: StatusGrade,
+    /// Medians of the whole stats window (the jitpct column; see `WindowMedians`).
+    pub medians: WindowMedians,
+    /// The same over the grading span (last `GRADE_SPAN_SECS`) - what the
+    /// quality grades and the degraded baseline judge.
+    pub grade_medians: WindowMedians,
+    grade_medians_at: Option<Instant>,
+    /// What's in the grading span as of the last regrade (see `SpanCounts`).
+    pub span: SpanCounts,
+    /// The window's RTTs, sorted - one copy serving every window percentile
+    /// column (p01..p99, median), refreshed with `medians`.
+    win_sorted: Vec<f64>,
+    medians_at: Option<Instant>,
+    /// Every probe-to-probe jitter of the run (lifetime jitpct), like `life_rtt_hist`.
+    pub life_jitter_hist: LogHistogram,
+}
+
+/// How much of each windowed collection falls in the grading span (the last
+/// `GRADE_SPAN_SECS`). The status text and quality column read these rather
+/// than the whole stats window, so they stay about recent behaviour even with
+/// a long `--window`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SpanCounts {
+    pub replies: usize,
+    pub jitters: usize,
+    pub drops: usize,
+    pub drop_events: usize,
+    pub outages: usize,
+}
+
+/// Where the grading span starts in each windowed collection.
+#[derive(Clone, Copy)]
+struct SpanStarts { w: usize, j: usize, d: usize, e: usize, o: usize }
+
+/// True if cached medians over `n` replies, last computed at `at`, should be
+/// recomputed: always for up to `GRADE_MEDIANS_FULL_N` replies, else at most
+/// once per `GRADE_MEDIANS_REFRESH_SECS`.
+fn medians_stale(n: usize, at: Option<Instant>, now: Instant) -> bool {
+    use crate::constants::{GRADE_MEDIANS_FULL_N, GRADE_MEDIANS_MAX_REFRESH_SECS, GRADE_MEDIANS_REFRESH_SECS};
+    if n <= GRADE_MEDIANS_FULL_N { return true; }
+    let every = (GRADE_MEDIANS_REFRESH_SECS * n as f64 / GRADE_MEDIANS_FULL_N as f64)
+        .min(GRADE_MEDIANS_MAX_REFRESH_SECS);
+    !at.is_some_and(|t| now.saturating_duration_since(t).as_secs_f64() < every)
+}
+
+impl WindowMedians {
+    /// From sorted RTTs and (unsorted) jitter values.
+    fn of(rtts: &[f64], mut jit: Vec<f64>) -> Self {
+        jit.sort_unstable_by(f64_cmp);
+        let n = rtts.len();
+        WindowMedians {
+            n,
+            med:  median_sorted(rtts),
+            p99:  if n == 0 { 0.0 } else { rtts[((n as f64 * 0.99) as usize).min(n - 1)] },
+            jmed: median_sorted(&jit),
+        }
+    }
+
+    fn jitter_pct(&self) -> Option<f64> {
+        if self.n < crate::constants::GRADE_QUALITY_MIN_SAMPLES || self.med <= 0.0 { return None; }
+        Some(self.jmed / self.med * 100.0)
+    }
+}
+
+/// Median-based figures over a set of replies: the whole stats window
+/// (`medians`, for the jitpct column) or the grading span (`grade_medians`,
+/// for the quality grades). Cached, and refreshed by `refresh_medians`, because
+/// a long window is costly to sort on every probe and every frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WindowMedians {
+    /// Replies in the window when computed.
+    pub n: usize,
+    /// Median and 99th-percentile RTT.
+    pub med: f64,
+    pub p99: f64,
+    /// Median probe-to-probe jitter.
+    pub jmed: f64,
 }
 
 /// How much of the stats window is being lost.
@@ -234,6 +316,8 @@ fn next_trend(prev: Option<Trend>, worse: (bool, bool), better: (bool, bool)) ->
 /// Hysteresis: once on, stay on while `stay` holds; otherwise turn on at `enter`.
 fn hyst(was: bool, enter: bool, stay: bool) -> bool { if was { stay } else { enter } }
 
+fn f64_cmp(a: &f64, b: &f64) -> std::cmp::Ordering { a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal) }
+
 fn median_sorted(v: &[f64]) -> f64 {
     let n = v.len();
     if n == 0 { 0.0 } else if n.is_multiple_of(2) { (v[n / 2 - 1] + v[n / 2]) / 2.0 } else { v[n / 2] }
@@ -247,7 +331,7 @@ impl TargetState {
             custom_label:   false,
             exec_cmd:       String::new(),
             window:         Vec::new(),
-            lifetime_rtts:  Vec::new(),
+            life_rtt_hist:  LogHistogram::new(),
             history:        Vec::new(),
             pending_map:    HashMap::new(),
             early_results:  HashSet::new(),
@@ -311,6 +395,13 @@ impl TargetState {
             baseline_at:     None,
             baseline_since:  None,
             grade:           StatusGrade::default(),
+            medians:         WindowMedians::default(),
+            grade_medians:   WindowMedians::default(),
+            grade_medians_at: None,
+            span:            SpanCounts::default(),
+            win_sorted:      Vec::new(),
+            medians_at:      None,
+            life_jitter_hist: LogHistogram::new(),
             win_drop_event_times: Vec::new(),
             win_outage_times: Vec::new(),
         }
@@ -350,7 +441,8 @@ impl TargetState {
         self.waiting     = false;
         self.total_sent += 1;
 
-        let effective_window = if window_secs == 0 { 300 } else { window_secs };
+        self.expire_window(now, window_secs);
+        let prev_up = self.last_up;
 
         match outcome {
             Ok(rtt_ms) => {
@@ -364,16 +456,7 @@ impl TargetState {
                 let recent_p95   = self.recent_p95_n(20);
 
                 self.window.push((now, rtt_ms));
-                self.lifetime_rtts.push(rtt_ms);
-                self.window.retain(|(t, _)| now.duration_since(*t) < Duration::from_secs(effective_window));
-                let before = self.win_drop_times.len();
-                self.win_drop_times.retain(|t| now.duration_since(*t) < Duration::from_secs(effective_window));
-                self.win_drops = self.win_drops.saturating_sub((before - self.win_drop_times.len()) as u32);
-                self.win_drop_event_times.retain(|t| now.duration_since(*t) < Duration::from_secs(effective_window));
-                self.win_outage_times.retain(|t| now.duration_since(*t) < Duration::from_secs(effective_window));
-                let before_dup = self.win_dup_times.len();
-                self.win_dup_times.retain(|t| now.duration_since(*t) < Duration::from_secs(effective_window));
-                self.win_dups = self.win_dups.saturating_sub((before_dup - self.win_dup_times.len()) as u32);
+                self.life_rtt_hist.insert(rtt_ms);
 
                 // pct deviation of current probe relative to the pre-push p95.
                 // Negative = better than usual, positive = worse than usual.
@@ -396,11 +479,12 @@ impl TargetState {
                     self.current_jitter = (rtt_ms - self.last_rtt).abs();
                     self.jitter_sum    += self.current_jitter;
                     self.jitter_count  += 1;
-                    self.jitter_window.push(self.current_jitter);
-                }
-                let window_len = self.window.len();
-                if self.jitter_window.len() > window_len {
-                    self.jitter_window.drain(..self.jitter_window.len() - window_len);
+                    self.life_jitter_hist.insert(self.current_jitter);
+                    // Tagged with the earlier reply's time (see `jitter_window`).
+                    let pair_start = prev_up.unwrap_or(now);
+                    if !self.is_expired(pair_start, now, window_secs) {
+                        self.jitter_window.push((pair_start, self.current_jitter));
+                    }
                 }
 
                 // color_score momentum: pushed by pct deviation, decays 12% per probe.
@@ -479,17 +563,16 @@ impl TargetState {
                 }
             }
         }
+        self.refresh_medians(now);
         if outcome.is_ok() { self.update_baseline(now); }
-        self.regrade_at(now);
+        self.regrade_fresh(now);
     }
 
     /// Moves `baseline_rtt` toward the current window median, weighted by the
     /// time since the last update (so it means the same at any probe rate).
     fn update_baseline(&mut self, now: Instant) {
-        let mut recent: Vec<f64> = self.recent_rtts();
-        if recent.is_empty() { return; }
-        recent.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let med = median_sorted(&recent);
+        if self.grade_medians.n == 0 { return; }
+        let med = self.grade_medians.med;
         match (self.baseline_at, self.baseline_since) {
             (Some(t), Some(since)) => {
                 // While young, the time constant is the baseline's own age - a
@@ -506,32 +589,79 @@ impl TargetState {
         self.baseline_at = Some(now);
     }
 
-    /// The most recent replies in the window, capped at `GRADE_QUALITY_MAX_SAMPLES`.
-    fn recent_rtts(&self) -> Vec<f64> {
-        let start = self.window.len().saturating_sub(crate::constants::GRADE_QUALITY_MAX_SAMPLES);
-        self.window[start..].iter().map(|&(_, v)| v).collect()
+    /// Recomputes `medians` from the whole window - every update for windows
+    /// up to `GRADE_MEDIANS_FULL_N` replies, at most once per
+    /// `GRADE_MEDIANS_REFRESH_SECS` beyond that.
+    fn refresh_medians(&mut self, now: Instant) {
+        let window_fresh = medians_stale(self.window.len(), self.medians_at, now);
+        if window_fresh {
+            self.win_sorted.clear();
+            self.win_sorted.extend(self.window.iter().map(|&(_, v)| v));
+            self.win_sorted.sort_unstable_by(f64_cmp);
+            self.medians = WindowMedians::of(&self.win_sorted, self.jitter_window.iter().map(|&(_, j)| j).collect());
+            self.medians_at = Some(now);
+        }
+        let st = self.span_starts(now);
+        let span_n = self.window.len() - st.w;
+        if !medians_stale(span_n, self.grade_medians_at, now) { return; }
+        self.grade_medians = if st.w == 0 && st.j == 0 && window_fresh {
+            self.medians // the span covers the whole window (short window, lifetime mode)
+        } else {
+            let mut rtts: Vec<f64> = self.window[st.w..].iter().map(|&(_, v)| v).collect();
+            rtts.sort_unstable_by(f64_cmp);
+            WindowMedians::of(&rtts, self.jitter_window[st.j..].iter().map(|&(_, j)| j).collect())
+        };
+        self.grade_medians_at = Some(now);
     }
 
-    /// Median probe-to-probe jitter over the samples the quality grade uses.
-    fn grade_jitter_median(&self) -> f64 {
-        let start = self.jitter_window.len().saturating_sub(crate::constants::GRADE_QUALITY_MAX_SAMPLES);
-        let mut jit: Vec<f64> = self.jitter_window[start..].to_vec();
-        jit.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        median_sorted(&jit)
+    /// Where the grading span (last `GRADE_SPAN_SECS` as of `now`) starts in
+    /// each windowed collection. They're in time order, so a binary search.
+    fn span_starts(&self, now: Instant) -> SpanStarts {
+        let span = Duration::from_secs(crate::constants::GRADE_SPAN_SECS);
+        let old = |t: Instant| now.saturating_duration_since(t) >= span;
+        SpanStarts {
+            w: self.window.partition_point(|&(t, _)| old(t)),
+            j: self.jitter_window.partition_point(|&(t, _)| old(t)),
+            d: self.win_drop_times.partition_point(|&t| old(t)),
+            e: self.win_drop_event_times.partition_point(|&t| old(t)),
+            o: self.win_outage_times.partition_point(|&t| old(t)),
+        }
+    }
+
+    fn span_counts(&self, st: SpanStarts) -> SpanCounts {
+        SpanCounts {
+            replies:     self.window.len() - st.w,
+            jitters:     self.jitter_window.len() - st.j,
+            drops:       self.win_drop_times.len() - st.d,
+            drop_events: self.win_drop_event_times.len() - st.e,
+            outages:     self.win_outage_times.len() - st.o,
+        }
+    }
+
+    /// `medians` over the whole run, from the lifetime histograms (within 1%).
+    pub fn life_medians(&self) -> WindowMedians {
+        let h = &self.life_rtt_hist;
+        WindowMedians { n: h.len() as usize, med: h.median(), p99: h.percentile(0.99), jmed: self.life_jitter_hist.median() }
     }
 
     /// Relative jitter: median probe-to-probe jitter as a percentage of median
-    /// RTT, over the same recent replies the `jittery` grade judges (so it's
-    /// the number that grade's thresholds are compared to). `None` until there
-    /// are enough replies to grade. Medians, so one outlier barely moves it -
-    /// unlike `win_cv`, which is stddev / mean.
-    pub fn win_jitter_pct(&self) -> Option<f64> {
-        let mut rtts = self.recent_rtts();
-        if rtts.len() < crate::constants::GRADE_QUALITY_MIN_SAMPLES { return None; }
-        rtts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let med = median_sorted(&rtts);
-        if med <= 0.0 { return None; }
-        Some(self.grade_jitter_median() / med * 100.0)
+    /// RTT, over the stats window when `window`, else the whole run. Medians,
+    /// so one outlier barely moves it - unlike cv, which is stddev / mean.
+    /// `None` until there are enough replies to judge. The `jittery` grade
+    /// applies the same test to the grading span (`grade_medians`).
+    pub fn jitter_pct(&self, window: bool) -> Option<f64> {
+        if window { self.medians.jitter_pct() } else { self.life_medians().jitter_pct() }
+    }
+    pub fn win_jitter_pct(&self) -> Option<f64> { self.jitter_pct(true) }
+    pub fn life_jitter_pct(&self) -> Option<f64> { self.jitter_pct(false) }
+
+    /// Whether the jitpct shown (window when `window`, else lifetime) is past
+    /// the `jittery` entry thresholds (ratio and ms floor) - for colouring the
+    /// column, whose span differs from the grade's (the last few minutes).
+    pub fn jitter_over_threshold(&self, window: bool) -> bool {
+        use crate::constants::{GRADE_JITTERY_ENTER_MS, GRADE_JITTERY_ENTER_RATIO};
+        let m = if window { self.medians } else { self.life_medians() };
+        m.jitter_pct().is_some() && m.jmed >= m.med * GRADE_JITTERY_ENTER_RATIO && m.jmed >= GRADE_JITTERY_ENTER_MS
     }
 
     /// Recomputes `grade` from the window, keeping each grade on until its
@@ -540,11 +670,19 @@ impl TargetState {
 
     /// `regrade` as of `now` (trends split the window by time).
     pub fn regrade_at(&mut self, now: Instant) {
+        self.refresh_medians(now);
+        self.regrade_fresh(now);
+    }
+
+    /// `regrade_at` with `medians` already refreshed for this update.
+    fn regrade_fresh(&mut self, now: Instant) {
         use crate::constants::*;
         let prev = self.grade;
 
-        let resolved = self.window.len() + self.win_drops as usize;
-        let pct = self.win_loss_pct();
+        let st = self.span_starts(now);
+        self.span = self.span_counts(st);
+        let resolved = self.span.replies + self.span.drops;
+        let pct = if resolved == 0 { 0.0 } else { self.span.drops as f64 / resolved as f64 * 100.0 };
         let struggling = prev.loss == LossGrade::Struggling;
         let lossy_or_worse = prev.loss != LossGrade::Normal;
         let loss = if resolved < GRADE_LOSS_MIN_SAMPLES { LossGrade::Normal }
@@ -552,12 +690,8 @@ impl TargetState {
             else if hyst(lossy_or_worse, pct >= GRADE_LOSSY_ENTER_PCT, pct >= GRADE_LOSSY_STAY_PCT) { LossGrade::Lossy }
             else { LossGrade::Normal };
 
-        let mut rtts = self.recent_rtts();
-        let quality = if rtts.len() < GRADE_QUALITY_MIN_SAMPLES { QualityFlags::default() } else {
-            rtts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let med = median_sorted(&rtts);
-            let p99 = rtts[((rtts.len() as f64 * 0.99) as usize).min(rtts.len() - 1)];
-            let jmed = self.grade_jitter_median();
+        let WindowMedians { n, med, p99, jmed } = self.grade_medians;
+        let quality = if n < GRADE_QUALITY_MIN_SAMPLES { QualityFlags::default() } else {
             // No baseline to compare to until it has warmed up.
             let warm = self.baseline_since.is_some_and(|t| now.saturating_duration_since(t).as_secs_f64() >= GRADE_BASELINE_WARMUP_SECS);
             let base = if warm { self.baseline_rtt } else { 0.0 };
@@ -575,19 +709,20 @@ impl TargetState {
                     p99 >= med * GRADE_SPIKY_STAY_RATIO && p99 - med >= GRADE_SPIKY_STAY_MS),
             }
         };
-        let (loss_trend, latency_trend) = self.trends(now, prev);
+        let (loss_trend, latency_trend) = self.trends(now, prev, st);
         self.grade = StatusGrade { loss, quality, loss_trend, latency_trend };
     }
 
     /// Loss-rate and median-RTT trends: the last `GRADE_TREND_RECENT_SECS` of
     /// the window against the rest of it.
-    fn trends(&self, now: Instant, prev: StatusGrade) -> (Option<Trend>, Option<Trend>) {
+    fn trends(&self, now: Instant, prev: StatusGrade, st: SpanStarts) -> (Option<Trend>, Option<Trend>) {
         use crate::constants::*;
         let recent = |t: Instant| now.saturating_duration_since(t).as_secs_f64() < GRADE_TREND_RECENT_SECS;
         let (mut rtt_new, mut rtt_old): (Vec<f64>, Vec<f64>) = (Vec::new(), Vec::new());
-        for &(t, v) in &self.window { if recent(t) { rtt_new.push(v) } else { rtt_old.push(v) } }
-        let drops_new = self.win_drop_times.iter().filter(|&&t| recent(t)).count();
-        let drops_old = self.win_drop_times.len() - drops_new;
+        for &(t, v) in &self.window[st.w..] { if recent(t) { rtt_new.push(v) } else { rtt_old.push(v) } }
+        let span_drops = &self.win_drop_times[st.d..];
+        let drops_new = span_drops.iter().filter(|&&t| recent(t)).count();
+        let drops_old = span_drops.len() - drops_new;
         let (n_new, n_old) = (rtt_new.len() + drops_new, rtt_old.len() + drops_old);
         if n_new < GRADE_TREND_MIN_SAMPLES || n_old < GRADE_TREND_MIN_SAMPLES { return (None, None); }
 
@@ -629,12 +764,13 @@ impl TargetState {
     }
     pub fn win_jitter_avg(&self) -> f64 {
         if self.jitter_window.is_empty() { return 0.0; }
-        self.jitter_window.iter().sum::<f64>() / self.jitter_window.len() as f64
+        self.jitter_window.iter().map(|&(_, j)| j).sum::<f64>() / self.jitter_window.len() as f64
     }
+    /// From the cached sorted window (see `win_sorted`), so drawing a dozen
+    /// percentile cells per frame doesn't re-sort the window each time.
     fn win_percentile(&self, pct: f64) -> f64 {
-        if self.window.len() < 2 { return self.win_avg(); }
-        let mut vals: Vec<f64> = self.window.iter().map(|&(_, v)| v).collect();
-        vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let vals = &self.win_sorted;
+        if vals.len() < 2 { return self.win_avg(); }
         let idx = ((vals.len() as f64 * pct) as usize).min(vals.len() - 1);
         vals[idx]
     }
@@ -654,16 +790,27 @@ impl TargetState {
         vals[idx]
     }
 
+    /// Replies over the whole run (results minus drops) - the count the
+    /// lifetime RTT sums are over.
+    pub fn life_replies(&self) -> u64 { self.total_sent.saturating_sub(self.drops as u64) }
+
+    /// Lifetime mean RTT: summed RTT over *replies* (dividing by every result,
+    /// drops included, would understate it by the loss rate).
     pub fn avg_latency(&self) -> f64 {
-        if self.total_sent > 0 { self.latency_sum / self.total_sent as f64 } else { 0.0 }
+        let n = self.life_replies();
+        if n > 0 { self.latency_sum / n as f64 } else { 0.0 }
     }
     pub fn avg_jitter(&self) -> f64 {
         if self.jitter_count > 0 { self.jitter_sum / self.jitter_count as f64 } else { 0.0 }
     }
     pub fn life_min(&self) -> f64 { if self.lifetime_min == f64::MAX { 0.0 } else { self.lifetime_min } }
     pub fn life_max(&self) -> f64 { if self.lifetime_max == f64::MIN { 0.0 } else { self.lifetime_max } }
+    /// Lifetime (population) stddev from the running sums. Sum-of-squares
+    /// loses some precision to cancellation, but RTTs are small, positive and
+    /// spread out enough that it's far below display resolution (a 10ms-ish
+    /// mean leaves ~10 of a double's ~16 digits even over 10^7 replies).
     pub fn life_stddev(&self) -> f64 {
-        let n = self.total_sent.saturating_sub(self.drops as u64);
+        let n = self.life_replies();
         if n < 2 { return 0.0; }
         let avg = self.avg_latency();
         let mean_sq = self.latency_sq_sum / n as f64;
@@ -682,34 +829,18 @@ impl TargetState {
     pub fn win_p10(&self) -> f64 { self.win_percentile(0.10) }
     pub fn win_p90(&self) -> f64 { self.win_percentile(0.90) }
 
-    pub fn win_median(&self) -> f64 {
-        if self.window.is_empty() { return 0.0; }
-        if self.window.len() == 1 { return self.window[0].1; }
-        let mut vals: Vec<f64> = self.window.iter().map(|&(_, v)| v).collect();
-        vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let mid = vals.len() / 2;
-        if vals.len().is_multiple_of(2) { (vals[mid - 1] + vals[mid]) / 2.0 } else { vals[mid] }
-    }
+    pub fn win_median(&self) -> f64 { median_sorted(&self.win_sorted) }
 
-    fn life_percentile(&self, pct: f64) -> f64 {
-        if self.lifetime_rtts.len() < 2 { return self.avg_latency(); }
-        let mut vals = self.lifetime_rtts.clone();
-        vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let idx = ((vals.len() as f64 * pct) as usize).min(vals.len() - 1);
-        vals[idx]
-    }
+    /// Lifetime percentiles come from `life_rtt_hist`: within 1%, exact
+    /// at the min and max, constant memory and cost however long the run.
+    fn life_percentile(&self, pct: f64) -> f64 { self.life_rtt_hist.percentile(pct) }
+    /// True once any reply has been seen this run (lifetime stats have data).
+    pub fn has_life_rtts(&self) -> bool { !self.life_rtt_hist.is_empty() }
     pub fn life_p01(&self) -> f64 { self.life_percentile(0.01) }
     pub fn life_p10(&self) -> f64 { self.life_percentile(0.10) }
     pub fn life_p95(&self) -> f64 { self.life_percentile(0.95) }
     pub fn life_p99(&self) -> f64 { self.life_percentile(0.99) }
-    pub fn life_median(&self) -> f64 {
-        if self.lifetime_rtts.is_empty() { return 0.0; }
-        if self.lifetime_rtts.len() == 1 { return self.lifetime_rtts[0]; }
-        let mut vals = self.lifetime_rtts.clone();
-        vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let mid = vals.len() / 2;
-        if vals.len().is_multiple_of(2) { (vals[mid - 1] + vals[mid]) / 2.0 } else { vals[mid] }
-    }
+    pub fn life_median(&self) -> f64 { self.life_rtt_hist.median() }
 
     pub fn win_loss_pct(&self) -> f64 {
         let total = self.window.len() + self.win_drops as usize;
@@ -758,30 +889,81 @@ impl TargetState {
     }
 
 
+    /// The value a numeric sort mode orders by, from the same stats the columns
+    /// show: the stats window when `window`, else lifetime. `None` = nothing to rank yet; sorts
+    /// treat it as worst. Non-numeric modes (none/name/seen/lost) are `None`.
+    pub fn sort_stat(&self, mode: &crate::cli::SortMode, window: bool) -> Option<f64> {
+        use crate::cli::SortMode as M;
+        let has = if window { !self.window.is_empty() } else { self.has_life_rtts() };
+        let rtt = |w: f64, l: f64| if !has { None } else if window { Some(w) } else { Some(l) };
+        match mode {
+            M::Loss   => Some(if window { self.win_loss_pct() } else { self.life_loss_pct() }),
+            M::Mtr    => if window { self.win_mtr() } else { self.life_mtr() },
+            M::Avg    => rtt(self.win_avg(), self.avg_latency()),
+            M::Std    => rtt(self.win_stddev(), self.life_stddev()),
+            M::Jitter => rtt(self.win_jitter_avg(), self.avg_jitter()),
+            M::P01    => rtt(self.win_p01(), self.life_p01()),
+            M::P10    => rtt(self.win_p10(), self.life_p10()),
+            M::P50    => rtt(self.win_median(), self.life_median()),
+            M::P95    => rtt(self.win_p95(), self.life_p95()),
+            M::P99    => rtt(self.win_p99(), self.life_p99()),
+            M::Cv     => rtt(self.win_cv(), self.life_cv()),
+            M::Jitpct => self.jitter_pct(window),
+            M::Srtt   => (self.srtt > 0.0).then_some(self.srtt),
+            M::None | M::Name | M::Seen | M::Lost => None,
+        }
+    }
+
+    /// True if a sample taken at `t` is outside the window as of `now`.
+    /// `window_secs` 0 (lifetime mode) still keeps a short window for the
+    /// status and quality grades (`GRADE_SPAN_SECS`).
+    fn is_expired(&self, t: Instant, now: Instant, window_secs: u64) -> bool {
+        let secs = if window_secs == 0 { crate::constants::GRADE_SPAN_SECS } else { window_secs };
+        now.saturating_duration_since(t) >= Duration::from_secs(secs)
+    }
+
+    /// Drops everything older than the window from the windowed collections
+    /// (replies, jitter, drops, dups, drop events, outages). Runs on every
+    /// result - reply or drop - and from the UI tick, so a target that stops
+    /// answering still ages out. Returns true if anything was removed.
+    pub fn expire_window(&mut self, now: Instant, window_secs: u64) -> bool {
+        let secs = if window_secs == 0 { crate::constants::GRADE_SPAN_SECS } else { window_secs };
+        let old = |t: &Instant| now.saturating_duration_since(*t) >= Duration::from_secs(secs);
+        // Samples are pushed in time order, so a fresh head means nothing to do.
+        fn prune<T>(v: &mut Vec<T>, ts: impl Fn(&T) -> Instant, old: &impl Fn(&Instant) -> bool) -> bool {
+            if !v.first().is_some_and(|x| old(&ts(x))) { return false; }
+            v.retain(|x| !old(&ts(x)));
+            true
+        }
+        let mut changed = false;
+        changed |= prune(&mut self.window,               |&(t, _)| t, &old);
+        changed |= prune(&mut self.jitter_window,        |&(t, _)| t, &old);
+        changed |= prune(&mut self.win_drop_times,       |&t| t, &old);
+        changed |= prune(&mut self.win_dup_times,        |&t| t, &old);
+        changed |= prune(&mut self.win_drop_event_times, |&t| t, &old);
+        changed |= prune(&mut self.win_outage_times,     |&t| t, &old);
+        self.win_drops = self.win_drop_times.len() as u32;
+        self.win_dups  = self.win_dup_times.len() as u32;
+        changed
+    }
+
+    /// `expire_window`, re-grading if anything left the window. For the UI
+    /// tick, so stats and grades keep moving while no results arrive.
+    pub fn expire_window_and_regrade(&mut self, now: Instant, window_secs: u64) {
+        let expired = self.expire_window(now, window_secs);
+        // Samples also age out of the (shorter) grading span while still in the window.
+        let span_moved = self.span_counts(self.span_starts(now)) != self.span;
+        if expired || span_moved { self.regrade_at(now); }
+    }
+
     /// Resize the rolling window to a new duration, preserving existing data that fits.
     /// Trims timestamps-based collections to the new window; trims graph_history to the new cap.
     /// Resets animation state but does NOT set calibrating — caller does that if needed.
     pub fn resize_window(&mut self, new_window_secs: u64, graph_max_entries: usize) {
         let now = Instant::now();
-        let effective = if new_window_secs == 0 { 300 } else { new_window_secs };
-        let cutoff = Duration::from_secs(effective);
-
-        self.window.retain(|(t, _)| now.duration_since(*t) < cutoff);
-
-        self.win_drop_times.retain(|t| now.duration_since(*t) < cutoff);
-        self.win_drops = self.win_drop_times.len() as u32;
-
-        self.win_dup_times.retain(|t| now.duration_since(*t) < cutoff);
-        self.win_dups = self.win_dup_times.len() as u32;
-
-        self.win_drop_event_times.retain(|t| now.duration_since(*t) < cutoff);
-        self.win_outage_times.retain(|t| now.duration_since(*t) < cutoff);
-
-        let window_len = self.window.len();
-        if self.jitter_window.len() > window_len {
-            self.jitter_window.drain(..self.jitter_window.len() - window_len);
-        }
-        self.regrade();
+        self.expire_window(now, new_window_secs);
+        self.medians_at = None; // a new span: recompute even a long window now
+        self.regrade_at(now);
 
         if self.graph_history.len() > graph_max_entries {
             let excess = self.graph_history.len() - graph_max_entries;
@@ -1396,5 +1578,257 @@ mod tests {
         s.flush_to_graph(100);
         assert_eq!(s.graph_history.last(), Some(&Sample::Hit(50.0)),
                    "any hit in the interval beats a drop - peak semantics");
+    }
+}
+
+/// The stats window: what leaves it, when, and that every window stat (and
+/// the sort keys) only see what's left.
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+    use std::time::Duration;
+
+    const WIN: u64 = 60;
+
+    /// A target fed results at given offsets (seconds) from a fixed start.
+    struct Feed { s: TargetState, t0: Instant, seq: usize, win: u64 }
+    impl Feed {
+        fn with_window(win: u64) -> Self { Feed { win, ..Feed::new() } }
+        fn new() -> Self {
+            // Start far enough in the past that resize_window (which uses the
+            // real clock) sees these samples as old.
+            let t0 = Instant::now().checked_sub(Duration::from_secs(1_000)).expect("monotonic clock too young");
+            Feed { s: TargetState::new("t".into()), t0, seq: 0, win: WIN }
+        }
+        fn at(&self, secs: u64) -> Instant { self.t0 + Duration::from_secs(secs) }
+        fn put(&mut self, secs: u64, r: Result<f64, ()>) {
+            let now = self.at(secs);
+            self.s.record_sent(self.seq);
+            self.s.record_result_at(now, self.seq, r, self.win, false);
+            self.seq += 1;
+        }
+        fn jittery(&mut self, from: u64, n: u64) { for i in from..from + n { self.put(i, Ok(if i % 2 == 0 { 5.0 } else { 25.0 })); } }
+        fn steady(&mut self, from: u64, n: u64) { for i in from..from + n { self.put(i, Ok(10.0)); } }
+    }
+
+    #[test]
+    fn a_down_target_ages_out_while_only_drops_arrive() {
+        let mut f = Feed::new();
+        f.steady(0, 30);
+        for i in 100..300 { f.put(i, Err(())); }
+        // Only the last 60s of drops remain; the replies are long gone.
+        assert!(f.s.window.is_empty(), "stale replies kept: {}", f.s.window.len());
+        assert!(f.s.jitter_window.is_empty());
+        assert_eq!(f.s.win_drops, 60);
+        assert_eq!(f.s.win_loss_pct(), 100.0);
+        assert_eq!(f.s.win_jitter_pct(), None);
+    }
+
+    #[test]
+    fn the_tick_ages_samples_out_when_nothing_arrives() {
+        let mut f = Feed::new();
+        f.jittery(0, 30);
+        assert!(f.s.grade.quality.jittery);
+        f.s.expire_window_and_regrade(f.at(29 + WIN - 1), WIN);
+        assert_eq!(f.s.window.len(), 1, "only the last reply is still inside");
+        f.s.expire_window_and_regrade(f.at(29 + WIN), WIN);
+        assert!(f.s.window.is_empty() && f.s.jitter_window.is_empty());
+        assert!(!f.s.grade.quality.jittery, "re-graded once its data left");
+    }
+
+    #[test]
+    fn a_jump_across_a_gap_leaves_with_its_earlier_reply() {
+        let mut f = Feed::new();
+        f.put(0, Ok(25.0));
+        f.steady(100, 30); // first one jumps 25 -> 10 across a reply that's expired
+        assert_eq!(f.s.jitter_window.len(), 29, "N replies in the window -> N-1 jitters");
+        assert_eq!(f.s.win_jitter_avg(), 0.0);
+    }
+
+    #[test]
+    fn every_window_stat_only_sees_the_window() {
+        // A minute of wild 5/25ms with a drop, then a minute of steady 10ms.
+        let mut f = Feed::new();
+        f.jittery(0, 30);
+        f.put(30, Err(()));
+        f.steady(100, 40);
+        let s = &f.s;
+        assert_eq!(s.window.len(), 40);
+        for (name, v) in [
+            ("avg", s.win_avg()), ("min", s.win_min()), ("max", s.win_max()), ("p01", s.win_p01()),
+            ("p10", s.win_p10()), ("p50", s.win_median()), ("p95", s.win_p95()), ("p99", s.win_p99()),
+            ("mtr", s.win_mtr().unwrap()),
+        ] { assert_eq!(v, 10.0, "{name}"); }
+        for (name, v) in [
+            ("std", s.win_stddev()), ("cv", s.win_cv()), ("jitter", s.win_jitter_avg()),
+            ("jitpct", s.win_jitter_pct().unwrap()), ("loss", s.win_loss_pct()),
+        ] { assert_eq!(v, 0.0, "{name}"); }
+        assert_eq!((s.win_drops, s.win_drop_event_times.len()), (0, 0));
+        assert!(!s.grade.quality.jittery);
+        // ...while lifetime still remembers all of it.
+        assert!(s.life_cv() > 0.0 && s.life_max() == 25.0 && s.drops == 1);
+    }
+
+    #[test]
+    fn resize_window_trims_everything_including_jitter() {
+        let mut f = Feed::new();
+        // Real-clock offsets: the last 10 results are within ~20s of now.
+        f.jittery(0, 30);
+        f.steady(980, 10);
+        f.s.resize_window(30, 1_000);
+        assert_eq!(f.s.window.len(), 10);
+        assert_eq!(f.s.jitter_window.len(), 9);
+        assert_eq!(f.s.win_jitter_avg(), 0.0);
+    }
+
+    #[test]
+    fn quality_and_jitpct_see_the_whole_window_not_just_recent_replies() {
+        // 2000 wild replies then 1000 steady ones, all inside a 1h window:
+        // the wild majority still sets the medians.
+        let mut s = TargetState::new("t".into());
+        let t0 = Instant::now();
+        for i in 0..3_000usize {
+            let r = if i >= 2_000 { 10.0 } else if i % 2 == 0 { 5.0 } else { 25.0 };
+            s.record_sent(i);
+            s.record_result_at(t0 + Duration::from_millis(i as u64 * 100), i, Ok(r), 3_600, false);
+        }
+        s.regrade_at(t0 + Duration::from_secs(300 + 30)); // past any refresh spacing; all still in the 1h window
+        assert_eq!(s.medians.n, 3_000);
+        assert!(s.win_jitter_pct().unwrap() > 50.0, "{:?}", s.win_jitter_pct());
+        assert!(s.grade.quality.jittery);
+    }
+
+    #[test]
+    fn long_windows_refresh_medians_on_a_spacing_that_grows_with_size() {
+        use crate::constants::{GRADE_MEDIANS_FULL_N as FULL, GRADE_MEDIANS_MAX_REFRESH_SECS as MAX};
+        let mut s = TargetState::new("t".into());
+        let t0 = Instant::now();
+        let n = FULL * 2; // -> refreshed at most every ~2s
+        let at = |i: usize| t0 + Duration::from_millis(i as u64);
+        for i in 0..n { s.record_sent(i); s.record_result_at(at(i), i, Ok(10.0), 3_600, false); }
+        let before = s.medians;
+        for i in n..n + 50 { s.record_sent(i); s.record_result_at(at(i), i, Ok(500.0), 3_600, false); }
+        assert_eq!(s.medians, before, "cached, even though the data moved");
+        s.regrade_at(at(n) + Duration::from_secs(1));
+        assert_eq!(s.medians, before, "~2s spacing at 2x the full-sort size");
+        s.regrade_at(at(n) + Duration::from_secs(3));
+        assert_eq!(s.medians.n, n + 50, "caught up");
+        // Spacing is capped, however big it gets.
+        assert!(super::medians_stale(10_000_000, Some(t0), t0 + Duration::from_secs_f64(MAX)));
+        assert!(!super::medians_stale(10_000_000, Some(t0), t0 + Duration::from_secs_f64(MAX - 1.0)));
+    }
+
+    #[test]
+    fn lifetime_jitpct_covers_the_whole_run_while_the_grade_stays_recent() {
+        // Wild 5/25ms early (long expired from the 60s window), steady 10ms now.
+        let mut f = Feed::new();
+        f.jittery(0, 200);
+        f.steady(300, 40);
+        let s = &f.s;
+        assert_eq!(s.win_jitter_pct(), Some(0.0), "window: only the steady minute");
+        let life = s.life_jitter_pct().unwrap();
+        assert!(life > 50.0, "lifetime remembers the wild part: {life}");
+        assert!(s.jitter_over_threshold(false) && !s.jitter_over_threshold(true), "lifetime colouring uses the lifetime value");
+        assert!(!s.grade.quality.jittery, "the grade judges recent behaviour only");
+        use crate::cli::SortMode as M;
+        assert_eq!(s.sort_stat(&M::Jitpct, false), Some(life));
+        assert_eq!(s.sort_stat(&M::Jitpct, true), Some(0.0));
+    }
+
+    #[test]
+    fn lifetime_mode_grades_over_the_short_lifetime_grade_window() {
+        use crate::constants::GRADE_SPAN_SECS as W;
+        let mut s = TargetState::new("t".into());
+        let t0 = Instant::now();
+        for i in 0..(W + 50) as usize {
+            s.record_sent(i);
+            s.record_result_at(t0 + Duration::from_secs(i as u64), i, Ok(10.0), 0, false);
+        }
+        assert_eq!(s.window.len() as u64, W, "window 0 keeps the last {W}s for the grades");
+        assert_eq!(s.life_rtt_hist.len(), W + 50);
+    }
+
+    #[test]
+    fn the_text_column_note_matches_the_lifetime_grade_window() {
+        let mins = crate::constants::GRADE_SPAN_SECS / 60;
+        assert!(crate::ui::dialogs::TEXT_COLUMNS_WINDOW_NOTE.contains(&format!("last {mins}m")));
+    }
+
+    #[test]
+    fn lifetime_avg_std_cv_and_mtr_are_over_replies_not_results() {
+        // 10ms and 30ms alternating, with every 5th probe lost (20% loss).
+        let mut f = Feed::new();
+        for i in 0..100u64 { f.put(i, if i % 5 == 4 { Err(()) } else if i % 2 == 0 { Ok(10.0) } else { Ok(30.0) }); }
+        let s = &f.s;
+        assert_eq!(s.life_replies(), 80);
+        assert!((s.avg_latency() - 20.0).abs() < 1e-9, "{}", s.avg_latency());
+        assert!((s.life_stddev() - 10.0).abs() < 1e-9, "{}", s.life_stddev());
+        assert!((s.life_cv() - 50.0).abs() < 1e-9, "{}", s.life_cv());
+        assert!((s.life_mtr().unwrap() - 25.0).abs() < 1e-9, "avg / (1 - 0.2)");
+    }
+
+    #[test]
+    fn cached_window_percentiles_match_a_fresh_sort_after_expiry() {
+        let mut f = Feed::new();
+        for i in 0..150u64 { f.put(i, Ok(((i * 37) % 101) as f64 + 0.5)); }
+        f.s.expire_window_and_regrade(f.at(170), WIN); // 20s more of the window gone
+        let s = &f.s;
+        let mut v: Vec<f64> = s.window.iter().map(|&(_, x)| x).collect();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let pick = |p: f64| v[((v.len() as f64 * p) as usize).min(v.len() - 1)];
+        assert_eq!(v.len(), 39);
+        for (p, got) in [(0.01, s.win_p01()), (0.10, s.win_p10()), (0.95, s.win_p95()), (0.99, s.win_p99())] {
+            assert_eq!(got, pick(p), "p{p}");
+        }
+        assert_eq!(s.win_median(), v[v.len() / 2]);
+    }
+
+    #[test]
+    fn with_a_long_window_the_grades_judge_only_the_last_few_minutes() {
+        use crate::constants::GRADE_SPAN_SECS as SPAN;
+        // 1h window: jittery and lossy for 10 minutes, then steady for the last 5.
+        let mut f = Feed::with_window(3_600);
+        for i in 0..600u64 { f.put(i, if i % 10 == 0 { Err(()) } else if i % 2 == 0 { Ok(5.0) } else { Ok(25.0) }); }
+        f.steady(600, SPAN);
+        let s = &f.s;
+        // The window numbers still see all of it...
+        assert!(s.win_drops > 0 && s.win_loss_pct() > 0.0);
+        assert!(s.win_jitter_pct().unwrap() > 0.0 && s.win_p99() == 25.0);
+        // ...the grades and the status text only the last GRADE_SPAN_SECS.
+        // (the first steady reply's jitter pairs with one from before the span)
+        assert_eq!(s.span, SpanCounts { replies: SPAN as usize, jitters: SPAN as usize - 1, ..Default::default() });
+        assert_eq!(s.grade.loss, LossGrade::Normal);
+        assert!(!s.grade.quality.jittery);
+        assert_eq!(s.grade_medians.med, 10.0);
+    }
+
+    #[test]
+    fn the_tick_regrades_when_samples_leave_the_span_but_not_the_window() {
+        let mut f = Feed::with_window(3_600);
+        f.steady(0, 100);
+        for i in 100..110 { f.put(i, Err(())); } // a burst of drops
+        f.steady(110, 20);
+        assert!(f.s.grade.loss != LossGrade::Normal, "lossy right after the burst");
+        f.s.expire_window_and_regrade(f.at(110 + crate::constants::GRADE_SPAN_SECS), 3_600);
+        assert_eq!(f.s.win_drops, 10, "still in the 1h window");
+        assert_eq!((f.s.span.drops, f.s.grade.loss), (0, LossGrade::Normal), "but out of the grading span");
+    }
+
+    #[test]
+    fn sort_keys_follow_the_window_setting_like_the_columns() {
+        use crate::cli::SortMode as M;
+        let mut f = Feed::new();
+        f.jittery(0, 30);
+        f.steady(100, 40);
+        let s = &f.s;
+        assert_eq!(s.sort_stat(&M::Cv, true), Some(s.win_cv()));
+        assert_eq!(s.sort_stat(&M::Cv, false), Some(s.life_cv()));
+        assert_ne!(s.sort_stat(&M::Cv, true), s.sort_stat(&M::Cv, false));
+        assert_eq!(s.sort_stat(&M::P99, true), Some(10.0));
+        assert_eq!(s.sort_stat(&M::P99, false), Some(25.0));
+        assert_eq!(s.sort_stat(&M::Jitter, false), Some(s.avg_jitter()));
+        assert_eq!(s.sort_stat(&M::Jitpct, false), s.life_jitter_pct());
+        assert_eq!(s.sort_stat(&M::Jitpct, true), s.win_jitter_pct());
+        assert_eq!(TargetState::new("x".into()).sort_stat(&M::Avg, true), None, "nothing to rank yet");
     }
 }

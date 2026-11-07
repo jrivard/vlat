@@ -19,6 +19,7 @@
 pub mod cli;
 pub mod constants;
 pub mod demo;
+pub mod hist;
 pub mod state;
 pub mod time;
 pub mod types;

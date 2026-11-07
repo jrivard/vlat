@@ -1034,11 +1034,12 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
     let mut sort_arrows:       Vec<Option<(Instant, bool)>> = vec![None; states.len()];
     let mut last_sort:         Instant = Instant::now();
     let mut sort_mode_changed: Option<Instant> = None;
-    // Sort interval: every 5 probe intervals, clamped to [2 s, 30 s],
-    // but never more than 20× per window (prevents thrashing on noisy nets).
+    // Sort interval: every 5 probe intervals, at most 20x per window (prevents
+    // thrashing on noisy nets with short windows), clamped to [2 s, 30 s] - so a
+    // long window (1h -> 3 min, 24h -> 72 min) can't make sorting sluggish.
     let sort_interval_ms: u64 = (args.interval * 5)
-        .clamp(2_000, 30_000)
-        .max(args.window * 1_000 / 20);
+        .max(args.window * 1_000 / 20)
+        .clamp(2_000, 30_000);
     // Graph calibration wait: collect this many ms of samples before drawing the graph,
     // so the initial scale is stable and no animation cascade fires at startup/reset.
     // 5 probe intervals, clamped to [1 s, 10 s].
@@ -1752,7 +1753,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                                 KeyCode::Enter => {
                                     let raw = input.trim().to_string();
                                     let new_secs = if raw.is_empty() {
-                                        Some(if args.window == 0 { 300 } else { 0 })
+                                        Some(if args.window == 0 { crate::constants::DEFAULT_WINDOW_SECS } else { 0 })
                                     } else {
                                         crate::cli::parse_window_input_secs(&raw).filter(|&s| {
                                             s == 0 || s >= crate::constants::WINDOW_MIN_SECS
@@ -2841,13 +2842,16 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                 }
                 sync_and_tick_scale_anim(&mut states);
 
-                // Expire any calibration windows that have elapsed.
+                // Expire any calibration windows that have elapsed, and age samples
+                // out of the stats window even when no results are arriving (a
+                // target that's down only produces a drop per timeout).
                 {
                     let now = Instant::now();
                     for s in states.iter_mut() {
                         if let Some((_, until)) = s.calibrating {
                             if until <= now { s.calibrating = None; }
                         }
+                        s.expire_window_and_regrade(now, args.window);
                     }
                 }
 
@@ -2870,42 +2874,6 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                         }
                     }
                     match sort_mode {
-                        SortMode::Mtr => {
-                            // Bubble-sort pass: one position per interval, fastest RTT to top.
-                            // Sort key = mean reliable delivery time: win_avg / (1 - loss_fraction).
-                            // Targets that are 100% lost → MAX. Targets with < 3 samples stay put.
-                            let n = sort_order.len();
-                            let win_sort_key = |slot: usize| -> f64 {
-                                states[slot].win_mtr().unwrap_or(f64::MAX)
-                            };
-                            for i in 0..n.saturating_sub(1) {
-                                let a = sort_order[i];
-                                let b = sort_order[i + 1];
-                                if states[a].total_sent < 3 || states[b].total_sent < 3 { continue; }
-                                if states[a].waiting || states[b].waiting { continue; }
-                                let ka = win_sort_key(a);
-                                let kb = win_sort_key(b);
-                                bubble_swap_f64!(i, ka, kb);
-                            }
-                        }
-                        SortMode::Avg => {
-                            // Bubble-sort pass: lowest average RTT to top.
-                            // Targets with < 3 samples or 100% loss stay put.
-                            let n = sort_order.len();
-                            let win_sort_key = |slot: usize| -> f64 {
-                                if states[slot].win_loss_pct() >= 100.0 { f64::MAX }
-                                else { states[slot].win_avg() }
-                            };
-                            for i in 0..n.saturating_sub(1) {
-                                let a = sort_order[i];
-                                let b = sort_order[i + 1];
-                                if states[a].total_sent < 3 || states[b].total_sent < 3 { continue; }
-                                if states[a].waiting || states[b].waiting { continue; }
-                                let ka = win_sort_key(a);
-                                let kb = win_sort_key(b);
-                                bubble_swap_f64!(i, ka, kb);
-                            }
-                        }
                         SortMode::Name => {
                             // Full stable sort by: mode type, then display name (label > hostname > IP).
                             let name_key = |slot: usize| -> (u8, String, u128) {
@@ -2944,56 +2912,6 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                                 sort_order.sort_by(|&a, &b| name_key(a).cmp(&name_key(b)));
                             }
                         }
-                        SortMode::Loss => {
-                            // Bubble-sort pass: fewest packet drops to top.
-                            let n = sort_order.len();
-                            let win_sort_key = |slot: usize| -> f64 {
-                                states[slot].win_loss_pct()
-                            };
-                            for i in 0..n.saturating_sub(1) {
-                                let a = sort_order[i];
-                                let b = sort_order[i + 1];
-                                if states[a].total_sent < 3 || states[b].total_sent < 3 { continue; }
-                                if states[a].waiting || states[b].waiting { continue; }
-                                let ka = win_sort_key(a);
-                                let kb = win_sort_key(b);
-                                bubble_swap_f64!(i, ka, kb);
-                            }
-                        }
-                        SortMode::Std => {
-                            // Bubble-sort pass: lowest stddev (most consistent RTT) to top.
-                            let n = sort_order.len();
-                            let win_sort_key = |slot: usize| -> f64 {
-                                if states[slot].win_loss_pct() >= 100.0 { f64::MAX }
-                                else { states[slot].win_stddev() }
-                            };
-                            for i in 0..n.saturating_sub(1) {
-                                let a = sort_order[i];
-                                let b = sort_order[i + 1];
-                                if states[a].total_sent < 3 || states[b].total_sent < 3 { continue; }
-                                if states[a].waiting || states[b].waiting { continue; }
-                                let ka = win_sort_key(a);
-                                let kb = win_sort_key(b);
-                                bubble_swap_f64!(i, ka, kb);
-                            }
-                        }
-                        SortMode::Jitter => {
-                            // Bubble-sort pass: smoothest jitter to top.
-                            let n = sort_order.len();
-                            let win_sort_key = |slot: usize| -> f64 {
-                                if states[slot].win_loss_pct() >= 100.0 { f64::MAX }
-                                else { states[slot].win_jitter_avg() }
-                            };
-                            for i in 0..n.saturating_sub(1) {
-                                let a = sort_order[i];
-                                let b = sort_order[i + 1];
-                                if states[a].total_sent < 3 || states[b].total_sent < 3 { continue; }
-                                if states[a].waiting || states[b].waiting { continue; }
-                                let ka = win_sort_key(a);
-                                let kb = win_sort_key(b);
-                                bubble_swap_f64!(i, ka, kb);
-                            }
-                        }
                         SortMode::Seen => {
                             // Bubble-sort pass: most recently responded (host up) to top;
                             // never-up targets sink to the bottom.
@@ -3030,32 +2948,29 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                                 bubble_swap_f64!(i, ka, kb);
                             }
                         }
-                        SortMode::P50 | SortMode::P95 | SortMode::P99
-                        | SortMode::P01 | SortMode::P10 | SortMode::Cv | SortMode::Jitpct | SortMode::Srtt => {
+                        SortMode::Mtr | SortMode::Avg | SortMode::Loss | SortMode::Std | SortMode::Jitter
+                        | SortMode::P50 | SortMode::P95 | SortMode::P99 | SortMode::P01 | SortMode::P10
+                        | SortMode::Cv | SortMode::Jitpct | SortMode::Srtt => {
+                            // Bubble-sort pass, one position per interval, lowest to top.
+                            // Keys come from the same window-or-lifetime stats the columns
+                            // show. Nothing to rank yet, or (for RTT stats) every probe
+                            // lost, sinks to the bottom; loss itself ranks as-is.
+                            // Targets with < 3 results or still waiting stay put.
+                            let window = args.is_window();
                             let n = sort_order.len();
-                            let win_sort_key = |slot: usize| -> f64 {
+                            let sort_key = |slot: usize| -> f64 {
                                 let s = &states[slot];
-                                if s.win_loss_pct() >= 100.0 { return f64::MAX; }
-                                match sort_mode {
-                                    SortMode::P50  => s.win_median(),
-                                    SortMode::P95  => s.win_p95(),
-                                    SortMode::P99  => s.win_p99(),
-                                    SortMode::P01  => s.win_p01(),
-                                    SortMode::P10  => s.win_p10(),
-                                    SortMode::Cv   => s.win_cv(),
-                                    // Too few replies to judge yet: below the ones that can be.
-                                    SortMode::Jitpct => s.win_jitter_pct().unwrap_or(f64::MAX),
-                                    SortMode::Srtt => if s.srtt > 0.0 { s.srtt } else { f64::MAX },
-                                    _              => unreachable!(),
-                                }
+                                let all_lost = if window { s.win_loss_pct() } else { s.life_loss_pct() } >= 100.0;
+                                if all_lost && !matches!(sort_mode, SortMode::Loss) { return f64::MAX; }
+                                s.sort_stat(&sort_mode, window).unwrap_or(f64::MAX)
                             };
                             for i in 0..n.saturating_sub(1) {
                                 let a = sort_order[i];
                                 let b = sort_order[i + 1];
                                 if states[a].total_sent < 3 || states[b].total_sent < 3 { continue; }
                                 if states[a].waiting || states[b].waiting { continue; }
-                                let ka = win_sort_key(a);
-                                let kb = win_sort_key(b);
+                                let ka = sort_key(a);
+                                let kb = sort_key(b);
                                 bubble_swap_f64!(i, ka, kb);
                             }
                         }
@@ -3146,7 +3061,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                         let col_keys_h: u16 = if show_col_keys { 2 } else { 0 };
                         let legend_h: u16 = if n > 1 { 1 } else { 0 };
                         let bubble_h = bh.saturating_sub(n * rows_per_target + col_keys_h + legend_h);
-                        bb.step(&states, global_max_jitter, bw, bubble_h, &sort_mode);
+                        bb.step(&states, global_max_jitter, bw, bubble_h, &sort_mode, args.is_window());
                     } else if let Some(ref mut sc) = scatter_state {
                         sc.step(&states, args.is_window());
                     }
@@ -3574,6 +3489,8 @@ pub fn print_saved_summary(sess: &crate::session::SessionFile, args: &Args) {
         s.max_drop_streak = d.max_drop_streak;
         s.ip_changes      = d.ip_changes;
         s.srtt            = d.srtt;
+        s.life_rtt_hist   = d.rtt_hist.clone();
+        s.life_jitter_hist = d.jitter_hist.clone();
         s.current_ip      = d.addr.as_deref().and_then(|a| a.parse().ok());
         mode_labels.push(if d.mode_label.is_empty() { "?".to_string() } else { d.mode_label.clone() });
         exec_cmds.push(d.exec_cmd.clone());
@@ -3831,7 +3748,8 @@ fn print_summary(states: &[TargetState], mode_labels: &[String], exec_cmds: &[St
             fmt_thousands(s.dups as u64)
         }
     };
-    let any_mtr_data = all.iter().any(|(s, _, _, _)| s.win_mtr().is_some());
+    // The exit summary is a session summary: every column is lifetime.
+    let any_mtr_data = all.iter().any(|(s, _, _, _)| s.life_mtr().is_some());
     let any_changes  = all.iter().any(|(s, _, _, _)| s.ip_changes > 0);
 
     // Column visibility. Base stats respect args.hidden_base_stats (toggled
@@ -3895,23 +3813,24 @@ fn print_summary(states: &[TargetState], mode_labels: &[String], exec_cmds: &[St
     let fmt_ext_val = |name: &str, s: &TargetState| -> String {
         let no_data    = s.total_sent == 0;
         let all_lost   = s.total_sent > 0 && s.drops as u64 == s.total_sent;
-        let has_window = !s.window.is_empty();
+        let replied    = s.life_replies() > 0;
         let fmt_ms     = |v: f64| if no_data || all_lost { "—".to_string() } else { format!("{:.1}ms", v) };
+        let pct_ms     = |v: f64| if replied { format!("{:.1}ms", v) } else { "—".to_string() };
         match name {
             "stddev" => fmt_ms(s.life_stddev()),
-            "mtr"    => s.win_mtr().map(|m| format!("{:.1}ms", m))
+            "mtr"    => s.life_mtr().map(|m| format!("{:.1}ms", m))
                             .unwrap_or_else(|| if all_lost { "∞".to_string() } else { "—".to_string() }),
-            "p01"    => if has_window { format!("{:.1}ms", s.win_p01())     } else { "—".to_string() },
-            "p10"    => if has_window { format!("{:.1}ms", s.win_p10())     } else { "—".to_string() },
-            "p50"    => if has_window { format!("{:.1}ms", s.win_median())  } else { "—".to_string() },
-            "p95"    => if has_window { format!("{:.1}ms", s.win_p95())     } else { "—".to_string() },
-            "p99"    => if has_window { format!("{:.1}ms", s.win_p99())     } else { "—".to_string() },
+            "p01"    => pct_ms(s.life_p01()),
+            "p10"    => pct_ms(s.life_p10()),
+            "p50"    => pct_ms(s.life_median()),
+            "p95"    => pct_ms(s.life_p95()),
+            "p99"    => pct_ms(s.life_p99()),
             "cv%"    => {
                 let cv = s.life_cv();
                 if cv <= 0.0 { "—".to_string() }
                 else if cv < 100.0 { format!("{:.1}%", cv) } else { format!("{:.0}%", cv) }
             }
-            "jit%"   => s.win_jitter_pct().map_or_else(|| "—".to_string(), |p| format!("{:.0}%", p)),
+            "jit%"   => s.life_jitter_pct().map_or_else(|| "—".to_string(), |p| format!("{:.0}%", p)),
             "srtt"   => if s.srtt > 0.0 { format!("{:.1}ms", s.srtt) } else { "—".to_string() },
             _ => String::new(),
         }

@@ -93,7 +93,7 @@ impl BubbleState {
         BubbleState { bubbles, rng }
     }
 
-    pub fn step(&mut self, states: &[TargetState], global_max_jitter: f64, w: u16, h: u16, sort_mode: &SortMode) {
+    pub fn step(&mut self, states: &[TargetState], global_max_jitter: f64, w: u16, h: u16, sort_mode: &SortMode, window: bool) {
         if w == 0 || h == 0 { return; }
         let n = states.len();
 
@@ -108,7 +108,7 @@ impl BubbleState {
 
         let global_max_metric = states.iter().zip(&down)
             .filter(|(s, &d)| !s.waiting && !d)
-            .map(|(s, _)| bubble_metric(s, sort_mode))
+            .map(|(s, _)| bubble_metric(s, sort_mode, window))
             .fold(0.0f64, f64::max)
             .max(1.0);
 
@@ -128,7 +128,7 @@ impl BubbleState {
             let jitter_norm = jitter_norm(state, global_max_jitter);
 
             // EMA-smooth radius toward data-driven target
-            let metric_val = state.map_or(0.0, |s| bubble_metric(s, sort_mode));
+            let metric_val = state.map_or(0.0, |s| bubble_metric(s, sort_mode, window));
             let norm = (metric_val / global_max_metric).clamp(0.0, 1.0);
             let target_ry = MIN_RY + norm * (MAX_RY - MIN_RY);
             bubble.display_ry = bubble.display_ry * 0.92 + target_ry * 0.08;
@@ -281,23 +281,13 @@ fn jitter_norm(state: Option<&TargetState>, global_max_jitter: f64) -> f64 {
 
 /// Return the metric value used to size this bubble.  When the sort mode is a
 /// numeric metric the bubble size reflects that metric; otherwise latency.
-pub fn bubble_metric(state: &TargetState, sort: &SortMode) -> f64 {
+pub fn bubble_metric(state: &TargetState, sort: &SortMode, window: bool) -> f64 {
     if state.waiting { return 0.0; }
+    // Same window-or-lifetime value the sort and the columns use.
+    let avg = || state.sort_stat(&SortMode::Avg, window).unwrap_or(0.0);
     match sort {
-        SortMode::None | SortMode::Name => state.win_avg(),
-        SortMode::Avg    => state.win_avg(),
-        SortMode::Loss   => state.win_loss_pct(),
-        SortMode::Std    => state.win_stddev(),
-        SortMode::Jitter => state.win_jitter_avg(),
-        SortMode::P50    => state.win_median(),
-        SortMode::P95    => state.win_p95(),
-        SortMode::P99    => state.win_p99(),
-        SortMode::P01    => state.win_p01(),
-        SortMode::P10    => state.win_p10(),
-        SortMode::Cv     => state.win_cv(),
-        SortMode::Jitpct => state.win_jitter_pct().unwrap_or(0.0),
-        SortMode::Srtt   => state.srtt,
-        SortMode::Mtr    => state.win_mtr().unwrap_or_else(|| state.win_avg()),
+        SortMode::None | SortMode::Name => avg(),
+        SortMode::Mtr    => state.sort_stat(sort, window).unwrap_or_else(avg),
         SortMode::Seen   => state.last_up
             .map(|t| crate::time::Instant::now().saturating_duration_since(t).as_secs_f64())
             .unwrap_or(0.0),
@@ -305,6 +295,7 @@ pub fn bubble_metric(state: &TargetState, sort: &SortMode) -> f64 {
         SortMode::Lost   => state.last_drop_at
             .map(|t| 1.0 / (1.0 + crate::time::Instant::now().saturating_duration_since(t).as_secs_f64()))
             .unwrap_or(0.0),
+        _ => state.sort_stat(sort, window).unwrap_or(0.0),
     }
 }
 
@@ -735,7 +726,7 @@ pub fn draw_bubble(
 
     let global_max_metric = states.iter()
         .filter(|s| !s.waiting && !bubble_is_down(s))
-        .map(|s| bubble_metric(s, sort_mode))
+        .map(|s| bubble_metric(s, sort_mode, args.is_window()))
         .fold(0.0f64, f64::max)
         .max(1.0);
 
@@ -760,7 +751,7 @@ pub fn draw_bubble(
             continue;
         }
 
-        let metric_val = if state.waiting { 0.0 } else { bubble_metric(state, sort_mode) };
+        let metric_val = if state.waiting { 0.0 } else { bubble_metric(state, sort_mode, args.is_window()) };
         let norm = (metric_val / global_max_metric).clamp(0.0, 1.0);
         let base_rgb = args.theme.gradient_color(norm);
 

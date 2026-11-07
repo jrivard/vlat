@@ -164,7 +164,7 @@ fn stat_cells(state: &TargetState, args: &Args, theme: &super::Theme) -> Vec<(&'
             ExtraStat::Lost => v.push(("lost", fmt_since(state.last_drop_at, Instant::now()), val)),
             ExtraStat::Status => v.push(("stat", probe_status_text(state, Instant::now(), args.interval, args.ascii), val)),
             ExtraStat::Quality => v.push(("qual", super::probe_quality_cell(state).text(args.ascii), val)),
-            ExtraStat::Jitpct => v.push(("jit%", super::fmt_jitpct(state.win_jitter_pct()), val)),
+            ExtraStat::Jitpct => v.push(("jit%", super::fmt_jitpct(state.jitter_pct(win)), val)),
             // Recent / Bar are dedicated rows; identity / meta variants never appear here.
             _ => {}
         }

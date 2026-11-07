@@ -67,9 +67,23 @@ pub const GRADE_STRUGGLING_STAY_PCT: f64  = 20.0;
 // "struggling", not on/off flapping.
 pub const GRADE_OUTAGE_MIN_DROPS: u32     = 3;
 pub const GRADE_FLAPPING_OUTAGES: usize   = 2;
-// Quality grades use (at most) the most recent replies in the window.
+// The text columns (status, quality) and the grades behind them describe
+// recent behaviour: they judge only the last GRADE_SPAN_SECS of the stats
+// window (all of it, if shorter), whatever --window is. Lifetime mode keeps a
+// window of this length for them.
+pub const GRADE_SPAN_SECS: u64 = 300;
+// Quality grades judge every reply in the grading span (above), and jitpct
+// every reply in the stats window (or the whole run); both need at least this
+// many to say anything.
 pub const GRADE_QUALITY_MIN_SAMPLES: usize = 10;
-pub const GRADE_QUALITY_MAX_SAMPLES: usize = 600;
+// Their medians are cached per target. Up to GRADE_MEDIANS_FULL_N replies they
+// are re-sorted on every update; beyond that, at most once per
+// GRADE_MEDIANS_REFRESH_SECS per GRADE_MEDIANS_FULL_N replies, capped at
+// GRADE_MEDIANS_MAX_REFRESH_SECS - so a 24h run at 1s re-sorts ~86k values every
+// 30s, not every probe. (Medians of that many replies barely move in 30s.)
+pub const GRADE_MEDIANS_FULL_N: usize = 1_000;
+pub const GRADE_MEDIANS_REFRESH_SECS: f64 = 1.0;
+pub const GRADE_MEDIANS_MAX_REFRESH_SECS: f64 = 30.0;
 // slow: window median vs --warn-rtt (enter at it, stay above this fraction of it).
 pub const GRADE_SLOW_STAY_FRAC: f64       = 0.9;
 // degraded: window median vs the target's own slow-moving baseline, both as a
@@ -106,6 +120,10 @@ pub const GRADE_LATENCY_TREND_STAY_MS: f64     = 3.0;
 
 // Window / graph-width limits
 pub const WINDOW_MIN_SECS: u64        = 10;
+/// Default stats window (`--window`; must match its clap default_value).
+/// Long enough to be a stable picture, short enough to still move; lifetime
+/// is `-w 0`.
+pub const DEFAULT_WINDOW_SECS: u64    = 3_600;
 pub const WINDOW_MAX_SECS: u64        = 86_400; // 24 h
 
 // Animation

@@ -628,7 +628,7 @@ pub fn compute_no_data(states: &[TargetState], extras: &[ExtraStat], hidden_base
 
     if want(&ExtraStat::Mtr)    && !any_mtr     { mask |= 1 <<  9; }
     if want(&ExtraStat::Std)    && !any_window2 { mask |= 1 << 10; }
-    let any_life_rtts = states.iter().any(|s| !s.lifetime_rtts.is_empty());
+    let any_life_rtts = states.iter().any(|s| s.has_life_rtts());
     if want(&ExtraStat::P01)    && !any_window && !any_life_rtts { mask |= 1 << 11; }
     if want(&ExtraStat::P10)    && !any_window && !any_life_rtts { mask |= 1 << 12; }
     if want(&ExtraStat::P50)    && !any_window && !any_life_rtts { mask |= 1 << 13; }
@@ -643,7 +643,7 @@ pub fn compute_no_data(states: &[TargetState], extras: &[ExtraStat], hidden_base
     if want(&ExtraStat::Bar)    && !any_history { mask |= 1 << 21; }
     let any_graded = states.iter().any(|s| probe_quality_cell(s) != QualityCell::NoData);
     if want(&ExtraStat::Quality) && !any_graded { mask |= 1 << 23; }
-    let any_jitpct = states.iter().any(|s| s.win_jitter_pct().is_some());
+    let any_jitpct = states.iter().any(|s| s.win_jitter_pct().is_some() || s.life_jitter_pct().is_some());
     if want(&ExtraStat::Jitpct) && !any_jitpct { mask |= 1 << 24; }
 
     mask
@@ -754,23 +754,23 @@ pub fn compute_col_widths(states: &[TargetState], stats_window: bool, extras: &[
         }
         if want(&ExtraStat::P01) {
             if stats_window && !s.window.is_empty() { upd!(fmt_rtt(s.win_p01()),    p01_c, p01_i, p01_f); }
-            else if !stats_window && !s.lifetime_rtts.is_empty() { upd!(fmt_rtt(s.life_p01()),  p01_c, p01_i, p01_f); }
+            else if !stats_window && s.has_life_rtts() { upd!(fmt_rtt(s.life_p01()),  p01_c, p01_i, p01_f); }
         }
         if want(&ExtraStat::P10) {
             if stats_window && !s.window.is_empty() { upd!(fmt_rtt(s.win_p10()),    p10_c, p10_i, p10_f); }
-            else if !stats_window && !s.lifetime_rtts.is_empty() { upd!(fmt_rtt(s.life_p10()),  p10_c, p10_i, p10_f); }
+            else if !stats_window && s.has_life_rtts() { upd!(fmt_rtt(s.life_p10()),  p10_c, p10_i, p10_f); }
         }
         if want(&ExtraStat::P50) {
             if stats_window && !s.window.is_empty() { upd!(fmt_rtt(s.win_median()), p50_c, p50_i, p50_f); }
-            else if !stats_window && !s.lifetime_rtts.is_empty() { upd!(fmt_rtt(s.life_median()), p50_c, p50_i, p50_f); }
+            else if !stats_window && s.has_life_rtts() { upd!(fmt_rtt(s.life_median()), p50_c, p50_i, p50_f); }
         }
         if want(&ExtraStat::P95) {
             if stats_window && !s.window.is_empty() { upd!(fmt_rtt(s.win_p95()),    p95_c, p95_i, p95_f); }
-            else if !stats_window && !s.lifetime_rtts.is_empty() { upd!(fmt_rtt(s.life_p95()),  p95_c, p95_i, p95_f); }
+            else if !stats_window && s.has_life_rtts() { upd!(fmt_rtt(s.life_p95()),  p95_c, p95_i, p95_f); }
         }
         if want(&ExtraStat::P99) {
             if stats_window && !s.window.is_empty() { upd!(fmt_rtt(s.win_p99()),    p99_c, p99_i, p99_f); }
-            else if !stats_window && !s.lifetime_rtts.is_empty() { upd!(fmt_rtt(s.life_p99()),  p99_c, p99_i, p99_f); }
+            else if !stats_window && s.has_life_rtts() { upd!(fmt_rtt(s.life_p99()),  p99_c, p99_i, p99_f); }
         }
         if want(&ExtraStat::Srtt) && s.srtt > 0.0 {
             upd!(fmt_rtt(s.srtt), srt_c, srt_i, srt_f);
@@ -792,7 +792,7 @@ pub fn compute_col_widths(states: &[TargetState], stats_window: bool, extras: &[
             quality_w = quality_w.max(probe_quality_cell(s).text(false).chars().count()); // arrows are 1 col in --ascii too
         }
         if want(&ExtraStat::Jitpct) {
-            jitpct_w = jitpct_w.max(fmt_jitpct(s.win_jitter_pct()).len());
+            jitpct_w = jitpct_w.max(fmt_jitpct(s.jitter_pct(stats_window)).len());
         }
     }
     ColWidths {

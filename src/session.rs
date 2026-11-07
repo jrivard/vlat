@@ -34,6 +34,7 @@
 //! aggregates exist only so the picker's "summary & exit" action can print the
 //! same end-of-session summary a quitting run would.
 
+use crate::hist::LogHistogram;
 use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -118,6 +119,12 @@ pub struct TargetData {
     pub max_drop_streak:    u32,
     pub ip_changes:         u32,
     pub srtt:               f64,
+    /// Lifetime RTT / jitter histograms (percentiles, median, jitpct).
+    /// Absent in sessions saved before they existed: those restore empty.
+    #[serde(default, skip_serializing_if = "LogHistogram::is_empty")]
+    pub rtt_hist:           LogHistogram,
+    #[serde(default, skip_serializing_if = "LogHistogram::is_empty")]
+    pub jitter_hist:        LogHistogram,
 }
 
 // ── runtime context ──────────────────────────────────────────────────────────
@@ -317,6 +324,8 @@ fn target_data_from(s: &TargetState, mode_label: &str) -> TargetData {
         max_drop_streak:    s.max_drop_streak,
         ip_changes:         s.ip_changes,
         srtt:               s.srtt,
+        rtt_hist:           s.life_rtt_hist.clone(),
+        jitter_hist:        s.life_jitter_hist.clone(),
     }
 }
 
@@ -353,7 +362,7 @@ fn settings_tokens(args: &Args, rt: &RuntimeSettings) -> Vec<Vec<String>> {
     val_ne!("--keys", rt.keys, true, rt.keys.to_string());
     val_ne!("--interval", args.interval, 1000, format!("{}ms", args.interval));
     val_ne!("--timeout", args.timeout, 10.0, format!("{}s", args.timeout));
-    val_ne!("--window", args.window, 0, format!("{}s", args.window));
+    val_ne!("--window", args.window, crate::constants::DEFAULT_WINDOW_SECS, format!("{}s", args.window));
     val_ne!("--graph-interval", args.graph_interval, 1000, format!("{}ms", args.graph_interval));
     val_ne!("--history-rows", args.history_rows, crate::constants::SINGLE_HISTORY_ROWS, args.history_rows.to_string());
     opt!("--span", args.span.map(|s| format!("{}s", s)));
@@ -1112,7 +1121,8 @@ fn wrap_text(s: &str, width: usize) -> Vec<String> {
 
 /// One condensed stats line for a saved target: avg RTT, loss %, avg jitter, samples sent.
 fn condensed_stat_line(d: &TargetData) -> String {
-    let avg    = if d.total_sent > 0 { d.latency_sum / d.total_sent as f64 } else { 0.0 };
+    let replies = d.total_sent.saturating_sub(d.drops as u64);
+    let avg    = if replies > 0 { d.latency_sum / replies as f64 } else { 0.0 };
     let loss   = if d.total_sent > 0 { d.drops as f64 / d.total_sent as f64 * 100.0 } else { 0.0 };
     let jitter = if d.jitter_count > 0 { d.jitter_sum / d.jitter_count as f64 } else { 0.0 };
     format!("{:<16} avg {:>7.1}ms  loss {:>5.1}%  jitter {:>6.2}ms  n {}",

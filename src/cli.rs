@@ -615,8 +615,9 @@ pub struct Args {
     #[arg(short, long, default_value = "10s", value_parser = parse_timeout_secs)]
     pub timeout: f64,
 
-    /// Time period used to calculate stats like avg, loss, and jitter (0 = lifetime; see TIME FORMAT)
-    #[arg(short, long, default_value = "0", value_parser = parse_window_secs)]
+    /// Time period used to calculate stats like avg, loss, and jitter (0 = lifetime; see TIME FORMAT).
+    /// The text columns (status, quality) describe recent behaviour: the last 5m (or the window, if shorter)
+    #[arg(short, long, default_value = "1h", value_parser = parse_window_secs)]
     pub window: u64,
 
     /// Run with synthetic simulated targets instead of real network probes -
@@ -1042,14 +1043,15 @@ pub enum ExtraStat {
     Bar,
     /// Status summary, e.g. "lossy, worsening · 20 lost (6.7%), last failure 2m ago".
     /// Same text as the single-target view's status line; excludes the up/down
-    /// badge itself.
+    /// badge itself. Judges the last 5m (or the whole window, if shorter).
     Status,
     /// How well it answers when it does: slow, degraded, jittery, spiky, or
     /// "good"; "no reply" if nothing in the window answered; "~" until there's
-    /// enough to judge
+    /// enough to judge. Judges the last 5m (or the whole window, if shorter)
     Quality,
     /// Relative jitter: median probe-to-probe jitter / median RTT, as a
-    /// percentage - the figure the "jittery" quality grade is judged on  (Δ / J)
+    /// percentage, over the window or lifetime like the other numbers. The
+    /// "jittery" quality word applies the same test to the last 5m  (Δ / J)
     Jitpct,
 }
 
@@ -1130,6 +1132,13 @@ fn parse_tls_version(s: &str) -> Result<TlsVersionArg, String> {
 #[cfg(test)]
 mod tests {
     use super::{parse_interval, parse_duration_limit};
+
+    #[test]
+    fn default_window_matches_its_constant() {
+        use clap::Parser;
+        let a = super::Args::parse_from(["vlat", "127.0.0.1"]);
+        assert_eq!(a.window, crate::constants::DEFAULT_WINDOW_SECS);
+    }
 
     #[test]
     fn duration_limit_parses_time_format() {

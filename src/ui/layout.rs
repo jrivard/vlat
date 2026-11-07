@@ -124,14 +124,49 @@ fn fmt_window_secs(secs: u64) -> String {
     }
 }
 
-pub fn render_window_label(f: &mut Frame, area: Rect, _states: &[TargetState], args: &Args, sort_mode: &SortMode, sort_mode_changed: Option<Instant>) {
-    let theme = &args.theme;
-    let label_text = if args.window == 0 {
+/// Seconds of data the stats window actually holds: how far back the oldest
+/// sample (reply or drop) of any target goes. Short of the window size right
+/// after start-up or after `w` widens it, until it fills.
+fn window_coverage_secs(states: &[TargetState], now: Instant) -> u64 {
+    states.iter()
+        .flat_map(|s| s.window.first().map(|&(t, _)| t).into_iter().chain(s.win_drop_times.first().copied()))
+        .map(|t| now.saturating_duration_since(t).as_secs())
+        .max().unwrap_or(0)
+}
+
+/// The bottom-border window label: "1h window", or "1h window (12m so far)"
+/// while it fills; "lifetime", plus the span the status/quality text
+/// columns use when one is shown (they stay recent in lifetime mode).
+pub fn window_label_text(states: &[TargetState], args: &Args, now: Instant) -> String {
+    use crate::constants::GRADE_SPAN_SECS;
+    let dot = if args.ascii { "-" } else { "\u{00b7}" };
+    let base = if args.window == 0 {
         "lifetime".to_string()
     } else {
-        format!("{} window", fmt_window_secs(args.window))
+        let have = window_coverage_secs(states, now);
+        // Allow a probe interval or so of slack before calling it full.
+        if (have as f64) < args.window as f64 * 0.95 && !states.is_empty() {
+            let have = if have >= 60 { have / 60 * 60 } else { have }; // whole minutes once past one
+            format!("{} window ({} so far)", fmt_window_secs(args.window), fmt_window_secs(have))
+        } else {
+            format!("{} window", fmt_window_secs(args.window))
+        }
     };
-    if label_text.is_empty() { return; }
+    // The text columns judge only the last GRADE_SPAN_SECS: say so when that's
+    // narrower than what the label names, and one of them is on screen.
+    if args.window != 0 && args.window <= GRADE_SPAN_SECS { return base; }
+    let which = match (args.extra_stats.contains(&ExtraStat::Status), args.extra_stats.contains(&ExtraStat::Quality)) {
+        (true, true)   => "status/quality",
+        (true, false)  => "status",
+        (false, true)  => "quality",
+        (false, false) => return base,
+    };
+    format!("{base} {dot} {which} {}", fmt_window_secs(GRADE_SPAN_SECS))
+}
+
+pub fn render_window_label(f: &mut Frame, area: Rect, states: &[TargetState], args: &Args, sort_mode: &SortMode, sort_mode_changed: Option<Instant>) {
+    let theme = &args.theme;
+    let label_text = window_label_text(states, args, Instant::now());
 
     let label_style = Style::default().fg(theme.c(theme.uptime));
 
@@ -167,7 +202,7 @@ pub fn render_window_label(f: &mut Frame, area: Rect, _states: &[TargetState], a
     };
 
     let tag_chars = sort_tag.chars().count();
-    let w: u16 = (tag_chars + label_text.len()) as u16;
+    let w: u16 = (tag_chars + label_text.chars().count()) as u16;
 
     let y = area.y + area.height.saturating_sub(1);
     let x = if args.window == 0 {
@@ -2272,5 +2307,52 @@ mod single_view_layout_tests {
         let taller = Rect { x: 0, y: 0, width, height: height + 5 };
         let avail_taller = single_history_avail(taller, &states, &args, &col_widths);
         assert_eq!(avail_taller, avail + 5, "avail should grow with the available terminal rows");
+    }
+}
+
+#[cfg(test)]
+mod window_label_tests {
+    use super::*;
+    use clap::Parser;
+    use std::time::Duration;
+
+    fn args(extra: &[&str]) -> Args {
+        let mut argv = vec!["vlat", "127.0.0.1"];
+        argv.extend_from_slice(extra);
+        let mut a = Args::parse_from(argv);
+        a.extra_stats = crate::cli::resolve_columns(&a.extra_stats).unwrap().0;
+        a
+    }
+
+    /// One target with a reply every second for `secs` seconds, ending at `now`.
+    fn fed(secs: u64, window: u64, now: Instant) -> Vec<TargetState> {
+        let mut s = TargetState::new("t".into());
+        for i in 0..secs as usize {
+            let t = now - Duration::from_secs(secs - 1 - i as u64);
+            s.record_sent_at(t, i);
+            s.record_result_at(t, i, Ok(10.0), window, false);
+        }
+        vec![s]
+    }
+
+    #[test]
+    fn a_window_says_how_much_it_holds_until_full() {
+        let now = Instant::now() + Duration::from_secs(10_000);
+        let a = args(&["-w", "1h"]);
+        assert_eq!(window_label_text(&fed(12 * 60 + 30, 3_600, now), &a, now), "1h window (12m so far)");
+        assert_eq!(window_label_text(&fed(40, 3_600, now), &a, now), "1h window (39s so far)");
+        assert_eq!(window_label_text(&fed(3_600, 3_600, now), &a, now), "1h window");
+        let q = args(&["-w", "1h", "--columns", "default,quality"]);
+        assert_eq!(window_label_text(&fed(3_600, 3_600, now), &q, now), "1h window \u{00b7} quality 5m");
+        let short = args(&["-w", "2m", "--columns", "default,quality"]);
+        assert_eq!(window_label_text(&fed(120, 120, now), &short, now), "2m window", "a short window is the span");
+    }
+
+    #[test]
+    fn lifetime_names_the_span_of_the_text_columns_when_shown() {
+        let now = Instant::now();
+        assert_eq!(window_label_text(&[], &args(&["-w", "0"]), now), "lifetime");
+        assert_eq!(window_label_text(&[], &args(&["-w", "0", "--columns", "default,quality"]), now), "lifetime \u{00b7} quality 5m");
+        assert_eq!(window_label_text(&[], &args(&["-w", "0", "--columns", "status,quality", "--ascii"]), now), "lifetime - status/quality 5m");
     }
 }
