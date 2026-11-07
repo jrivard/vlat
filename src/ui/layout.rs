@@ -32,7 +32,7 @@ use super::{
     show_dups_any, accent_color, trim_range_bar, compute_no_data,
     dialogs::{
         DialogMode, draw_warning_dialog, draw_help_dialog,
-        draw_filename_dialog, draw_explain_dialog, draw_frozen_notice,
+        draw_filename_dialog, draw_explain_dialog, draw_about_dialog, draw_frozen_notice,
         draw_freeze_notice_dialog, draw_sort_notice_dialog, draw_sort_picker_dialog, draw_theme_notice_dialog,
         draw_theme_picker_dialog, draw_view_notice_dialog, draw_view_picker_dialog, draw_save_defaults_dialog,
         draw_window_input_dialog, draw_stat_column_toggle_dialog,
@@ -284,6 +284,9 @@ pub fn render_dialogs(
         }
         DialogMode::Explain { scroll } => {
             draw_explain_dialog(f, area, *scroll, args.ascii, &args.theme);
+        }
+        DialogMode::About { logo, command } => {
+            draw_about_dialog(f, area, logo, command, args.ascii, &args.theme);
         }
         DialogMode::FilenameInput { format, input } => {
             draw_filename_dialog(f, area, format, input, &args.theme);

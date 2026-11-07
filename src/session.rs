@@ -519,9 +519,19 @@ pub enum PickerAction {
 
 /// The full CLI invocation equivalent to this saved session.
 pub fn restart_command(s: &SessionFile) -> String {
+    command_line(&s.args, &s.targets)
+}
+
+/// The CLI invocation equivalent to the running session - the same command a
+/// session saved right now would restart with (live view/sort/keys included).
+pub fn effective_command(args: &Args, rt: &RuntimeSettings) -> String {
+    command_line(&settings_tokens(args, rt), &args.targets)
+}
+
+fn command_line(groups: &[Vec<String>], targets: &[String]) -> String {
     let mut tokens: Vec<String> = vec!["vlat".to_string()];
-    for group in &s.args { tokens.extend(group.iter().cloned()); }
-    tokens.extend(s.targets.iter().cloned());
+    for group in groups { tokens.extend(group.iter().cloned()); }
+    tokens.extend(targets.iter().cloned());
     tokens.iter().map(|t| shell_quote(t)).collect::<Vec<_>>().join(" ")
 }
 
@@ -1317,6 +1327,14 @@ mod tests {
 
     /// All-default settings should produce no CLI tokens at all - only
     /// deviations from clap's defaults belong in a restarted/copied command.
+    #[test]
+    fn effective_command_lists_changed_settings_then_targets() {
+        let mut args = <Args as clap::Parser>::parse_from(["vlat", "--interval", "500ms", "1.1.1.1", "my host"]);
+        args.targets = vec!["1.1.1.1".to_string(), "my host".to_string()];
+        let rt = RuntimeSettings { view: "list", sort: "none", keys: true };
+        assert_eq!(effective_command(&args, &rt), "vlat --view list --interval 500ms 1.1.1.1 'my host'");
+    }
+
     #[test]
     fn settings_tokens_omits_defaults() {
         use clap::Parser;

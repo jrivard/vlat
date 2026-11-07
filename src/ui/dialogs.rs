@@ -226,6 +226,9 @@ pub enum DialogMode {
     Warning { dismiss_at: crate::time::Instant, message: String },
     Help { page: usize, scroll: u16, dismiss_at: crate::time::Instant, logo: LogoAnim, cursor: usize, sub_menu: Option<HelpSubMenu>, collapsed: [bool; 3] },
     Explain { scroll: u16 },
+    /// Undocumented about screen ('A'): logo, build version, and the effective
+    /// command line for this session (snapshotted when the dialog opens).
+    About { logo: LogoAnim, command: String },
     FilenameInput {
         format: OutputFormat,
         input: String,
@@ -2051,6 +2054,98 @@ pub fn draw_save_defaults_dialog(
     );
 }
 
+const ABOUT_MAX_W: u16 = 76;
+
+/// Width of the about dialog for a given screen width.
+fn about_dialog_w(area_w: u16) -> u16 { ABOUT_MAX_W.min(area_w.saturating_sub(4)) }
+
+/// Body lines of the about dialog, wrapped to fit inside a `dialog_w`-wide box.
+/// Every line wraps (nothing is clipped at the border): a `label value` row
+/// stays on one line when it fits, otherwise the value moves below the label.
+fn about_lines(command: &str, dialog_w: u16, ascii: bool, theme: &Theme) -> Vec<Line<'static>> {
+    let label = Style::default().fg(theme.dlg_help_key).add_modifier(Modifier::BOLD);
+    let desc  = Style::default().fg(theme.c(theme.dlg_help_label));
+    let dim   = Style::default().fg(theme.c(theme.dlg_timer)).add_modifier(Modifier::DIM);
+    let dash  = if ascii { "-" } else { "\u{2014}" };
+    const INDENT: &str = "   ";
+    // Usable text width: inside the borders, minus 1 col of padding each side.
+    let text_w = (dialog_w as usize).saturating_sub(4).max(8);
+    let pad = |indent: &str, text: String, style: Style| {
+        Line::from(vec![Span::raw(format!(" {}", indent)), Span::styled(text, style)])
+    };
+
+    let mut lines = Vec::new();
+    let tagline = format!("{} modern terminal latency monitor", dash);
+    if 5 + tagline.chars().count() <= text_w {
+        lines.push(Line::from(vec![Span::raw(" "), Span::styled("vlat", label), Span::styled(format!(" {}", tagline), desc)]));
+    } else {
+        lines.push(pad("", "vlat".to_string(), label));
+        for l in wrap_hard(&tagline, text_w) { lines.push(pad("", l, desc)); }
+    }
+
+    let entry = |lines: &mut Vec<Line<'static>>, name: &str, value: &str, force_below: bool| {
+        lines.push(Line::raw(""));
+        if !force_below && name.len() + 1 + value.chars().count() <= text_w {
+            lines.push(Line::from(vec![Span::raw(" "), Span::styled(format!("{} ", name), label), Span::raw(value.to_string())]));
+        } else {
+            lines.push(pad("", name.to_string(), label));
+            for l in wrap_hard(value, text_w.saturating_sub(INDENT.len()).max(8)) {
+                lines.push(pad(INDENT, l, Style::default()));
+            }
+        }
+    };
+    entry(&mut lines, "version", &format!("v{}", crate::cli::VERSION), false);
+    entry(&mut lines, "command", command, true);
+
+    lines.push(Line::raw(""));
+    lines.push(pad("", "any key to close".to_string(), dim));
+    lines
+}
+
+/// Word-wrap `s` to `width`, then split any word still longer than `width`
+/// (e.g. a long URL target) so nothing is clipped at the dialog edge.
+fn wrap_hard(s: &str, width: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in crate::session::wrap_text(s, width) {
+        let chars: Vec<char> = line.chars().collect();
+        if chars.is_empty() { out.push(String::new()); continue; }
+        for chunk in chars.chunks(width.max(1)) {
+            out.push(chunk.iter().collect());
+        }
+    }
+    out
+}
+
+/// Rows the about dialog needs (body + borders), for growing the inline viewport.
+pub fn about_dialog_height(command: &str, area_w: u16, ascii: bool, theme: &Theme) -> u16 {
+    about_lines(command, about_dialog_w(area_w), ascii, theme).len() as u16 + 2
+}
+
+pub fn draw_about_dialog(f: &mut Frame, area: Rect, logo: &LogoAnim, command: &str, ascii: bool, theme: &Theme) {
+    let dialog_w    = about_dialog_w(area.width);
+    let body        = about_lines(command, dialog_w, ascii, theme);
+    let dialog_h    = (body.len() as u16 + 2).min(area.height);
+    let dialog_area = centered_rect(dialog_w, dialog_h, area);
+
+    if !ascii && dialog_area.y >= area.y + 4 {
+        let logo_x = area.x + area.width.saturating_sub(LogoAnim::WIDTH) / 2;
+        let logo_y = dialog_area.y - LogoAnim::HEIGHT - 1;
+        logo.render(f, Rect::new(logo_x, logo_y, LogoAnim::WIDTH.min(area.width), LogoAnim::HEIGHT), theme);
+    }
+
+    let title = Line::from(Span::styled(" about ", Style::default().fg(Color::Black).bg(theme.dlg_help_title).add_modifier(Modifier::BOLD)));
+    f.render_widget(Clear, dialog_area);
+    f.render_widget(
+        Paragraph::new(body)
+            .block(Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.dlg_help_title))
+                .title(title))
+            .alignment(Alignment::Left),
+        dialog_area,
+    );
+}
+
 pub fn draw_explain_dialog(f: &mut Frame, area: Rect, scroll: u16, ascii: bool, theme: &Theme) {
     let dialog_w     = 96u16.min(area.width.saturating_sub(2));
     let dialog_h     = area.height.saturating_sub(2).max(1);
@@ -2429,5 +2524,63 @@ mod version_tests {
         // Zero-width must not panic.
         let mut term = Terminal::new(TestBackend::new(1, 3)).unwrap();
         term.draw(|f| render_version(f, Rect::new(0, 0, 0, 3), 1, &Theme::default())).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod about_tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    fn screen(w: u16, h: u16, command: &str, ascii: bool) -> Vec<String> {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        let logo = LogoAnim::new();
+        term.draw(|f| draw_about_dialog(f, f.area(), &logo, command, ascii, &Theme::default())).unwrap();
+        let buf = term.backend().buffer();
+        (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect()).collect()
+    }
+
+    const CMD: &str = "vlat --view list --interval 500ms 1.1.1.1 www.example.com:tcp:443 https://a-rather-long-hostname.example.org/some/very/long/health/check/path";
+
+    /// Text inside the box borders, all rows joined, whitespace removed - so
+    /// wrapped values can be checked for completeness.
+    fn boxed_text(rows: &[String]) -> String {
+        rows.iter()
+            .filter_map(|r| { let a = r.find('│')?; let b = r.rfind('│')?; (b > a).then(|| r[a + '│'.len_utf8()..b].to_string()) })
+            .collect::<String>()
+            .chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    #[test]
+    fn shows_title_version_and_full_command() {
+        let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        for (w, ascii) in [(100u16, false), (34, false), (24, true)] {
+            let rows = screen(w, 40, CMD, ascii);
+            let all = rows.join("\n");
+            assert!(all.contains(" about "), "w={w}:\n{all}");
+            let text = boxed_text(&rows);
+            assert!(text.contains("modernterminallatencymonitor"), "w={w}: tagline clipped\n{all}");
+            assert!(text.contains(&squash(&format!("version v{}", crate::cli::VERSION))), "w={w}: version clipped\n{all}");
+            assert!(text.contains(&squash(CMD)), "w={w}: command clipped\n{all}");
+            // Nothing touches the right border: last col before it is padding.
+            for r in rows.iter().filter(|r| r.matches('│').count() == 2) {
+                let b = r.rfind('│').unwrap();
+                assert!(r[..b].ends_with(' '), "w={w}: text touches border: {r:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn height_matches_rendered_body() {
+        let h = about_dialog_height(CMD, 100, false, &Theme::default());
+        let rows = screen(100, 40, CMD, false);
+        let border_rows = rows.iter().filter(|r| r.contains('│')).count() as u16 + 2;
+        assert_eq!(h, border_rows);
+    }
+
+    #[test]
+    fn tiny_terminal_does_not_panic() {
+        screen(5, 3, CMD, false);
+        screen(1, 1, CMD, true);
     }
 }

@@ -58,7 +58,7 @@ use crate::{
     state::TargetState,
     types::{InitResolveResult, ProbeResult, ProbeStarted, ResolveResult},
     ui::{compute_col_widths, compute_scale, draw_bars, draw_bubble, draw_ekg, draw_fullscreen_multi_ui, draw_fullscreen_ui, draw_cards, draw_pong, draw_radar, draw_list_ui, draw_single_ui, draw_scatter, draw_worm, explain_max_scroll, help_dialog_ideal_height, help_menu_items, min_size, pong_left_margin, render_ambient_logo, single_history_avail, AxisField, AxisMetric, BarsState, BubbleState, ColWidthsStabilizer, DialogMode, EkgState, HelpItem, HelpSubMenu, LogoAnim, CardsState, PongState, RadarState, ScatterState, WormState, ViewCtx, HELP_SORTS, HELP_THEMES, HELP_VIEWS, VIEW_DISPLAY_ORDER, VIEW_PICKER_ORDER},
-    ui::dialogs::{item_section, nav_skip},
+    ui::dialogs::{about_dialog_height, item_section, nav_skip},
 };
 
 fn term_size() -> (u16, u16) {
@@ -1773,8 +1773,8 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                     code
                 };
                 match &mut dialog {
-                        DialogMode::Warning { .. } => {
-                            // Any key dismisses the warning
+                        DialogMode::Warning { .. } | DialogMode::About { .. } => {
+                            // Any key dismisses the warning / about screen
                             dialog = DialogMode::None;
                         }
                         DialogMode::FilenameInput { format, input } => {
@@ -2550,6 +2550,21 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                                     }
                                     dialog = DialogMode::Explain { scroll: 0 };
                                 }
+                                // Undocumented: about screen (logo, build version, effective command line).
+                                KeyCode::Char('A') => {
+                                    let rt = crate::session::RuntimeSettings {
+                                        view: view_cli_name(fullscreen_view),
+                                        sort: sort_mode.as_str(),
+                                        keys: show_col_keys,
+                                    };
+                                    let command = crate::session::effective_command(&args, &rt);
+                                    if !in_alternate_screen {
+                                        let (term_w, term_h) = term_size();
+                                        let need = about_dialog_height(&command, term_w, args.ascii, &args.theme) + LogoAnim::HEIGHT + 1;
+                                        ensure_dialog_space!(need.min(term_h));
+                                    }
+                                    dialog = DialogMode::About { logo: LogoAnim::new(), command };
+                                }
 
                                 KeyCode::Char('s') if states.len() > 1 => {
                                     let cursor = sort_idx(&sort_mode);
@@ -3089,6 +3104,9 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                     if logo.is_done() {
                         dialog = DialogMode::None;
                     }
+                }
+                if let DialogMode::About { logo, .. } = &mut dialog {
+                    logo.tick();
                 }
                 // Tick the fullscreen ambient logo
                 fullscreen_logo.tick();
