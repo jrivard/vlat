@@ -581,10 +581,15 @@ impl PingMode {
     }
 }
 
+/// Crate version plus build identity from `git describe` (see build.rs),
+/// e.g. "0.1.19 (v0.1.19-3-gdd39337-dirty)".  Shown by `--version` and the
+/// in-app help screens.
+pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("GIT_DESCRIBE"), ")");
+
 #[derive(Parser)]
 #[command(
     name = "vlat",
-    version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("GIT_HASH"), ")"),
+    version = VERSION,
     about = "Modern terminal latency monitor - run 'vlat --explain' for output legend",
     after_help = AFTER_HELP,
     styles = vlat_styles(),

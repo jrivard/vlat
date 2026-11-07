@@ -1084,11 +1084,7 @@ pub fn draw_help_dialog(
                 let logo_x = area.x + area.width.saturating_sub(LogoAnim::WIDTH) / 2;
                 let logo_y = dialog_area.y - LogoAnim::HEIGHT - 1;
                 logo.render(f, Rect::new(logo_x, logo_y, LogoAnim::WIDTH.min(area.width), LogoAnim::HEIGHT), theme);
-                let ver = concat!("v", env!("CARGO_PKG_VERSION"));
-                let ver_w = ver.len() as u16;
-                let ver_x = logo_x + LogoAnim::WIDTH.saturating_sub(ver_w) / 2;
-                f.render_widget(Clear, Rect::new(ver_x, logo_y + LogoAnim::HEIGHT, ver_w.min(area.width), 1));
-                f.render_widget(Paragraph::new(Span::styled(ver, Style::default().fg(theme.c(theme.dlg_help_label)))), Rect::new(ver_x, logo_y + LogoAnim::HEIGHT, ver_w.min(area.width), 1));
+                render_version(f, area, logo_y + LogoAnim::HEIGHT, theme);
             }
             f.render_widget(Clear, dialog_area);
             f.render_widget(Paragraph::new(body).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(theme.dlg_help_title)).title(title)).alignment(Alignment::Left), dialog_area);
@@ -1145,12 +1141,7 @@ pub fn draw_help_dialog(
             let logo_y    = dialog_area.y - LogoAnim::HEIGHT - 1;
             let logo_area = Rect::new(logo_x, logo_y, LogoAnim::WIDTH.min(area.width), LogoAnim::HEIGHT);
             logo.render(f, logo_area, theme);
-            let ver   = concat!("v", env!("CARGO_PKG_VERSION"));
-            let ver_w = ver.len() as u16;
-            let ver_x = logo_x + LogoAnim::WIDTH.saturating_sub(ver_w) / 2;
-            let ver_area = Rect::new(ver_x, logo_y + LogoAnim::HEIGHT, ver_w.min(area.width), 1);
-            f.render_widget(Clear, ver_area);
-            f.render_widget(Paragraph::new(Span::styled(ver, Style::default().fg(theme.c(theme.dlg_help_label)))), ver_area);
+            render_version(f, area, logo_y + LogoAnim::HEIGHT, theme);
         }
 
         f.render_widget(Clear, dialog_area);
@@ -1350,12 +1341,7 @@ pub fn draw_help_dialog(
         let logo_y    = dialog_area.y - LogoAnim::HEIGHT - 1;
         let logo_area = Rect::new(logo_x, logo_y, LogoAnim::WIDTH.min(area.width), LogoAnim::HEIGHT);
         logo.render(f, logo_area, theme);
-        let ver   = concat!("v", env!("CARGO_PKG_VERSION"));
-        let ver_w = ver.len() as u16;
-        let ver_x = logo_x + LogoAnim::WIDTH.saturating_sub(ver_w) / 2;
-        let ver_area = Rect::new(ver_x, logo_y + LogoAnim::HEIGHT, ver_w.min(area.width), 1);
-        f.render_widget(Clear, ver_area);
-        f.render_widget(Paragraph::new(Span::styled(ver, Style::default().fg(theme.c(theme.dlg_help_label)))), ver_area);
+        render_version(f, area, logo_y + LogoAnim::HEIGHT, theme);
     }
 
     f.render_widget(Clear, dialog_area);
@@ -2398,4 +2384,50 @@ pub fn draw_stat_column_toggle_dialog(
             .alignment(Alignment::Left),
         dialog_area,
     );
+}
+
+/// Draw "v<version> (<git describe>)" on row `y`, centered across `area` (the
+/// logo above it is centered the same way).  The string is wider than the logo,
+/// so it is centered on the screen rather than the logo, and clipped on very
+/// narrow terminals.
+fn render_version(f: &mut Frame, area: Rect, y: u16, theme: &Theme) {
+    let ver   = format!("v{}", crate::cli::VERSION);
+    let ver_w = (ver.chars().count() as u16).min(area.width);
+    let ver_x = area.x + (area.width - ver_w) / 2;
+    let ver_area = Rect::new(ver_x, y, ver_w, 1);
+    f.render_widget(Clear, ver_area);
+    f.render_widget(Paragraph::new(Span::styled(ver, Style::default().fg(theme.c(theme.dlg_help_label)))), ver_area);
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    fn row_text(width: u16) -> String {
+        let mut term = Terminal::new(TestBackend::new(width, 3)).unwrap();
+        term.draw(|f| render_version(f, f.area(), 1, &Theme::default())).unwrap();
+        let buf = term.backend().buffer();
+        (0..width).map(|x| buf[(x, 1)].symbol().to_string()).collect()
+    }
+
+    #[test]
+    fn version_shows_build_info_centered() {
+        let ver = format!("v{}", crate::cli::VERSION);
+        assert!(ver.contains(env!("GIT_DESCRIBE")));
+        let row = row_text(80);
+        let start = row.find(&ver).unwrap_or_else(|| panic!("{ver:?} not in {row:?}"));
+        let end_pad = 80 - start - ver.len();
+        assert!(start.abs_diff(end_pad) <= 1, "not centered: {row:?}");
+    }
+
+    #[test]
+    fn version_clips_on_narrow_terminal() {
+        let row = row_text(10);
+        let ver = format!("v{}", crate::cli::VERSION);
+        assert_eq!(row, ver.chars().take(10).collect::<String>(), "should be the clipped prefix");
+        // Zero-width must not panic.
+        let mut term = Terminal::new(TestBackend::new(1, 3)).unwrap();
+        term.draw(|f| render_version(f, Rect::new(0, 0, 0, 3), 1, &Theme::default())).unwrap();
+    }
 }
