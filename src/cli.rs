@@ -179,12 +179,12 @@ LIVE KEYS (while running):
   0,1-8     jump to view: 0=list/single 1=graph 2=ekg 3=worm 4=radar 5=bars 6=cards 7=bubble 8=scatter
   i         toggle target headers  (graph / worm / radar / ekg / bubble views)
   k         toggle column key header
-  x         show / hide columns (dialog)
+  c         show / hide columns (dialog)
   w         set stats window (dialog; 0 = lifetime)
   s         cycle sort order  (multi-target): mtr → avg → none → name
   d         save current view / theme / sort as defaults
   r         re-resolve DNS for all hostnames now
-  c / j     start/stop CSV / JSON logging
+  l         start/stop CSV / JSON logging
   Space     freeze display (probes continue in background)
   q / Esc   quit and show summary
   Ctrl-C    quit
@@ -678,8 +678,8 @@ pub struct Args {
     #[arg(long, hide = true)]
     pub no_condense_labels: bool,
 
-    /// Columns and visual elements to display. Default set includes the recent sparkline
-    /// and range bar; numeric extras are off by default. Stat values: mtr std p01 p10
+    /// Columns and visual elements to display. Default set: recent sparkline, range bar,
+    /// events, p95 and quality; other extras are off by default. Stat values: mtr std p01 p10
     /// p50 p95 p99 cv srtt seen lost recent bar status quality jitpct loss events.
     /// Identity values (auto-shown unless overridden): mode name port addr resolve.
     /// Pseudo-values: all (all columns), none (reset to empty), default (default set).
@@ -688,15 +688,20 @@ pub struct Args {
     #[arg(long = "columns", value_name = "NAME", value_delimiter = ',', default_value = "default")]
     pub extra_stats: Vec<ExtraStat>,
 
-    /// Runtime-hidden default stat columns (toggled via 'x' dialog, not a CLI flag).
+    /// Runtime-hidden default stat columns (toggled via 'c' dialog, not a CLI flag).
     #[arg(skip)]
     pub hidden_base_stats: Vec<BaseStat>,
 
     /// Forced show/hide state for identity columns (mode/name/port/addr/resolve).
     /// None = automatic (today's conditional display rules). Populated from --columns
-    /// at startup and toggled at runtime via the 'x' dialog; not a CLI flag itself.
+    /// at startup and toggled at runtime via the 'c' dialog; not a CLI flag itself.
     #[arg(skip)]
     pub column_vis: ColumnVis,
+
+    /// Files read at startup (defaults file, @argument files, restored session,
+    /// TLS certificate) - listed in the about dialog. Filled in by main.
+    #[arg(skip)]
+    pub input_files: Vec<InputFile>,
 
 /// Sort order in multi-target fullscreen mode (toggleable with 's')
     #[arg(long = "sort", default_value = "none", overrides_with = "sort")]
@@ -992,7 +997,7 @@ pub enum BaseStat { Avg, Range, Jitter, Drops }
 /// Forced visibility for the identity columns on the target row.
 /// `None` = automatic: the column follows its built-in conditional display rule
 /// (mode badge with mixed modes, port when non-default, resolve counter after
-/// 2+ IP changes, …). `Some(bool)` = forced on/off via --columns or the 'x' dialog.
+/// 2+ IP changes, …). `Some(bool)` = forced on/off via --columns or the 'c' dialog.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ColumnVis {
     pub mode:    Option<bool>,
@@ -1069,7 +1074,7 @@ pub enum ExtraStat {
     Events,
 }
 
-/// Canonical display order of the stat columns used by 'all' and the 'x' dialog.
+/// Canonical display order of the stat columns used by 'all' and the 'c' dialog.
 /// Identity columns (mode/name/port/addr/resolve) are handled via ColumnVis, not this list.
 /// `Status` is appended last (rather than grouped with the other time-based stats
 /// next to `Seen`/`Lost`) so its bit/index position never shifts the ones already assigned
@@ -1082,10 +1087,41 @@ pub const EXTRA_STAT_ALL: &[ExtraStat] = &[
     ExtraStat::Status, ExtraStat::Quality, ExtraStat::Jitpct, ExtraStat::Loss, ExtraStat::Events,
 ];
 
-/// The default set: sparkline and range bar are on; numeric extras are off.
-pub fn default_extra_stats() -> Vec<ExtraStat> { vec![ExtraStat::Recent, ExtraStat::Bar] }
+/// Left-to-right display order of the extra columns, independent of how they
+/// were enabled (--columns order, 'c' dialog, saved session). Narrow rows drop
+/// extras from the right, so earlier columns survive longer. Grouped: loss %
+/// (beside the base loss count), verdict, RTT distribution, derived latency,
+/// variation, timers, status text. recent/bar/events have fixed slots of their
+/// own and are listed last only for completeness.
+///
+/// `EXTRA_STAT_ALL` is a different order: it numbers the 'c' dialog rows and the
+/// space-hidden / no-data bits, so it must not be reordered to match this.
+pub const EXTRA_STAT_DISPLAY_ORDER: &[ExtraStat] = &[
+    ExtraStat::Loss,
+    ExtraStat::Quality,
+    ExtraStat::P01, ExtraStat::P10, ExtraStat::P50, ExtraStat::P95, ExtraStat::P99,
+    ExtraStat::Mtr, ExtraStat::Srtt,
+    ExtraStat::Std, ExtraStat::Cv, ExtraStat::Jitpct,
+    ExtraStat::Seen, ExtraStat::Lost,
+    ExtraStat::Status,
+    ExtraStat::Recent, ExtraStat::Bar, ExtraStat::Events,
+];
 
-/// Validates pseudo-values (all/default/none), expands them, deduplicates, and preserves order.
+/// Sorts extra columns into `EXTRA_STAT_DISPLAY_ORDER`.
+pub fn sort_extra_stats(stats: &mut [ExtraStat]) {
+    stats.sort_by_key(|s| EXTRA_STAT_DISPLAY_ORDER.iter().position(|a| a == s).unwrap_or(usize::MAX));
+}
+
+/// The default set: sparkline, range bar, recent events, quality and p95.
+/// Other extras are opt-in. On narrow rows the extras give way right-to-left.
+pub fn default_extra_stats() -> Vec<ExtraStat> {
+    let mut v = vec![ExtraStat::Recent, ExtraStat::Bar, ExtraStat::Events, ExtraStat::Quality, ExtraStat::P95];
+    sort_extra_stats(&mut v);
+    v
+}
+
+/// Validates pseudo-values (all/default/none), expands them, deduplicates, and sorts
+/// into `EXTRA_STAT_DISPLAY_ORDER` (the order given on the command line is not kept).
 /// Returns the stat-column list (never All/Default/None or identity variants) plus the forced
 /// visibility of the identity columns. Identity columns stay automatic unless explicitly named
 /// (forced on) or swept away by 'none' (forced off until named again).
@@ -1100,7 +1136,9 @@ pub fn resolve_columns(raw: &[ExtraStat]) -> Result<(Vec<ExtraStat>, ColumnVis),
             mode: Some(true), name: Some(true), port: Some(true),
             addr: Some(true), resolve: Some(true),
         };
-        return Ok((EXTRA_STAT_ALL.to_vec(), vis));
+        let mut all = EXTRA_STAT_ALL.to_vec();
+        sort_extra_stats(&mut all);
+        return Ok((all, vis));
     }
     let mut seen = std::collections::HashSet::new();
     let mut out  = Vec::new();
@@ -1128,7 +1166,16 @@ pub fn resolve_columns(raw: &[ExtraStat]) -> Result<(Vec<ExtraStat>, ColumnVis),
             s => if seen.insert(s.clone()) { out.push(s.clone()); }
         }
     }
+    sort_extra_stats(&mut out);
     Ok((out, vis))
+}
+
+/// One file vlat read (or looked for) at startup, for the about dialog.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct InputFile {
+    pub role: &'static str,        // e.g. "defaults", "args file", "session", "tls cert"
+    pub path: String,              // display path (home shown as ~)
+    pub note: Option<&'static str>, // e.g. "not found", "skipped: session restored"
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1278,9 +1325,28 @@ mod tests {
     fn columns_all_is_exclusive_and_forces_identity_on() {
         assert!(resolve_columns(&[ExtraStat::All, ExtraStat::Mtr]).is_err());
         let (stats, vis) = resolve_columns(&[ExtraStat::All]).unwrap();
-        assert_eq!(stats, EXTRA_STAT_ALL.to_vec());
+        let mut all = EXTRA_STAT_ALL.to_vec();
+        super::sort_extra_stats(&mut all);
+        assert_eq!(stats, all);
         assert_eq!(vis.mode, Some(true));
         assert_eq!(vis.resolve, Some(true));
+    }
+
+    #[test]
+    fn columns_display_order_ignores_cli_order() {
+        let (a, _) = resolve_columns(&[ExtraStat::Mtr, ExtraStat::Default, ExtraStat::Loss]).unwrap();
+        let (b, _) = resolve_columns(&[ExtraStat::Loss, ExtraStat::Default, ExtraStat::Mtr]).unwrap();
+        assert_eq!(a, b);
+        let extras: Vec<_> = a.into_iter().filter(|s| !matches!(s, ExtraStat::Recent | ExtraStat::Bar | ExtraStat::Events)).collect();
+        assert_eq!(extras, vec![ExtraStat::Loss, ExtraStat::Quality, ExtraStat::P95, ExtraStat::Mtr]);
+    }
+
+    #[test]
+    fn display_order_covers_every_extra_stat_once() {
+        assert_eq!(super::EXTRA_STAT_DISPLAY_ORDER.len(), EXTRA_STAT_ALL.len());
+        for s in EXTRA_STAT_ALL {
+            assert_eq!(super::EXTRA_STAT_DISPLAY_ORDER.iter().filter(|d| *d == s).count(), 1, "{s:?}");
+        }
     }
 
     #[test]

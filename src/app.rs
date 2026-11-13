@@ -268,7 +268,7 @@ fn mode_label_str(mode: &PingMode, port: u16, args: &Args) -> String {
 /// automatic rule can be evaluated regardless of the current override.
 fn mode_label_str_vis(mode: &PingMode, port: u16, args: &Args, port_vis: Option<bool>) -> String {
     // Port suffix: auto (None) = only when the port differs from the mode default;
-    // forced on/off via --columns port / the 'x' dialog. icmp and exec have no port.
+    // forced on/off via --columns port / the 'c' dialog. icmp and exec have no port.
     let with_port = |name: &str, is_default: bool| -> String {
         match port_vis {
             Some(false) => name.to_string(),
@@ -294,7 +294,7 @@ fn mode_label_str_vis(mode: &PingMode, port: u16, args: &Args, port_vis: Option<
 }
 
 /// Effective on/off state of the 5 identity columns (mode, name, port, addr, resolve)
-/// shown in the 'x' dialog: forced overrides applied on top of the automatic rules.
+/// shown in the 'c' dialog: forced overrides applied on top of the automatic rules.
 fn identity_column_states(
     args: &Args,
     states: &[crate::state::TargetState],
@@ -457,7 +457,6 @@ fn make_save_defaults_dialog(
     window_secs:   u64,
     extra_stats:   &[crate::cli::ExtraStat],
 ) -> crate::ui::dialogs::DialogMode {
-    use crate::cli::ExtraStat;
     let config_path = writable_config_path();
     let f = read_defaults_file(&config_path);
     let has_view = view_cli.is_some();
@@ -469,16 +468,16 @@ fn make_save_defaults_dialog(
         extra_stats.iter().map(extra_stat_cli_name).collect::<Vec<_>>().join(",")
     };
 
-    // Delta from default set [recent, bar]
-    const DEFAULT_COLS: &[ExtraStat] = &[ExtraStat::Recent, ExtraStat::Bar];
+    // Delta from the default set
+    let default_cols = crate::cli::default_extra_stats();
     let mut delta_parts: Vec<String> = Vec::new();
-    for stat in DEFAULT_COLS {
+    for stat in &default_cols {
         if !extra_stats.contains(stat) {
             delta_parts.push(format!("-{}", extra_stat_cli_name(stat)));
         }
     }
     for stat in extra_stats {
-        if !DEFAULT_COLS.contains(stat) {
+        if !default_cols.contains(stat) {
             delta_parts.push(format!("+{}", extra_stat_cli_name(stat)));
         }
     }
@@ -2283,7 +2282,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                                     *cursor = (*cursor + 1) % STAT_TOGGLE_COUNT;
                                 }
                                 KeyCode::Char(' ') | KeyCode::Enter => {
-                                    let idx = *cursor;
+                                    let idx = crate::ui::dialogs::stat_toggle_id(*cursor);
                                     if idx < IDENTITY_COUNT {
                                         // Identity columns: toggling pins an explicit on/off
                                         // (the automatic rule no longer applies this session).
@@ -2324,9 +2323,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                                             args.extra_stats.retain(|s| s != &stat);
                                         } else {
                                             args.extra_stats.push(stat);
-                                            args.extra_stats.sort_by_key(|s| {
-                                                crate::cli::EXTRA_STAT_ALL.iter().position(|a| a == s).unwrap_or(usize::MAX)
-                                            });
+                                            crate::cli::sort_extra_stats(&mut args.extra_stats);
                                         }
                                     }
                                 }
@@ -2560,7 +2557,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                                     let command = crate::session::effective_command(&args, &rt);
                                     if !in_alternate_screen {
                                         let (term_w, term_h) = term_size();
-                                        let need = about_dialog_height(&command, term_w, args.ascii, &args.theme) + LogoAnim::HEIGHT + 1;
+                                        let need = about_dialog_height(&command, &args.input_files, term_w, args.ascii, &args.theme) + LogoAnim::HEIGHT + 1;
                                         ensure_dialog_space!(need.min(term_h));
                                     }
                                     dialog = DialogMode::About { logo: LogoAnim::new(), command };

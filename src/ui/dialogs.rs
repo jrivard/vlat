@@ -2066,7 +2066,7 @@ fn about_dialog_w(area_w: u16) -> u16 { ABOUT_MAX_W.min(area_w.saturating_sub(4)
 /// Body lines of the about dialog, wrapped to fit inside a `dialog_w`-wide box.
 /// Every line wraps (nothing is clipped at the border): a `label value` row
 /// stays on one line when it fits, otherwise the value moves below the label.
-fn about_lines(command: &str, dialog_w: u16, ascii: bool, theme: &Theme) -> Vec<Line<'static>> {
+fn about_lines(command: &str, files: &[crate::cli::InputFile], dialog_w: u16, ascii: bool, theme: &Theme) -> Vec<Line<'static>> {
     let label = Style::default().fg(theme.dlg_help_key).add_modifier(Modifier::BOLD);
     let desc  = Style::default().fg(theme.c(theme.dlg_help_label));
     let dim   = Style::default().fg(theme.c(theme.dlg_timer)).add_modifier(Modifier::DIM);
@@ -2101,6 +2101,41 @@ fn about_lines(command: &str, dialog_w: u16, ascii: bool, theme: &Theme) -> Vec<
     entry(&mut lines, "version", &format!("v{}", crate::cli::VERSION), false);
     entry(&mut lines, "command", command, true);
 
+    // Input files: "   role      path (note)", the path wrapped under itself.
+    if !files.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(pad("", "files".to_string(), label));
+        let role_w = files.iter().map(|f| f.role.len()).max().unwrap_or(0);
+        let lead_w = INDENT.len() + role_w + 2;
+        let path_w = text_w.saturating_sub(lead_w).max(8);
+        for file in files {
+            let note = file.note.map(|n| format!(" ({n})"));
+            let chunks = wrap_hard(&file.path, path_w);
+            let last = chunks.len().saturating_sub(1);
+            for (i, chunk) in chunks.into_iter().enumerate() {
+                let lead = if i == 0 { format!(" {INDENT}{:<role_w$}  ", file.role) } else { " ".repeat(1 + lead_w) };
+                let mut spans = vec![Span::styled(lead, desc), Span::raw(chunk.clone())];
+                if i == last {
+                    if let Some(n) = &note {
+                        if chunk.chars().count() + n.chars().count() <= path_w {
+                            spans.push(Span::styled(n.clone(), dim));
+                        } else {
+                            // Note on its own line(s) under the path, wrapped to the same column.
+                            lines.push(Line::from(std::mem::take(&mut spans)));
+                            let note_lines = wrap_hard(n.trim_start(), path_w);
+                            let n_last = note_lines.len().saturating_sub(1);
+                            for (j, nl) in note_lines.into_iter().enumerate() {
+                                let l = vec![Span::raw(" ".repeat(1 + lead_w)), Span::styled(nl, dim)];
+                                if j == n_last { spans = l; } else { lines.push(Line::from(l)); }
+                            }
+                        }
+                    }
+                }
+                lines.push(Line::from(spans));
+            }
+        }
+    }
+
     lines.push(Line::raw(""));
     lines.push(pad("", "any key to close".to_string(), dim));
     lines
@@ -2121,13 +2156,14 @@ fn wrap_hard(s: &str, width: usize) -> Vec<String> {
 }
 
 /// Rows the about dialog needs (body + borders), for growing the inline viewport.
-pub fn about_dialog_height(command: &str, area_w: u16, ascii: bool, theme: &Theme) -> u16 {
-    about_lines(command, about_dialog_w(area_w), ascii, theme).len() as u16 + 2
+pub fn about_dialog_height(command: &str, files: &[crate::cli::InputFile], area_w: u16, ascii: bool, theme: &Theme) -> u16 {
+    about_lines(command, files, about_dialog_w(area_w), ascii, theme).len() as u16 + 2
 }
 
-pub fn draw_about_dialog(f: &mut Frame, area: Rect, logo: &LogoAnim, command: &str, ascii: bool, theme: &Theme) {
+#[allow(clippy::too_many_arguments)]
+pub fn draw_about_dialog(f: &mut Frame, area: Rect, logo: &LogoAnim, command: &str, files: &[crate::cli::InputFile], ascii: bool, theme: &Theme) {
     let dialog_w    = about_dialog_w(area.width);
-    let body        = about_lines(command, dialog_w, ascii, theme);
+    let body        = about_lines(command, files, dialog_w, ascii, theme);
     let dialog_h    = (body.len() as u16 + 2).min(area.height);
     let dialog_area = centered_rect(dialog_w, dialog_h, area);
 
@@ -2223,11 +2259,38 @@ pub fn draw_explain_dialog(f: &mut Frame, area: Rect, scroll: u16, ascii: bool, 
 pub const STAT_TOGGLE_COUNT: usize = 27;
 
 /// Full rendered height of the column toggle dialog: 3 header lines, the items,
-/// 7 group separators, 1 trailing blank, plus 2 border rows.
-pub const STAT_TOGGLE_DIALOG_H: u16 = 3 + STAT_TOGGLE_COUNT as u16 + 7 + 1 + 2;
+/// one separator per section, 1 trailing blank, plus 2 border rows.
+pub const STAT_TOGGLE_DIALOG_H: u16 = 3 + STAT_TOGGLE_COUNT as u16 + STAT_TOGGLE_SECTIONS.len() as u16 + 1 + 2;
 
-/// Row index of `bar` in the column dialog - the single view never draws the range bar.
+/// Column id of `bar` (its bit in the space-hidden / no-data / not-in-view
+/// masks) - the single view never draws the range bar.
 pub const STAT_TOGGLE_BAR_ROW: usize = 21;
+
+/// Dialog row order, as column ids. Ids are stable (they index the masks,
+/// `symbols`/`rows` below and `EXTRA_STAT_ALL`: 0-4 identity, 5-8 base stats,
+/// 9-26 extras); this table only decides where each one is drawn. Rows follow
+/// a target row left to right, and the extras follow `EXTRA_STAT_DISPLAY_ORDER`,
+/// so a lower row is dropped sooner on a narrow terminal.
+pub const STAT_TOGGLE_ROW_ORDER: [usize; STAT_TOGGLE_COUNT] = [
+    0, 1, 2, 3, 4,                  // identity: mode name port addr res
+    26, 20, 21, 5, 6, 7, 8,         // row: events recent bar avg range jitter drops
+    25, 23,                         // extras: loss quality
+    11, 12, 13, 14, 15,             //   p01 p10 p50 p95 p99
+    9, 17,                          //   mtr srtt
+    10, 16, 24,                     //   std cv jitpct
+    18, 19,                         //   seen lost
+    22,                             //   status
+];
+
+/// Section separators: (first dialog row of the section, label).
+pub const STAT_TOGGLE_SECTIONS: [(usize, &str); 3] = [
+    (0,  "identity"),
+    (5,  "row"),
+    (12, "extras \u{00b7} narrow screens drop from the bottom"),
+];
+
+/// Column id shown at dialog row `cursor`.
+pub fn stat_toggle_id(cursor: usize) -> usize { STAT_TOGGLE_ROW_ORDER[cursor] }
 
 /// Rows of the column dialog that `view` can't display (bit i = row i).
 pub fn stat_toggles_not_in_view(view: &str) -> u32 {
@@ -2333,10 +2396,11 @@ pub fn draw_stat_column_toggle_dialog(
         ($label:expr) => { dialog_section_sep($label, ascii, theme) };
     }
 
-    // (name, description, is_enabled)
-    // Indices 0-4:  identity columns (enabled = effective state from `identity`)
-    // Indices 5-8:  base stats (enabled = NOT in hidden_base)
-    // Indices 9-26: extra stats (enabled = in extra_stats; EXTRA_STAT_ALL order)
+    // (name, description, is_enabled), indexed by column id (not dialog row -
+    // see STAT_TOGGLE_ROW_ORDER for the drawn order):
+    // Ids 0-4:  identity columns (enabled = effective state from `identity`)
+    // Ids 5-8:  base stats (enabled = NOT in hidden_base)
+    // Ids 9-26: extra stats (enabled = in extra_stats; EXTRA_STAT_ALL order)
     let rows: [(&str, &str, bool); STAT_TOGGLE_COUNT] = [
         ("mode  ", "probe-type badge  (auto: mixed modes)",   identity[0]),
         ("name  ", "custom label or hostname",                identity[1]),
@@ -2346,7 +2410,7 @@ pub fn draw_stat_column_toggle_dialog(
         ("avg   ", "window average RTT",                    !hidden_base.contains(&BaseStat::Avg)),
         ("range ", "best\u{2194}worst RTT",                 !hidden_base.contains(&BaseStat::Range)),
         ("jitter", "average jitter",                        !hidden_base.contains(&BaseStat::Jitter)),
-        ("drops ", "drop count and loss %",                 !hidden_base.contains(&BaseStat::Drops)),
+        ("drops ", "drops / probes sent",                   !hidden_base.contains(&BaseStat::Drops)),
         ("mtr   ", "mean time to reliability",              extra_stats.contains(&ExtraStat::Mtr)),
         ("std   ", "standard deviation of RTT",             extra_stats.contains(&ExtraStat::Std)),
         ("p01   ", "1st-percentile RTT",                    extra_stats.contains(&ExtraStat::P01)),
@@ -2364,7 +2428,7 @@ pub fn draw_stat_column_toggle_dialog(
         ("quality", "slow / degraded / jittery / spiky / good", extra_stats.contains(&ExtraStat::Quality)),
         ("jitpct", "relative jitter: median jitter / median RTT", extra_stats.contains(&ExtraStat::Jitpct)),
         ("loss  ", "packet loss %", extra_stats.contains(&ExtraStat::Loss)),
-        ("events", "last 30s: drops / recovery / new IP, else trend", extra_stats.contains(&ExtraStat::Events)),
+        ("events", "recent drops / recovery / new IP, or trend", extra_stats.contains(&ExtraStat::Events)),
     ];
 
     let mut body: Vec<Line> = vec![
@@ -2380,18 +2444,13 @@ pub fn draw_stat_column_toggle_dialog(
             Style::default().fg(theme.dlg_warning).add_modifier(Modifier::BOLD),
         )));
     }
-    body.push(section_sep!("identity"));
+    for (pos, &i) in STAT_TOGGLE_ROW_ORDER.iter().enumerate() {
+        if let Some(&(_, label)) = STAT_TOGGLE_SECTIONS.iter().find(|(start, _)| *start == pos) {
+            body.push(section_sep!(label));
+        }
+        let (name, desc, enabled) = &rows[i];
 
-    for (i, (name, desc, enabled)) in rows.iter().enumerate() {
-        if i == 5  { body.push(section_sep!("base stats")); }
-        if i == 9  { body.push(section_sep!("extra stats")); }
-        if i == 20 { body.push(section_sep!("visual")); }
-        if i == 22 { body.push(section_sep!("text")); }
-        if i == 24 { body.push(section_sep!("grading")); }
-        if i == 25 { body.push(section_sep!("loss")); }
-        if i == 26 { body.push(section_sep!("events")); }
-
-        let is_cursor  = i == cursor;
+        let is_cursor  = pos == cursor;
         let is_narrow  = *enabled && (space_hidden >> i) & 1 == 1;
         // Row 4 (resolve): no_data fires when auto-show condition isn't met (ip_changes <= 1),
         // same moment identity[4]=false; || i==4 lets Ø appear on the auto-hidden row.
@@ -2541,9 +2600,13 @@ mod about_tests {
     use ratatui::{backend::TestBackend, Terminal};
 
     fn screen(w: u16, h: u16, command: &str, ascii: bool) -> Vec<String> {
+        screen_with_files(w, h, command, &[], ascii)
+    }
+
+    fn screen_with_files(w: u16, h: u16, command: &str, files: &[crate::cli::InputFile], ascii: bool) -> Vec<String> {
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
         let logo = LogoAnim::new();
-        term.draw(|f| draw_about_dialog(f, f.area(), &logo, command, ascii, &Theme::default())).unwrap();
+        term.draw(|f| draw_about_dialog(f, f.area(), &logo, command, files, ascii, &Theme::default())).unwrap();
         let buf = term.backend().buffer();
         (0..h).map(|y| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect()).collect()
     }
@@ -2557,6 +2620,35 @@ mod about_tests {
             .filter_map(|r| { let a = r.find('│')?; let b = r.rfind('│')?; (b > a).then(|| r[a + '│'.len_utf8()..b].to_string()) })
             .collect::<String>()
             .chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    #[test]
+    fn lists_input_files_with_notes_unclipped() {
+        use crate::cli::InputFile;
+        let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        let files = vec![
+            InputFile { role: "defaults", path: "~/.config/vlat/defaults".into(), note: Some("skipped: session restored") },
+            InputFile { role: "args file", path: "/srv/monitoring/vlat/targets-for-the-east-coast-datacenter.args".into(), note: None },
+            InputFile { role: "session", path: "~/.local/state/vlat/sessions/home.json".into(), note: None },
+        ];
+        for w in [100u16, 60, 34] {
+            let rows = screen_with_files(w, 60, "vlat 1.1.1.1", &files, false);
+            let all = rows.join("\n");
+            let text = boxed_text(&rows);
+            assert!(text.contains("files"), "w={w}:\n{all}");
+            for f in &files {
+                assert!(text.contains(&squash(f.role)), "w={w}: role {} missing\n{all}", f.role);
+                assert!(text.contains(&squash(&f.path)), "w={w}: path clipped\n{all}");
+                if let Some(n) = f.note { assert!(text.contains(&squash(n)), "w={w}: note clipped\n{all}"); }
+            }
+            for r in rows.iter().filter(|r| r.matches('│').count() == 2) {
+                let b = r.rfind('│').unwrap();
+                assert!(r[..b].ends_with(' '), "w={w}: text touches border: {r:?}");
+            }
+            // The height used to grow the inline viewport matches what's drawn.
+            let drawn = rows.iter().filter(|r| r.contains('│') || r.contains('┌') || r.contains('└')).count() as u16;
+            assert_eq!(about_dialog_height("vlat 1.1.1.1", &files, w, false, &Theme::default()), drawn, "w={w}");
+        }
     }
 
     #[test]
@@ -2580,7 +2672,7 @@ mod about_tests {
 
     #[test]
     fn height_matches_rendered_body() {
-        let h = about_dialog_height(CMD, 100, false, &Theme::default());
+        let h = about_dialog_height(CMD, &[], 100, false, &Theme::default());
         let rows = screen(100, 40, CMD, false);
         let border_rows = rows.iter().filter(|r| r.contains('│')).count() as u16 + 2;
         assert_eq!(h, border_rows);
@@ -2590,5 +2682,54 @@ mod about_tests {
     fn tiny_terminal_does_not_panic() {
         screen(5, 3, CMD, false);
         screen(1, 1, CMD, true);
+    }
+}
+
+#[cfg(test)]
+mod stat_toggle_order_tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn row_order_is_a_permutation_of_column_ids() {
+        let mut seen = [false; STAT_TOGGLE_COUNT];
+        for &id in &STAT_TOGGLE_ROW_ORDER { assert!(!seen[id], "id {id} listed twice"); seen[id] = true; }
+        assert!(seen.iter().all(|&s| s));
+        assert!(STAT_TOGGLE_SECTIONS.windows(2).all(|w| w[0].0 < w[1].0));
+    }
+
+    #[test]
+    fn extras_rows_follow_the_display_order() {
+        // Dialog ids 9-26 are EXTRA_STAT_ALL positions; the extras section must
+        // list them in EXTRA_STAT_DISPLAY_ORDER (minus the fixed-slot ones in "row").
+        let extras: Vec<_> = STAT_TOGGLE_ROW_ORDER[STAT_TOGGLE_SECTIONS[2].0..].iter()
+            .map(|&id| crate::cli::EXTRA_STAT_ALL[id - 9].clone()).collect();
+        let want: Vec<_> = crate::cli::EXTRA_STAT_DISPLAY_ORDER.iter()
+            .filter(|s| !matches!(s, ExtraStat::Recent | ExtraStat::Bar | ExtraStat::Events))
+            .cloned().collect();
+        assert_eq!(extras, want);
+    }
+
+    #[test]
+    fn dialog_draws_rows_in_screen_order() {
+        let mut term = Terminal::new(TestBackend::new(80, 50)).unwrap();
+        let theme = Theme::default();
+        term.draw(|f| draw_stat_column_toggle_dialog(
+            f, f.area(), 5, &[true; 5], &crate::cli::default_extra_stats(), &[], 0, 0, 0, false, false, &theme,
+        )).unwrap();
+        let buf = term.backend().buffer();
+        let lines: Vec<String> = (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()).collect();
+        let row_of = |needle: &str| lines.iter().position(|l| l.contains(needle)).unwrap_or_else(|| panic!("{needle} missing"));
+        // Match the name column ("] name    ") so words in descriptions don't hit.
+        let order: Vec<String> = ["mode", "res", "", "events", "recent", "bar", "avg", "range", "jitter", "drops",
+                     "", "loss", "quality", "p01", "p99", "mtr", "srtt", "std", "jitpct", "seen", "lost", "status"]
+            .iter().enumerate()
+            .map(|(i, n)| if n.is_empty() { if i == 2 { "\u{2500} row ".into() } else { "\u{2500} extras".into() } } else { format!("] {n:<7} ") })
+            .collect();
+        let rows: Vec<usize> = order.iter().map(|n| row_of(n)).collect();
+        assert!(rows.windows(2).all(|w| w[0] < w[1]), "{:?}", order.iter().zip(&rows).collect::<Vec<_>>());
+        // cursor 5 = first row of the "row" section = events (id 26)
+        assert_eq!(stat_toggle_id(5), 26);
     }
 }

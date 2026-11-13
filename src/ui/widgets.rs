@@ -328,7 +328,7 @@ pub fn build_header_line<'a>(
     }
 
     // IP change counter - auto: only shown when > 1 (single re-resolve is unremarkable);
-    // forced on/off via --columns resolve / the 'x' dialog.
+    // forced on/off via --columns resolve / the 'c' dialog.
     if args.column_vis.resolve.map_or(s.ip_changes > 1, |v| v) {
         let arrow = if args.ascii { "~" } else { "\u{21bb}" };
         spans.push(Span::styled(
@@ -1106,7 +1106,7 @@ pub fn build_combined_row_line<'a>(
         spans.push(Span::styled(format!("{:<w$}", name, w = col_widths.name_w), label_style));
         spans.push(Span::raw("  "));
     }
-    // label == 0 means the addr column is hidden (via --columns / 'x' dialog)
+    // label == 0 means the addr column is hidden (via --columns / 'c' dialog)
     if col_widths.label > 0 {
         let addr_style = if col_widths.name_w > 0 && !name.is_empty() {
             Style::default().add_modifier(Modifier::DIM)

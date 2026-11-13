@@ -488,6 +488,7 @@ fn token_arg_id(cmd: &clap::Command, token: &str) -> Option<String> {
 pub fn apply_saved_columns(args: &mut Args, session: &SessionFile, user_set_columns: bool) {
     if user_set_columns { return; }
     args.extra_stats = session.extra_stats.iter().filter_map(|n| stat_from_name(n)).collect();
+    crate::cli::sort_extra_stats(&mut args.extra_stats);
     args.hidden_base_stats = session.hidden_base_stats.iter().filter_map(|n| base_stat_from_name(n)).collect();
     args.column_vis = ColumnVis {
         mode:    session.column_vis.mode,

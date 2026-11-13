@@ -44,7 +44,7 @@ use super::{
         build_current_rtt_spans, build_header_line,
         build_range_bar_spans,
         build_status_badge_spans, build_stats_line,
-        build_target_sparkline_spans, TARGET_SPARK_W, TARGET_SPARK_MIN, SINGLE_RECENT_MAX_W,
+        build_target_sparkline_spans, TARGET_SPARK_MIN, SINGLE_RECENT_MAX_W,
         inline_range_key,
         render_area_graph, render_area_graph_multi,
         trend_spark_span,
@@ -286,7 +286,7 @@ pub fn render_dialogs(
             draw_explain_dialog(f, area, *scroll, args.ascii, &args.theme);
         }
         DialogMode::About { logo, command } => {
-            draw_about_dialog(f, area, logo, command, args.ascii, &args.theme);
+            draw_about_dialog(f, area, logo, command, &args.input_files, args.ascii, &args.theme);
         }
         DialogMode::FilenameInput { format, input } => {
             draw_filename_dialog(f, area, format, input, &args.theme);
@@ -731,22 +731,15 @@ pub fn draw_list_ui(f: &mut Frame, states: &[TargetState], ctx: &ViewCtx) {
     let terminal_w = area.width as usize;
     let border_ch = if args.ascii { "|" } else { "\u{258c}" }; // ▌
     let content_w = terminal_w.saturating_sub(1); // accent border
-    let base_overhead = 2 + badge_pad_w + 2 + name_part + col_widths.label + 3 + ip_changes_slot_w + 3;
-    let ideal_stats_w = col_widths.stats_width_with_gap(2, show_drp, show_dup);
-    const BAR_MIN: usize = 15;
-    const BAR_MAX: usize = 25;
+    // Mirrors build_combined_row_line: sort-arrow slot, mode badge (only when shown),
+    // name, addr, resolve slot, then the addr gap (up to 3, settled by pick_gaps).
+    let badge_w = if show_badges { badge_pad_w + 3 } else { 0 };
+    let base_overhead = 2 + badge_w + name_part + col_widths.label + ip_changes_slot_w + 3;
     let show_recent = args.extra_stats.contains(&ExtraStat::Recent);
     let show_bar    = args.extra_stats.contains(&ExtraStat::Bar);
     let extra = content_w.saturating_sub(base_overhead);
-    let bar_reserve = if show_bar { 1 + BAR_MIN } else { 0 };
-    let space_for_spark = extra.saturating_sub(ideal_stats_w + bar_reserve);
-    let circles_w = if show_recent { let b = space_for_spark.saturating_sub(1); if b >= TARGET_SPARK_MIN { b.min(TARGET_SPARK_W) } else { 0 } } else { 0 };
-    let spark_overhead = if circles_w > 0 { 1 + circles_w } else { 0 };
-    let after_spark = extra.saturating_sub(spark_overhead);
-    let bar_w = if !show_bar { 0 } else if after_spark > ideal_stats_w { (after_spark - ideal_stats_w).clamp(BAR_MIN, BAR_MAX) } else { BAR_MIN };
-    let bar_overhead = if bar_w > 0 { 1 + bar_w } else { 0 };
-    let stats_avail = after_spark.saturating_sub(bar_overhead);
-    let effective_cw = col_widths.with_budget(stats_avail, show_drp, show_dup);
+    let super::RowFit { circles_w, bar_w, stats_avail, cw: effective_cw } =
+        super::fit_row(col_widths, extra, show_recent, show_bar, show_drp, show_dup);
     let (addr_gap, gap) = super::pick_gaps(stats_avail + 3, &effective_cw, show_drp, show_dup);
     let space_hidden = super::compute_space_hidden(&effective_cw, show_recent, circles_w, stats_avail, gap, show_drp, show_dup);
 
@@ -1275,21 +1268,11 @@ pub fn draw_fullscreen_ui(f: &mut Frame, s: &TargetState, mode_label: &str, ctx:
     let badge_w = if show_badge { badge_pad_w + 3 } else { 0 };
     let name_part_w = if col_widths.name_w > 0 { col_widths.name_w + 2 } else { 0 };
     let prefix_w_base = 2 + badge_w + name_part_w + col_widths.label + 3 + ip_changes_slot_w;
-    let ideal_stats_w = col_widths.stats_width_with_gap(2, show_drp, show_dup);
-    const BAR_MIN: usize = 15;
-    const BAR_MAX: usize = 25;
     let show_recent = args.extra_stats.contains(&ExtraStat::Recent);
     let show_bar    = args.extra_stats.contains(&ExtraStat::Bar);
     let extra = content_w.saturating_sub(prefix_w_base);
-    let bar_reserve = if show_bar { 1 + BAR_MIN } else { 0 };
-    let space_for_spark = extra.saturating_sub(ideal_stats_w + bar_reserve);
-    let circles_w = if show_recent { let b = space_for_spark.saturating_sub(1); if b >= TARGET_SPARK_MIN { b.min(TARGET_SPARK_W) } else { 0 } } else { 0 };
-    let spark_overhead = if circles_w > 0 { circles_w + 1 } else { 0 };
-    let after_spark = extra.saturating_sub(spark_overhead);
-    let bar_w = if !show_bar { 0 } else if after_spark > ideal_stats_w { (after_spark - ideal_stats_w).clamp(BAR_MIN, BAR_MAX) } else { BAR_MIN };
-    let bar_overhead = if bar_w > 0 { 1 + bar_w } else { 0 };
-    let stats_avail = after_spark.saturating_sub(bar_overhead);
-    let effective_cw = col_widths.with_budget(stats_avail, show_drp, show_dup);
+    let super::RowFit { circles_w, bar_w, stats_avail, cw: effective_cw } =
+        super::fit_row(col_widths, extra, show_recent, show_bar, show_drp, show_dup);
     let (addr_gap, gap) = super::pick_gaps(stats_avail + 3, &effective_cw, show_drp, show_dup);
     let space_hidden = super::compute_space_hidden(&effective_cw, show_recent, circles_w, stats_avail, gap, show_drp, show_dup);
 
@@ -1484,23 +1467,15 @@ pub fn draw_fullscreen_multi_ui(f: &mut Frame, states: &[TargetState], ctx: &Vie
     let terminal_w = area.width as usize;
     let border_ch = if args.ascii { "|" } else { "\u{258c}" }; // ▌
     let name_part_w = if col_widths.name_w > 0 { col_widths.name_w + 2 } else { 0 };
-    let ideal_stats_w = col_widths.stats_width_with_gap(2, show_drp, show_dup);
-    let prefix_w = 2 + badge_pad_w + 2 + name_part_w + col_widths.label + 3 + ip_changes_slot_w;
-    const BAR_MIN: usize = 15;
-    const BAR_MAX: usize = 25;
+    // Mirrors build_combined_row_line (see draw_list_ui).
+    let badge_w = if show_badges { badge_pad_w + 3 } else { 0 };
+    let prefix_w = 2 + badge_w + name_part_w + col_widths.label + ip_changes_slot_w + 3;
     let show_recent = args.extra_stats.contains(&ExtraStat::Recent);
     let show_bar    = args.extra_stats.contains(&ExtraStat::Bar);
     let content_w = terminal_w.saturating_sub(1); // accent border
     let extra = content_w.saturating_sub(prefix_w);
-    let bar_reserve = if show_bar { 1 + BAR_MIN } else { 0 };
-    let space_for_spark = extra.saturating_sub(ideal_stats_w + bar_reserve);
-    let circles_w = if show_recent { let b = space_for_spark.saturating_sub(1); if b >= TARGET_SPARK_MIN { b.min(TARGET_SPARK_W) } else { 0 } } else { 0 };
-    let spark_overhead = if circles_w > 0 { circles_w + 1 } else { 0 };
-    let after_spark = extra.saturating_sub(spark_overhead);
-    let bar_w = if !show_bar { 0 } else if after_spark > ideal_stats_w { (after_spark - ideal_stats_w).clamp(BAR_MIN, BAR_MAX) } else { BAR_MIN };
-    let bar_overhead = if bar_w > 0 { 1 + bar_w } else { 0 };
-    let stats_budget = after_spark.saturating_sub(bar_overhead);
-    let effective_cw = col_widths.with_budget(stats_budget, show_drp, show_dup);
+    let super::RowFit { circles_w, bar_w, stats_avail: stats_budget, cw: effective_cw } =
+        super::fit_row(col_widths, extra, show_recent, show_bar, show_drp, show_dup);
     let (addr_gap, gap) = super::pick_gaps(stats_budget + 3, &effective_cw, show_drp, show_dup);
     let space_hidden = super::compute_space_hidden(&effective_cw, show_recent, circles_w, stats_budget, gap, show_drp, show_dup);
 
@@ -2343,7 +2318,7 @@ mod window_label_tests {
     #[test]
     fn a_window_says_how_much_it_holds_until_full() {
         let now = Instant::now() + Duration::from_secs(10_000);
-        let a = args(&["-w", "1h"]);
+        let a = args(&["-w", "1h", "--columns", "recent,bar"]); // no text columns
         assert_eq!(window_label_text(&fed(12 * 60 + 30, 3_600, now), &a, now), "1h window (12m so far)");
         assert_eq!(window_label_text(&fed(40, 3_600, now), &a, now), "1h window (39s so far)");
         assert_eq!(window_label_text(&fed(3_600, 3_600, now), &a, now), "1h window");
@@ -2356,8 +2331,121 @@ mod window_label_tests {
     #[test]
     fn lifetime_names_the_span_of_the_text_columns_when_shown() {
         let now = Instant::now();
-        assert_eq!(window_label_text(&[], &args(&["-w", "0"]), now), "lifetime");
+        assert_eq!(window_label_text(&[], &args(&["-w", "0", "--columns", "recent,bar"]), now), "lifetime");
+        assert_eq!(window_label_text(&[], &args(&["-w", "0"]), now), "lifetime \u{00b7} quality 5m", "quality is in the default set");
         assert_eq!(window_label_text(&[], &args(&["-w", "0", "--columns", "default,quality"]), now), "lifetime \u{00b7} quality 5m");
         assert_eq!(window_label_text(&[], &args(&["-w", "0", "--columns", "status,quality", "--ascii"]), now), "lifetime - status/quality 5m");
+    }
+}
+
+#[cfg(test)]
+mod row_fit_tests {
+    use super::*;
+    use crate::cli::Args;
+    use clap::Parser;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    const HOSTS: [&str; 4] = ["1.1.1.1", "8.8.8.8", "9.9.9.9", "208.67.222.222"];
+
+    fn setup(cols: &[&str]) -> (Args, Vec<TargetState>) {
+        let mut argv = vec!["vlat"];
+        argv.extend_from_slice(&HOSTS);
+        argv.extend_from_slice(&["-v", "list"]);
+        argv.extend_from_slice(cols);
+        let mut args = Args::parse_from(argv);
+        args.theme = args.theme_name.to_theme();
+        let (stats, vis) = crate::cli::resolve_columns(&args.extra_stats).unwrap();
+        args.extra_stats = stats;
+        args.column_vis = vis;
+        let mut states = Vec::new();
+        for (i, h) in HOSTS.iter().enumerate() {
+            let mut s = TargetState::new(h.to_string());
+            for seq in 0..60usize {
+                s.record_sent(seq);
+                let drop = i == 2 && seq % 13 == 5;
+                s.record_result(seq, if drop { Err(()) } else { Ok(9.0 + i as f64 * 7.3 + (seq % 7) as f64 * 1.7) }, 3600, false);
+            }
+            states.push(s);
+        }
+        (args, states)
+    }
+
+    /// Renders the list view with column keys and returns its text lines.
+    fn render_list(width: u16, cols: &[&str]) -> Vec<String> {
+        let (args, states) = setup(cols);
+        let col_widths = super::super::compute_col_widths(&states, args.is_window(), &args.extra_stats, &args.hidden_base_stats, args.ipv6, &args.column_vis, args.interval);
+        let mode_labels = vec!["icmp".to_string(); HOSTS.len()];
+        let sort_order: Vec<usize> = (0..HOSTS.len()).collect();
+        let sort_arrows: Vec<Option<(Instant, bool)>> = vec![None; HOSTS.len()];
+        let dialog = super::super::DialogMode::None;
+        let ctx = super::super::ViewCtx {
+            args: &args, mode_labels: &mode_labels, col_widths: &col_widths, shared_scale: 50.0,
+            log_fmt: "", tick: 0, dialog: &dialog, sort_order: &sort_order, sort_arrows: &sort_arrows,
+            sort_mode: &args.sort, sort_mode_changed: None, frozen: false, show_headers: true, show_col_keys: true,
+        };
+        let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
+        terminal.draw(|f| draw_list_ui(f, &states, &ctx)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect()
+    }
+
+    #[test]
+    fn extras_are_shown_whole_or_not_at_all() {
+        for w in [70u16, 80, 90, 100, 120] {
+            let lines = render_list(w, &[]);
+            let header = &lines[0];
+            let shows_quality = header.contains("quality");
+            assert!(shows_quality || !header.contains(" qu"), "w={w}: clipped quality key: {header}");
+            for row in &lines[2..6] {
+                assert_eq!(shows_quality, row.contains("good"), "w={w}: quality cell clipped or orphaned: {row}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_narrower_later_extra_fills_space_the_earlier_one_cannot() {
+        // At 80 cols quality (earlier, wider) doesn't fit but p95 does.
+        let lines = render_list(80, &[]);
+        assert!(!lines[0].contains("quality") && lines[0].contains("p95"), "{}", lines[0]);
+    }
+
+    #[test]
+    fn quality_survives_longer_than_p95() {
+        let (args, states) = setup(&[]);
+        let cw = super::super::compute_col_widths(&states, args.is_window(), &args.extra_stats, &args.hidden_base_stats, args.ipv6, &args.column_vis, args.interval);
+        let full = cw.stats_width(true, false);
+        let p95_w = 1 + 1 + cw.p95.as_ref().unwrap().active_w();
+        // Room for everything except p95: quality stays, p95 goes.
+        let fitted = cw.fit_budget(full - p95_w, true, false);
+        assert!(fitted.quality.is_some() && fitted.p95.is_none());
+    }
+
+    #[test]
+    fn trailing_extras_yield_to_the_sparkline() {
+        // At 100 cols the default set leaves room for a sparkline; adding `lost`
+        // used to crowd it out entirely - now `lost` is dropped instead.
+        let lines = render_list(100, &["--columns", "default,lost"]);
+        assert!(lines[0].contains("recent"), "sparkline missing: {}", lines[0]);
+        assert!(!lines[0].contains("lost"), "lost should have given way: {}", lines[0]);
+    }
+
+    #[test]
+    fn dropped_extras_are_reported_as_space_hidden() {
+        let (args, states) = setup(&[]);
+        let cw = super::super::compute_col_widths(&states, args.is_window(), &args.extra_stats, &args.hidden_base_stats, args.ipv6, &args.column_vis, args.interval);
+        let fit = super::super::fit_row(&cw, 40, true, true, true, false);
+        assert!(fit.cw.quality.is_none() && fit.cw.space_dropped.contains(&ExtraStat::Quality));
+        let mask = super::super::compute_space_hidden(&fit.cw, true, fit.circles_w, fit.stats_avail, 1, true, false);
+        assert!(mask & (1 << 23) != 0, "quality not flagged as space-hidden");
+    }
+
+    #[test]
+    #[ignore = "visual preview: cargo test --lib row_fit_tests::preview -- --ignored --nocapture"]
+    fn preview() {
+        for w in [80u16, 100, 120, 160] {
+            println!("=== w={w}\n{}", render_list(w, &[]).join("\n"));
+        }
     }
 }

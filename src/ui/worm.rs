@@ -424,7 +424,7 @@ pub fn draw_worm(
             draw_explain_dialog(frame, area, *scroll, args.ascii, &args.theme);
         }
         DialogMode::About { logo, command } => {
-            draw_about_dialog(frame, area, logo, command, args.ascii, &args.theme);
+            draw_about_dialog(frame, area, logo, command, &args.input_files, args.ascii, &args.theme);
         }
         DialogMode::FilenameInput { format, input } => {
             draw_filename_dialog(frame, area, format, input, &args.theme);

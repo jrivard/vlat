@@ -153,8 +153,6 @@ pub fn render_screensaver_headers(
 ) {
     let &ViewCtx { args, mode_labels, col_widths, shared_scale, log_fmt, tick, sort_order, sort_arrows, show_headers, .. } = ctx;
     // Single-target: match draw_fullscreen_ui - one combined row with circles and inline sparkline.
-    const BAR_MIN: usize = 15;
-    const BAR_MAX: usize = 25;
 
     if states.len() == 1 {
         let slot  = sort_order[0];
@@ -175,19 +173,11 @@ pub fn render_screensaver_headers(
         let name_part_w = if col_widths.name_w > 0 { col_widths.name_w + 2 } else { 0 };
         let prefix_w_base = 2 + badge_w + name_part_w + col_widths.label + ip_changes_slot_w;
         let prefix_w      = prefix_w_base + 3;
-        let ideal_stats_w = col_widths.stats_width_with_gap(2, show_drp, show_dup);
         let show_recent = args.extra_stats.contains(&crate::cli::ExtraStat::Recent);
         let show_bar    = args.extra_stats.contains(&crate::cli::ExtraStat::Bar);
         let extra = content_w.saturating_sub(prefix_w);
-        let bar_reserve = if show_bar { 1 + BAR_MIN } else { 0 };
-        let space_for_spark = extra.saturating_sub(ideal_stats_w + bar_reserve);
-        let circles_w = if show_recent { let b = space_for_spark.saturating_sub(1); if b >= widgets::TARGET_SPARK_MIN { b.min(widgets::TARGET_SPARK_W) } else { 0 } } else { 0 };
-        let spark_overhead = if circles_w > 0 { circles_w + 1 } else { 0 };
-        let after_spark = extra.saturating_sub(spark_overhead);
-        let bar_w = if !show_bar { 0 } else if after_spark > ideal_stats_w { (after_spark - ideal_stats_w).clamp(BAR_MIN, BAR_MAX) } else { BAR_MIN };
-        let bar_overhead = if bar_w > 0 { 1 + bar_w } else { 0 };
-        let stats_avail = after_spark.saturating_sub(bar_overhead);
-        let effective_cw = col_widths.with_budget(stats_avail, show_drp, show_dup);
+        let RowFit { circles_w, bar_w, stats_avail, cw: effective_cw } =
+            fit_row(col_widths, extra, show_recent, show_bar, show_drp, show_dup);
         let (addr_gap, gap) = pick_gaps(stats_avail + 3, &effective_cw, show_drp, show_dup);
 
         if let Some((hdr_area, rule_area)) = col_keys {
@@ -257,7 +247,6 @@ pub fn render_screensaver_headers(
     let border_ch = if args.ascii { "|" } else { "\u{258c}" }; // ▌
     let name_part_w    = if col_widths.name_w > 0 { col_widths.name_w + 2 } else { 0 };
     let badge_overhead = if show_badges { badge_pad_w + 3 } else { 0 };
-    let ideal_stats_w  = col_widths.stats_width_with_gap(2, show_drp, show_dup);
     // Budget after fixed prefix for this layout mode.
     let content_w_row = terminal_w.saturating_sub(1); // accent border
     let prefix_w_base = 2 + badge_overhead + name_part_w + col_widths.label + ip_changes_slot_w;
@@ -269,15 +258,8 @@ pub fn render_screensaver_headers(
     };
     let show_recent = args.extra_stats.contains(&crate::cli::ExtraStat::Recent);
     let show_bar    = args.extra_stats.contains(&crate::cli::ExtraStat::Bar);
-    let bar_reserve = if show_bar { 1 + BAR_MIN } else { 0 };
-    let space_for_spark = extra.saturating_sub(ideal_stats_w + bar_reserve);
-    let circles_w = if show_recent { let b = space_for_spark.saturating_sub(1); if b >= widgets::TARGET_SPARK_MIN { b.min(widgets::TARGET_SPARK_W) } else { 0 } } else { 0 };
-    let spark_overhead = if circles_w > 0 { 1 + circles_w } else { 0 };
-    let after_spark = extra.saturating_sub(spark_overhead);
-    let bar_w = if !show_bar { 0 } else if after_spark > ideal_stats_w { (after_spark - ideal_stats_w).clamp(BAR_MIN, BAR_MAX) } else { BAR_MIN };
-    let bar_overhead = if bar_w > 0 { 1 + bar_w } else { 0 };
-    let stats_avail = after_spark.saturating_sub(bar_overhead);
-    let effective_cw = col_widths.with_budget(stats_avail, show_drp, show_dup);
+    let RowFit { circles_w, bar_w, stats_avail, cw: effective_cw } =
+        fit_row(col_widths, extra, show_recent, show_bar, show_drp, show_dup);
     let (addr_gap, gap) = if one_row {
         pick_gaps(stats_avail + 3, &effective_cw, show_drp, show_dup)
     } else {
@@ -436,6 +418,9 @@ pub struct ColWidths {
     pub events: Option<usize>,      // fixed: max(header, EVENTS_CELL_W)
     pub stat_order: Vec<ExtraStat>, // display order of active extra stat columns
     pub hidden_base_stats: Vec<BaseStat>, // base stats the user has hidden at runtime
+    /// Extra columns removed by `fit_row`/`fit_budget` because the row was too
+    /// narrow - reported as space-hidden in the 'c' dialog.
+    pub space_dropped: Vec<ExtraStat>,
 }
 
 impl ColWidths {
@@ -465,6 +450,7 @@ impl ColWidths {
             + self.seen.map_or(0,            |w| w + gap + 1)
             + self.lost.map_or(0,            |w| w + gap + 1)
             + self.status.map_or(0,          |w| w + gap + 1)
+            + self.quality.map_or(0,         |w| w + gap + 1)
             + self.jitpct.map_or(0,          |w| w + gap + 1)
             + self.loss.map_or(0,            |w| w + gap + 1)
             + self.events.map_or(0,           |w| w + 1); // lead cell before rtt, no gap
@@ -509,14 +495,113 @@ impl ColWidths {
         }
         cw
     }
+
+    /// Removes one extra column (sets its width to None) and records it in
+    /// `space_dropped`. Returns false if it wasn't shown or can't be dropped
+    /// (events has a fixed lead slot; recent/bar are sized by `fit_row`).
+    pub fn drop_extra(&mut self, stat: &ExtraStat) -> bool {
+        let dropped = match stat {
+            ExtraStat::Mtr     => self.mtr.take().is_some(),
+            ExtraStat::Std     => self.std.take().is_some(),
+            ExtraStat::P01     => self.p01.take().is_some(),
+            ExtraStat::P10     => self.p10.take().is_some(),
+            ExtraStat::P50     => self.p50.take().is_some(),
+            ExtraStat::P95     => self.p95.take().is_some(),
+            ExtraStat::P99     => self.p99.take().is_some(),
+            ExtraStat::Cv      => self.cv.take().is_some(),
+            ExtraStat::Srtt    => self.srtt.take().is_some(),
+            ExtraStat::Seen    => self.seen.take().is_some(),
+            ExtraStat::Lost    => self.lost.take().is_some(),
+            ExtraStat::Status  => self.status.take().is_some(),
+            ExtraStat::Quality => self.quality.take().is_some(),
+            ExtraStat::Jitpct  => self.jitpct.take().is_some(),
+            ExtraStat::Loss    => self.loss.take().is_some(),
+            _ => false,
+        };
+        if dropped { self.space_dropped.push(stat.clone()); }
+        dropped
+    }
+
+    /// Like `with_budget`, but for single-line rows: once decimal alignment is
+    /// gone, whole extra columns are dropped so a column is either shown complete
+    /// or not at all (never clipped mid-word). Extras are kept greedily in display
+    /// order: an earlier column wins when it fits, and when it doesn't, a narrower
+    /// later column may still take the space instead of leaving it empty.
+    pub fn fit_budget(&self, budget: usize, show_drp: bool, show_dup: bool) -> ColWidths {
+        let full = self.with_budget(budget, show_drp, show_dup);
+        if full.stats_width(show_drp, show_dup) <= budget { return full; }
+        let order = full.stat_order.clone();
+        let mut rejected: Vec<&ExtraStat> = Vec::new();
+        for (i, stat) in order.iter().enumerate() {
+            // Keep everything accepted so far plus `stat`; drop rejected and undecided.
+            let mut trial = full.clone();
+            for s in rejected.iter().copied().chain(order[i + 1..].iter()) { trial.drop_extra(s); }
+            if trial.stats_width(show_drp, show_dup) > budget { rejected.push(stat); }
+        }
+        let mut cw = full;
+        for s in rejected { cw.drop_extra(s); }
+        cw
+    }
 }
+
+/// Widths for one single-line target row: sparkline, range bar, and the stats budget.
+pub struct RowFit {
+    pub circles_w:   usize,     // recent sparkline cells (0 = hidden)
+    pub bar_w:       usize,     // range bar cells (0 = hidden)
+    pub stats_avail: usize,     // width left for the stats section
+    pub cw:          ColWidths, // effective widths, fitted to `stats_avail`
+}
+
+const ROW_BAR_MIN: usize = 15;
+const ROW_BAR_MAX: usize = 25;
+
+fn row_split(cw: &ColWidths, extra: usize, show_recent: bool, show_bar: bool, show_drp: bool, show_dup: bool) -> (usize, usize, usize) {
+    let ideal_stats_w = cw.stats_width_with_gap(2, show_drp, show_dup);
+    let bar_reserve = if show_bar { 1 + ROW_BAR_MIN } else { 0 };
+    let space_for_spark = extra.saturating_sub(ideal_stats_w + bar_reserve);
+    let circles_w = if show_recent {
+        let b = space_for_spark.saturating_sub(1);
+        if b >= widgets::TARGET_SPARK_MIN { b.min(widgets::TARGET_SPARK_W) } else { 0 }
+    } else { 0 };
+    let after_spark = extra.saturating_sub(if circles_w > 0 { 1 + circles_w } else { 0 });
+    let bar_w = if !show_bar { 0 }
+        else if after_spark > ideal_stats_w { (after_spark - ideal_stats_w).clamp(ROW_BAR_MIN, ROW_BAR_MAX) }
+        else { ROW_BAR_MIN };
+    let stats_avail = after_spark.saturating_sub(if bar_w > 0 { 1 + bar_w } else { 0 });
+    (circles_w, bar_w, stats_avail)
+}
+
+/// Lays out a single-line target row within `extra` columns (after the identity
+/// prefix). Priority: base stats and evt, then the range bar (min width), then
+/// the recent sparkline, then extra stat columns. Trailing extras give way when
+/// that lets the sparkline appear; any that still don't fit are dropped whole.
+pub fn fit_row(col_widths: &ColWidths, extra: usize, show_recent: bool, show_bar: bool, show_drp: bool, show_dup: bool) -> RowFit {
+    let mut cw = col_widths.clone();
+    let (mut circles_w, mut bar_w, mut stats_avail) = row_split(&cw, extra, show_recent, show_bar, show_drp, show_dup);
+    if show_recent && circles_w == 0 {
+        let mut trial = cw.clone();
+        for stat in col_widths.stat_order.iter().rev() {
+            if !trial.drop_extra(stat) { continue; }
+            let (c, b, a) = row_split(&trial, extra, show_recent, show_bar, show_drp, show_dup);
+            if c > 0 {
+                cw = trial;
+                (circles_w, bar_w, stats_avail) = (c, b, a);
+                break;
+            }
+        }
+    }
+    let cw = cw.fit_budget(stats_avail, show_drp, show_dup);
+    RowFit { circles_w, bar_w, stats_avail, cw }
+}
+
+impl ColWidths {}
 
 fn rtt_split(s: &str) -> (usize, usize) {
     if let Some(dot) = s.find('.') { (dot, s.len() - dot) } else { (s.len(), 0) }
 }
 
 /// Width of the ip-changes (resolve counter) slot, honouring a forced visibility
-/// override from --columns / the 'x' dialog. 0 = column absent. Minimum content
+/// override from --columns / the 'c' dialog. 0 = column absent. Minimum content
 /// width of 4 keeps the "res" column-key label from colliding with "up".
 pub fn ip_changes_slot_width(vis: Option<bool>, max_chg: u32) -> usize {
     let w = 2 + max_chg.to_string().len().max(2);
@@ -595,8 +680,23 @@ pub fn compute_space_hidden(
             check!(bit, w);
         }
     }
+    for stat in &cw.space_dropped {
+        if let Some(bit) = extra_stat_bit(stat) { mask |= 1 << bit; }
+    }
     if show_recent && circles_w == 0 { mask |= 1 << 20; }
     mask
+}
+
+/// Dialog row bit for an extra stat column (see `compute_space_hidden`).
+fn extra_stat_bit(stat: &ExtraStat) -> Option<u32> {
+    Some(match stat {
+        ExtraStat::Mtr => 9, ExtraStat::Std => 10, ExtraStat::P01 => 11, ExtraStat::P10 => 12,
+        ExtraStat::P50 => 13, ExtraStat::P95 => 14, ExtraStat::P99 => 15, ExtraStat::Cv => 16,
+        ExtraStat::Srtt => 17, ExtraStat::Seen => 18, ExtraStat::Lost => 19,
+        ExtraStat::Recent => 20, ExtraStat::Bar => 21, ExtraStat::Status => 22,
+        ExtraStat::Quality => 23, ExtraStat::Jitpct => 24, ExtraStat::Loss => 25, ExtraStat::Events => 26,
+        _ => return None,
+    })
 }
 
 /// Returns a bitmask (one bit per dialog row index 0–20) where a set bit means
@@ -692,7 +792,7 @@ pub fn compute_col_widths(states: &[TargetState], stats_window: bool, extras: &[
     for s in states {
         // name column: custom label, or hostname (non-IP host string), or blank for pure IP targets
         let name_len = if !show_name {
-            0              // column hidden via --columns / 'x' dialog
+            0              // column hidden via --columns / 'c' dialog
         } else if s.custom_label {
             s.label.len()
         } else if s.host.parse::<std::net::IpAddr>().is_err() {
@@ -837,6 +937,7 @@ pub fn compute_col_widths(states: &[TargetState], stats_window: bool, extras: &[
         events:      if want(&ExtraStat::Events)  { Some(events_w) }  else { None },
         stat_order: extras.to_vec(),
         hidden_base_stats: hidden_base.to_vec(),
+        space_dropped: Vec::new(),
     }
 }
 
@@ -929,6 +1030,7 @@ fn col_widths_max(a: &ColWidths, b: &ColWidths) -> ColWidths {
         // held back by the width hysteresis below - only numeric widths get that.
         stat_order:    b.stat_order.clone(),
         hidden_base_stats: b.hidden_base_stats.clone(),
+        space_dropped: Vec::new(),
     }
 }
 

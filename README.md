@@ -203,7 +203,7 @@ While `vlat` is running, you can use the following keys:
 | `e` | Show output legend                                     |
 | `v` | Change view (picker): single → list → graph → ekg → radar → bars → cards → scatter → worm → bubble → pong |
 | `1`-`9` | Jump to view directly: 1=graph 2=ekg 3=worm 4=radar 5=bars 6=cards 7=bubble 8=scatter 9=pong |
-| `x` | Show / hide columns (dialog)                           |
+| `c` | Show / hide columns (dialog)                           |
 | `k` | Toggle column key header                               |
 | `s` | Cycle multi-target sort: mtr → avg → none → name       |
 | `t` | Change color theme (picker)                            |
@@ -211,7 +211,7 @@ While `vlat` is running, you can use the following keys:
 | `w` | Set stats window (dialog; 0 = lifetime)                |
 | `r` | Re-resolve DNS for all hostnames now                   |
 | `d` | Save current view / theme / sort as defaults           |
-| `c` / `j` | Start/stop CSV or JSON logging                         |
+| `l` | Start/stop CSV or JSON logging                         |
 | `Space` | Freeze display (probes continue in background)         |
 | `q` / `Esc` | Quit and show summary (closes an open dialog first)    |
 | `Ctrl-C` | Quit                                                   |
@@ -242,7 +242,7 @@ While `vlat` is running, you can use the following keys:
 - `--max-range <ms>`: Fix Y-axis maximum (disables auto-scaling).
 - `--span <duration>`: Time range shown by the graph (e.g., `10m`).
 - `-w, --window <duration>`: Time span the stats (avg, loss, jitter, percentiles, `jitpct`, sort order) cover. Default `1h`; `0` = the whole run. The `status` and `quality` text columns always judge the last 5 minutes (or the whole window, if shorter); the loss count and % in `status` cover the window. The exit summary always covers the whole run.
-- `--columns <name,...>`: Columns to display. Stat columns (`mtr`, `std`, `p01`, `p10`, `p50`, `p95`, `p99`, `cv`, `srtt`, `seen`, `lost`, `status`, `quality`, `jitpct`, `loss`, `events`, `recent`, `bar`) are off by default except the `recent` sparkline and range `bar`. Identity columns (`mode`, `name`, `port`, `addr`, `resolve`) follow automatic display rules; naming one forces it on, and `none` hides everything (values after `none` add back, e.g. `--columns none,addr,p99`). `all` shows every column; `default` is the default set and composes (e.g. `--columns default,mtr`). All columns can also be toggled at runtime with the `x` key.
+- `--columns <name,...>`: Columns to display. Stat columns (`mtr`, `std`, `p01`, `p10`, `p50`, `p95`, `p99`, `cv`, `srtt`, `seen`, `lost`, `status`, `quality`, `jitpct`, `loss`, `events`, `recent`, `bar`) are off by default except `recent` (sparkline), `bar` (range bar), `events`, `p95` and `quality`; on narrow terminals the extras give way whole, right-to-left, before the sparkline does. Identity columns (`mode`, `name`, `port`, `addr`, `resolve`) follow automatic display rules; naming one forces it on, and `none` hides everything (values after `none` add back, e.g. `--columns none,addr,p99`). `all` shows every column; `default` is the default set and composes (e.g. `--columns default,mtr`). All columns can also be toggled at runtime with the `c` key.
 
 Use `--help` for full option list.
 Use `--explain` to explain all statistics and views.

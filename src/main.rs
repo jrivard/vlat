@@ -59,31 +59,31 @@ fn print_explain() {
     println!("  {}  {} 27.5ms  {} 21ms↔34ms  {} 2.1ms  {}",
         grn("23.3ms"),
         bld("≈"), bld("⇕"), bld("δ"),
-        grn("✗ 0 0.0%"),
+        grn("✗ 0/60"),
     );
     println!();
     println!("  {}  window average RTT",                                             bld("≈"));
     println!("  {}  range - best ↔ worst RTT seen in the window",                    bld("⇕"));
     println!("  {}  average jitter - mean abs. difference between consecutive RTTs",  bld("δ"));
-    println!("  {}  drop count and loss %  ({} = none  {} = drops present)",         bld("✗"), grn("green"), red("red"));
+    println!("  {}  drops / probes sent  ({} = none  {} = drops present)",          bld("✗"), grn("green"), red("red"));
     println!("  {}  duplicate count and %  (shown only when non-zero)",              bld("⊕"));
     println!();
-    println!("  Optional extra stat columns - enable with {}:", bld("--columns"));
-    println!("    {}  mtr     mean time to reliability: avg ÷ (1 − loss)", bld("Ω"));
-    println!("    {}  std     standard deviation of RTT",                  bld("±"));
+    println!("  Optional extra stat columns - enable with {}  (on by default: quality, p95, events):", bld("--columns"));
+    println!("    {}  loss    packet loss %  (~ = nothing sent yet)", bld("ℓ"));
+    println!("    {}  quality slow / degraded / jittery / spiky / good / no reply  (~ = too soon)  (*)", bld("◇"));
     println!("    {}  p01     1st-percentile RTT",     bld("₀"));
     println!("    {}  p10     10th-percentile RTT",    bld("₁"));
     println!("    {}  p50     median RTT",             bld("½"));
     println!("    {}  p95     95th-percentile RTT",    bld("₅"));
     println!("    {}  p99     99th-percentile RTT",    bld("₉"));
-    println!("    {}  cv      coefficient of variation (stddev/avg %)",    bld("%"));
+    println!("    {}  mtr     mean time to reliability: avg ÷ (1 − loss)", bld("Ω"));
     println!("    {}  srtt    RFC 6298 smoothed RTT",                      bld("τ"));
+    println!("    {}  std     standard deviation of RTT",                  bld("±"));
+    println!("    {}  cv      coefficient of variation (stddev/avg %)",    bld("%"));
+    println!("    {}  jitpct  relative jitter: median jitter / median RTT %  (~ = too soon)", bld("Δ"));
     println!("    {}  seen    time since the last successful reply",       bld("↑"));
     println!("    {}  lost    time since the last drop  (~ = none yet)",   bld("↓"));
     println!("    {}  status  verdict, loss record and coverage, e.g. lossy, worsening  (*)", bld("ℹ"));
-    println!("    {}  quality slow / degraded / jittery / spiky / good / no reply  (~ = too soon)  (*)", bld("◇"));
-    println!("    {}  jitpct  relative jitter: median jitter / median RTT %  (~ = too soon)", bld("Δ"));
-    println!("    {}  loss    packet loss %  (~ = nothing sent yet)", bld("ℓ"));
     println!("    {}  events  last 30s: ✕ / ✕✕ / ✕✕✕ (drop / repeated / outage), ✕✕⤴ (recovered), ⇄ (new IP); else trend ↘ → ↗; ◷ warming up", bld("⌁"));
     println!("    (*) {}", vlat::ui::dialogs::TEXT_COLUMNS_WINDOW_NOTE);
     println!();
@@ -357,6 +357,45 @@ fn default_config_path() -> Option<std::path::PathBuf> {
     if p.exists() { Some(p) } else { None }
 }
 
+/// The files this run read at startup, for the about dialog. The defaults file
+/// is always listed - where it was looked for when missing, and marked skipped
+/// when a restored session replaced it - so its location is easy to find.
+fn input_files(cfg: Option<&str>, session: Option<&std::path::Path>, tls_cert: Option<&str>) -> Vec<cli::InputFile> {
+    use cli::InputFile;
+    let mut out = Vec::new();
+    out.push(match cfg {
+        Some(p) if session.is_some() => InputFile { role: "defaults", path: display_path(p), note: Some("skipped: session restored") },
+        Some(p) => InputFile { role: "defaults", path: display_path(p), note: None },
+        None => InputFile {
+            role: "defaults",
+            path: display_path(&vlat::paths::xdg_config_dir().join("vlat").join("defaults").display().to_string()),
+            note: Some("not found"),
+        },
+    });
+    for arg in std::env::args().skip(1) {
+        if let Some(p) = arg.strip_prefix('@') {
+            out.push(InputFile { role: "args file", path: display_path(p), note: None });
+        }
+    }
+    if let Some(p) = session {
+        out.push(InputFile { role: "session", path: display_path(&p.display().to_string()), note: None });
+    }
+    if let Some(p) = tls_cert {
+        out.push(InputFile { role: "tls cert", path: display_path(p), note: None });
+    }
+    out
+}
+
+/// `path` with the home directory shown as `~`.
+fn display_path(path: &str) -> String {
+    match std::env::var("HOME") {
+        Ok(home) if !home.is_empty() && path.starts_with(&home) && path[home.len()..].starts_with(['/', '\\']) => {
+            format!("~{}", &path[home.len()..])
+        }
+        _ => path.to_string(),
+    }
+}
+
 /// Expand `@filename` entries in an argv iterator into the lines of that file.
 /// Lines beginning with `#` and blank lines are ignored.
 /// Inline comments (` #...` after a space) are stripped.
@@ -627,6 +666,7 @@ async fn main() {
             .unwrap_or_else(|e: clap::Error| clap_exit(e, &final_argv, &final_origins));
         restart_loaded = Some((path, sess));
     }
+    args.input_files = input_files(cfg_path.as_deref(), restart_loaded.as_ref().map(|(p, _)| p.as_path()), args.tls_cert.as_deref());
     // Auto-detect: force ASCII mode if terminal doesn't appear to support UTF-8
     if !args.ascii && !detect_unicode_terminal() {
         args.ascii = true;
@@ -674,7 +714,7 @@ async fn main() {
     if user_set_columns {
         args.single_status = args.extra_stats.contains(&cli::ExtraStat::Status);
     }
-    // Saved runtime column state ('x' dialog) isn't CLI-expressible - apply it
+    // Saved runtime column state ('c' dialog) isn't CLI-expressible - apply it
     // after resolve_columns, unless the user passed --columns explicitly.
     let is_restart = restart_loaded.is_some();
     let session_ctx = match restart_loaded {
@@ -717,4 +757,41 @@ fn print_no_targets_help(color: bool) {
     eprintln!("\nOnce sessions have been saved, running '{}' with no targets shows", cyan("vlat"));
     eprintln!("a menu of recent sessions to restart.");
     eprintln!("\nRun '{}' for the full target format and options.", bold("vlat --help"));
+}
+
+#[cfg(test)]
+mod input_files_tests {
+    use super::*;
+
+    #[test]
+    fn defaults_file_is_always_listed() {
+        let none = input_files(None, None, None);
+        assert_eq!(none.len(), 1);
+        assert_eq!((none[0].role, none[0].note), ("defaults", Some("not found")));
+        assert!(none[0].path.ends_with("vlat/defaults"), "{}", none[0].path);
+
+        let found = input_files(Some("/etc/vlat/defaults"), None, None);
+        assert_eq!((found[0].path.as_str(), found[0].note), ("/etc/vlat/defaults", None));
+    }
+
+    #[test]
+    fn restored_session_skips_defaults_and_lists_session_and_cert() {
+        let s = std::path::Path::new("/tmp/vlat-sess.json");
+        let f = input_files(Some("/etc/vlat/defaults"), Some(s), Some("/etc/ssl/ca.pem"));
+        let got: Vec<_> = f.iter().map(|f| (f.role, f.path.as_str(), f.note)).collect();
+        assert_eq!(got, vec![
+            ("defaults", "/etc/vlat/defaults", Some("skipped: session restored")),
+            ("session",  "/tmp/vlat-sess.json", None),
+            ("tls cert", "/etc/ssl/ca.pem", None),
+        ]);
+    }
+
+    #[test]
+    fn home_is_shown_as_tilde() {
+        let Ok(home) = std::env::var("HOME") else { return };
+        if home.is_empty() { return; }
+        assert_eq!(display_path(&format!("{home}/.config/vlat/defaults")), "~/.config/vlat/defaults");
+        assert_eq!(display_path(&format!("{home}x/file")), format!("{home}x/file"), "prefix must end at a separator");
+        assert_eq!(display_path("/etc/vlat/defaults"), "/etc/vlat/defaults");
+    }
 }
