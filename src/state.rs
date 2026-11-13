@@ -143,6 +143,10 @@ pub struct TargetState {
     pub graph_push_count: usize,              // monotonic: incremented every flush_to_graph call
     pub graph_col_cache:      RefCell<GraphColCache>,
     pub sparkline_col_cache:  RefCell<SparklineColCache>,
+    /// Events column change tracking (ui/events_cell.rs): per glyph group,
+    /// `(key, since)` - what it last showed and when that changed - so a glyph
+    /// pops only right after a change and mutes once it has been steady.
+    pub events_cell_marks:     RefCell<[(u8, Option<Instant>); 4]>,
     pub trail:           VecDeque<f32>,  // normalized RTT fractions (0.0–1.0 of shared_scale)
     pub bar_ema:         f64,   // EMA-smoothed RTT for range-bar cursor position (α=0.3)
     pub threshold_flash: u8,
@@ -167,6 +171,19 @@ pub struct TargetState {
     /// the probe/uptime summary text, which should still work with `--window 0`
     /// (lifetime) or a short window long after the drop itself has aged out of it.
     pub last_drop_at: Option<Instant>,
+
+    /// Starts of the two most recent drop events (a streak counts once):
+    /// `[newest, previous]`. Never pruned by the stats window, so the state
+    /// column can tell one blip from repeated ones whatever `-w` is.
+    pub last_drop_events: [Option<Instant>; 2],
+    /// When the latest outage qualified (its streak reached
+    /// `GRADE_OUTAGE_MIN_DROPS`). Not pruned, like `last_drop_events`.
+    pub last_outage_at: Option<Instant>,
+    /// When a reply ended an outage (a streak of `GRADE_OUTAGE_MIN_DROPS`+
+    /// drops). Drives the events column's "back up" event.
+    pub recovered_at: Option<Instant>,
+    /// When DNS re-resolution last moved the target to a different IP.
+    pub ip_changed_at: Option<Instant>,
 
     /// Wall-clock time the very first probe was sent. Drives the elapsed-wait
     /// display in the single-target view's compact pre-reply line.
@@ -375,6 +392,7 @@ impl TargetState {
             graph_push_count: 0,
             graph_col_cache:     RefCell::new(GraphColCache::new()),
             sparkline_col_cache: RefCell::new(SparklineColCache::new()),
+            events_cell_marks: RefCell::new([(0, None); 4]),
             trail:           VecDeque::new(),
             bar_ema:         0.0,
             threshold_flash: 0,
@@ -388,6 +406,10 @@ impl TargetState {
             display_timeout_ms: 1000.0,
             last_up:         None,
             last_drop_at:    None,
+            last_drop_events: [None, None],
+            recovered_at: None,
+            last_outage_at: None,
+            ip_changed_at: None,
             first_sent_at:   None,
             first_success_idx: None,
             warn_rtt:        None,
@@ -532,6 +554,9 @@ impl TargetState {
                     self.rttvar = 0.75 * self.rttvar + 0.25 * (self.srtt - rtt_ms).abs();
                     self.srtt   = 0.875 * self.srtt  + 0.125 * rtt_ms;
                 }
+                if self.cur_drop_streak >= crate::constants::GRADE_OUTAGE_MIN_DROPS {
+                    self.recovered_at = Some(now);
+                }
                 self.cur_drop_streak = 0;
 
                 // EMA toward max(500ms, 1.5 × win_mtr). Falls back to win_avg when
@@ -556,8 +581,14 @@ impl TargetState {
                     self.circle_history[idx] = 255; // drop sentinel - tier lookup not used for drops
                 }
                 self.cur_drop_streak += 1;
-                if self.cur_drop_streak == 1 { self.win_drop_event_times.push(now); }
-                if self.cur_drop_streak == crate::constants::GRADE_OUTAGE_MIN_DROPS { self.win_outage_times.push(now); }
+                if self.cur_drop_streak == 1 {
+                    self.win_drop_event_times.push(now);
+                    self.last_drop_events = [Some(now), self.last_drop_events[0]];
+                }
+                if self.cur_drop_streak == crate::constants::GRADE_OUTAGE_MIN_DROPS {
+                    self.win_outage_times.push(now);
+                    self.last_outage_at = Some(now);
+                }
                 if self.cur_drop_streak > self.max_drop_streak {
                     self.max_drop_streak = self.cur_drop_streak;
                 }

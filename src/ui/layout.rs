@@ -777,7 +777,7 @@ pub fn draw_list_ui(f: &mut Frame, states: &[TargetState], ctx: &ViewCtx) {
             args.theme.hostname
         };
 
-        let mut post_badge: Vec<Span<'static>> = build_current_rtt_spans(state, &effective_cw, &args.theme);
+        let mut post_badge: Vec<Span<'static>> = build_current_rtt_spans(state, &effective_cw, args.ascii, &args.theme, args.graph_interval);
         if circles_w > 0 {
             post_badge.push(Span::raw(" "));
             post_badge.extend(build_target_sparkline_spans(state, args, circles_w, shared_scale));
@@ -910,6 +910,7 @@ fn compute_single_layout(area: Rect, states: &[TargetState], args: &Args, col_wi
             StatItem::Extra(ExtraStat::Quality) => (8, effective_cw.quality.map_or(0, |w| w + 1)), // "quality " + padded word
             StatItem::Extra(ExtraStat::Jitpct) => (5, effective_cw.jitpct.unwrap_or(0)), // "jit% "
             StatItem::Extra(ExtraStat::Loss)   => (6, effective_cw.loss.unwrap_or(0)),   // "loss% "
+            StatItem::Extra(ExtraStat::Events)  => (7, effective_cw.events.map_or(0, |w| w + 1)), // "events " + padded text
             StatItem::Extra(_) => (0, 0),
         };
         if label_w == 0 && val_w == 0 { 0 } else { gap + label_w + val_w }
@@ -1183,7 +1184,7 @@ pub fn draw_single_ui(f: &mut Frame, states: &[TargetState], ctx: &ViewCtx) {
             let line = build_stats_line(
                 state, args.ascii, args.is_window(), shared_scale, &page_cw,
                 false, false, false, &args.theme, page_show_drp, page_show_dup, tick, gap, true,
-                args.interval,
+                args.interval, args.graph_interval,
             );
             let w = content_area.width as usize;
             f.render_widget(Paragraph::new(truncate_line(line, w)), content_area);
@@ -1316,7 +1317,7 @@ pub fn draw_fullscreen_ui(f: &mut Frame, s: &TargetState, mode_label: &str, ctx:
         let hdr_avail_w = content_area.width as usize;
         let bl = Line::from(Span::styled(border_ch, Style::default().fg(accent_color(s, args, Color::DarkGray))));
         f.render_widget(Paragraph::new(bl), border_area);
-        let mut post_badge = build_current_rtt_spans(s, &effective_cw, &args.theme);
+        let mut post_badge = build_current_rtt_spans(s, &effective_cw, args.ascii, &args.theme, args.graph_interval);
         if circles_w > 0 {
             post_badge.push(Span::raw(" "));
             post_badge.extend(build_target_sparkline_spans(s, args, circles_w, shared_scale));
@@ -1531,7 +1532,7 @@ pub fn draw_fullscreen_multi_ui(f: &mut Frame, states: &[TargetState], ctx: &Vie
             if t.elapsed().as_secs() < crate::constants::SORT_ARROW_SECS { Some(up) } else { None }
         });
 
-        let mut post_badge = build_current_rtt_spans(state, &effective_cw, &args.theme);
+        let mut post_badge = build_current_rtt_spans(state, &effective_cw, args.ascii, &args.theme, args.graph_interval);
         if circles_w > 0 {
             post_badge.push(Span::raw(" "));
             post_badge.extend(build_target_sparkline_spans(state, args, circles_w, shared_scale));

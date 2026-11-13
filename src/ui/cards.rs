@@ -91,7 +91,7 @@ fn stat_cell_count(args: &Args) -> usize {
         ExtraStat::Mtr | ExtraStat::Std | ExtraStat::P01 | ExtraStat::P10 | ExtraStat::P50
         | ExtraStat::P95 | ExtraStat::P99 | ExtraStat::Cv | ExtraStat::Srtt | ExtraStat::Seen
         | ExtraStat::Lost | ExtraStat::Status | ExtraStat::Quality | ExtraStat::Jitpct
-        | ExtraStat::Loss
+        | ExtraStat::Loss | ExtraStat::Events
     )).count();
     base + extras
 }
@@ -170,6 +170,10 @@ fn stat_cells(state: &TargetState, args: &Args, theme: &super::Theme) -> Vec<(&'
                 let pct = state.loss_pct(win);
                 let style = if pct.is_some_and(|p| p > 0.0) { Style::default().fg(theme.drop_color) } else { val };
                 v.push(("los%", super::fmt_loss_col(pct), style));
+            }
+            ExtraStat::Events => {
+                let cell = super::events_cell::events_cell(state, Instant::now(), state.mtr_trend(args.graph_interval), ascii);
+                v.push(("evt", cell.text(), cell.lead_style(theme)));
             }
             // Recent / Bar are dedicated rows; identity / meta variants never appear here.
             _ => {}

@@ -1498,6 +1498,7 @@ pub fn explain_content_lines(ascii: bool) -> Vec<Line<'static>> {
             ("q", "quality", "slow / degraded / jittery / spiky / good / no reply  (~ = too soon)  (*)"),
             ("J", "jitpct", "relative jitter: median jitter / median RTT %  (~ = too soon)"),
             ("L", "loss  ", "packet loss %  (~ = nothing sent yet)"),
+            ("e", "events", "last 30s: x / xx / xxx (drop / repeated / outage), xx+ (recovered), * (new IP); else trend v - ^; . warming up"),
         ] {
             lines.push(Line::from(vec![raw("    "), span(sym, bld), raw("  "), raw(format!("{name:<7}")), raw("  "), raw(desc)]));
         }
@@ -1518,6 +1519,7 @@ pub fn explain_content_lines(ascii: bool) -> Vec<Line<'static>> {
             ("\u{25c7}", "quality", "slow / degraded / jittery / spiky / good / no reply  (~ = too soon)  (*)"),
             ("\u{0394}", "jitpct", "relative jitter: median jitter / median RTT %  (~ = too soon)"),
             ("\u{2113}", "loss  ", "packet loss %  (~ = nothing sent yet)"),
+            ("\u{2301}", "events", "last 30s: \u{2715} / \u{2715}\u{2715} / \u{2715}\u{2715}\u{2715} (drop / repeated / outage), \u{2715}\u{2715}\u{2934} (recovered), \u{21c4} (new IP); else trend \u{2198} \u{2192} \u{2197}; \u{25f7} warming up"),
         ] {
             lines.push(Line::from(vec![raw("    "), span(sym, bld), raw("  "), raw(format!("{name:<7}")), raw("  "), raw(desc)]));
         }
@@ -2217,12 +2219,12 @@ pub fn draw_explain_dialog(f: &mut Frame, area: Rect, scroll: u16, ascii: bool, 
     );
 }
 
-/// Number of items in the column toggle dialog (5 identity + 4 base + 17 extra).
-pub const STAT_TOGGLE_COUNT: usize = 26;
+/// Number of items in the column toggle dialog (5 identity + 4 base + 18 extra).
+pub const STAT_TOGGLE_COUNT: usize = 27;
 
 /// Full rendered height of the column toggle dialog: 3 header lines, the items,
-/// 6 group separators, 1 trailing blank, plus 2 border rows.
-pub const STAT_TOGGLE_DIALOG_H: u16 = 3 + STAT_TOGGLE_COUNT as u16 + 6 + 1 + 2;
+/// 7 group separators, 1 trailing blank, plus 2 border rows.
+pub const STAT_TOGGLE_DIALOG_H: u16 = 3 + STAT_TOGGLE_COUNT as u16 + 7 + 1 + 2;
 
 /// Row index of `bar` in the column dialog - the single view never draws the range bar.
 pub const STAT_TOGGLE_BAR_ROW: usize = 21;
@@ -2315,14 +2317,14 @@ pub fn draw_stat_column_toggle_dialog(
          "w", "s", "0", "1", "p", "5", "9", "%", "t", "u", "d",
          "o", "|",
          "i", "q",
-         "J", "L"]
+         "J", "L", "e"]
     } else {
         [" ", " ", ":", " ", "\u{21bb}",
          "\u{2248}", "\u{21d5}", "\u{03b4}", "\u{2717}",
          "\u{03a9}", "\u{00b1}", "\u{2080}", "\u{2081}", "\u{00bd}", "\u{2085}", "\u{2089}", "%", "\u{03c4}", "\u{2191}", "\u{2193}",
          "\u{25cb}", "\u{258f}",
          "\u{2139}", "\u{25c7}",
-         "\u{0394}", "\u{2113}"]
+         "\u{0394}", "\u{2113}", "\u{2301}"]
     };
 
     // Named section separator — rule chars use col_key_rule, label uses plain DIM,
@@ -2334,7 +2336,7 @@ pub fn draw_stat_column_toggle_dialog(
     // (name, description, is_enabled)
     // Indices 0-4:  identity columns (enabled = effective state from `identity`)
     // Indices 5-8:  base stats (enabled = NOT in hidden_base)
-    // Indices 9-25: extra stats (enabled = in extra_stats; EXTRA_STAT_ALL order)
+    // Indices 9-26: extra stats (enabled = in extra_stats; EXTRA_STAT_ALL order)
     let rows: [(&str, &str, bool); STAT_TOGGLE_COUNT] = [
         ("mode  ", "probe-type badge  (auto: mixed modes)",   identity[0]),
         ("name  ", "custom label or hostname",                identity[1]),
@@ -2362,6 +2364,7 @@ pub fn draw_stat_column_toggle_dialog(
         ("quality", "slow / degraded / jittery / spiky / good", extra_stats.contains(&ExtraStat::Quality)),
         ("jitpct", "relative jitter: median jitter / median RTT", extra_stats.contains(&ExtraStat::Jitpct)),
         ("loss  ", "packet loss %", extra_stats.contains(&ExtraStat::Loss)),
+        ("events", "last 30s: drops / recovery / new IP, else trend", extra_stats.contains(&ExtraStat::Events)),
     ];
 
     let mut body: Vec<Line> = vec![
@@ -2386,6 +2389,7 @@ pub fn draw_stat_column_toggle_dialog(
         if i == 22 { body.push(section_sep!("text")); }
         if i == 24 { body.push(section_sep!("grading")); }
         if i == 25 { body.push(section_sep!("loss")); }
+        if i == 26 { body.push(section_sep!("events")); }
 
         let is_cursor  = i == cursor;
         let is_narrow  = *enabled && (space_hidden >> i) & 1 == 1;

@@ -48,6 +48,17 @@ pub const SESSION_SAVE_SECS: u64      = 60;      // periodic session-save interv
 // explicit --summary-json-interval is given.
 pub const SUMMARY_JSON_DEFAULT_SECS: u64 = 5;
 
+// Events column (ui/events_cell.rs): events are remembered for EVENT secs (IP
+// changes, rarer and easier to miss, for IP_EVENT). A glyph's look follows how
+// long it has shown what it shows now - not the event's age - so a steady
+// state (an ongoing outage, a lasting trend) goes quiet: inverse flash under
+// FLASH (events only), bold under FRESH, normal under RECENT, then dim.
+pub const EVENTS_FLASH_SECS: f64    = 1.0;
+pub const EVENTS_FRESH_SECS: f64    = 5.0;
+pub const EVENTS_RECENT_SECS: f64   = 15.0;
+pub const EVENTS_EVENT_SECS: f64    = 30.0;
+pub const EVENTS_IP_EVENT_SECS: f64 = 60.0;
+
 // Status text: how long without a failure before a target that has had losses
 // reads plain "ok · no loss for T" again, instead of "ok now · N lost, ...".
 pub const STATUS_ALL_CLEAR_SECS: u64 = 3_600;

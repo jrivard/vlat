@@ -84,6 +84,7 @@ fn print_explain() {
     println!("    {}  quality slow / degraded / jittery / spiky / good / no reply  (~ = too soon)  (*)", bld("◇"));
     println!("    {}  jitpct  relative jitter: median jitter / median RTT %  (~ = too soon)", bld("Δ"));
     println!("    {}  loss    packet loss %  (~ = nothing sent yet)", bld("ℓ"));
+    println!("    {}  events  last 30s: ✕ / ✕✕ / ✕✕✕ (drop / repeated / outage), ✕✕⤴ (recovered), ⇄ (new IP); else trend ↘ → ↗; ◷ warming up", bld("⌁"));
     println!("    (*) {}", vlat::ui::dialogs::TEXT_COLUMNS_WINDOW_NOTE);
     println!();
     println!("  cv vs jitpct - both are variation relative to RTT, but not the same kind:");
@@ -360,13 +361,22 @@ fn default_config_path() -> Option<std::path::PathBuf> {
 /// Lines beginning with `#` and blank lines are ignored.
 /// Inline comments (` #...` after a space) are stripped.
 /// Returns an error string if any referenced file cannot be read.
-fn expand_arg_files(raw: impl Iterator<Item = String>) -> Result<Vec<String>, String> {
+///
+/// Alongside the args, returns where each one came from - `None` when typed on
+/// the command line, else a description like "config file '/x/defaults', line 3"
+/// (`config` is the defaults file's path) - so a bad value can be traced back.
+fn expand_arg_files(
+    raw: impl Iterator<Item = String>,
+    config: Option<&str>,
+) -> Result<(Vec<String>, Vec<Option<String>>), String> {
     let mut out = Vec::new();
+    let mut origins = Vec::new();
     for arg in raw {
         if let Some(path) = arg.strip_prefix('@') {
             let content = std::fs::read_to_string(path)
                 .map_err(|e| format!("cannot read argument file '{}': {}", path, e))?;
-            for line in content.lines() {
+            let kind = if config == Some(path) { "config file" } else { "argument file" };
+            for (n, line) in content.lines().enumerate() {
                 // Strip inline comments and trim whitespace
                 let line = match line.find(" #") {
                     Some(i) => &line[..i],
@@ -375,12 +385,39 @@ fn expand_arg_files(raw: impl Iterator<Item = String>) -> Result<Vec<String>, St
                 let line = line.trim();
                 if line.is_empty() || line.starts_with('#') { continue; }
                 out.push(line.to_string());
+                origins.push(Some(format!("{kind} '{path}', line {}", n + 1)));
             }
         } else {
             out.push(arg);
+            origins.push(None);
         }
     }
-    Ok(out)
+    Ok((out, origins))
+}
+
+/// Exit on a clap error like `e.exit()`, but when the offending value or flag
+/// came from a file (defaults file, `@file`, saved session) rather than the
+/// command line, say which file - otherwise e.g. a column renamed since the
+/// file was saved reads as if the user had just typed it.
+fn clap_exit(e: clap::Error, argv: &[String], origins: &[Option<String>]) -> ! {
+    use clap::error::{ContextKind, ContextValue};
+    if e.use_stderr() {
+        // InvalidValue first: for a bad value, InvalidArg is the flag's usage ("--columns <NAME>").
+        let bad = [ContextKind::InvalidValue, ContextKind::InvalidArg].into_iter()
+            .find_map(|k| match e.get(k) { Some(ContextValue::String(s)) => Some(s.clone()), _ => None });
+        if let Some(bad) = bad {
+            // clap fails on the first bad occurrence, so the first match in argv
+            // order is the culprit; a value split out of "--flag=a,b" counts too.
+            let hit = argv.iter().zip(origins)
+                .find(|(a, _)| *a == &bad || a.split(['=', ',']).any(|t| t == bad));
+            if let Some((_, Some(origin))) = hit {
+                let _ = e.print();
+                eprintln!("note: '{bad}' comes from {origin}");
+                process::exit(e.exit_code());
+            }
+        }
+    }
+    e.exit()
 }
 
 #[cfg(target_os = "windows")]
@@ -417,11 +454,11 @@ async fn main() {
     // Build effective argv: program name + defaults file args + CLI args.
     // This lets CLI flags override anything in the defaults file.
     let mut raw_args: Vec<String> = std::env::args().collect();
-    if let Some(cfg) = default_config_path() {
-        let cfg_arg = format!("@{}", cfg.display());
-        raw_args.insert(1, cfg_arg);
+    let cfg_path = default_config_path().map(|p| p.display().to_string());
+    if let Some(ref cfg) = cfg_path {
+        raw_args.insert(1, format!("@{cfg}"));
     }
-    let argv = match expand_arg_files(raw_args.into_iter()) {
+    let (argv, argv_origins) = match expand_arg_files(raw_args.into_iter(), cfg_path.as_deref()) {
         Ok(v)    => v,
         Err(msg) => { eprintln!("vlat: {}", msg); process::exit(1); }
     };
@@ -451,10 +488,10 @@ async fn main() {
     }
     let matches = match cmd.try_get_matches_from(&argv) {
         Ok(m) => m,
-        Err(e) => e.exit(),
+        Err(e) => clap_exit(e, &argv, &argv_origins),
     };
     let mut args = Args::from_arg_matches(&matches)
-        .unwrap_or_else(|e: clap::Error| e.exit());
+        .unwrap_or_else(|e: clap::Error| clap_exit(e, &argv, &argv_origins));
 
     // ── demo mode ─────────────────────────────────────────────────────────────
     // --demo runs synthetic targets instead of real ones (see vlat::demo), so
@@ -555,8 +592,12 @@ async fn main() {
     if let Some((path, sess)) = restart_choice {
         // Which args did the user set explicitly? Parsed WITHOUT the defaults
         // file so that saved session settings override defaults-file settings.
-        let user_argv = expand_arg_files(std::env::args())
-            .unwrap_or_else(|_| std::env::args().collect());
+        let (user_argv, user_origins) = expand_arg_files(std::env::args(), None)
+            .unwrap_or_else(|_| {
+                let a: Vec<String> = std::env::args().collect();
+                let o = vec![None; a.len()];
+                (a, o)
+            });
         let probe_cmd = Args::command();
         let user_set: std::collections::HashSet<String> =
             match probe_cmd.clone().try_get_matches_from(&user_argv) {
@@ -570,14 +611,20 @@ async fn main() {
             };
         user_set_columns = user_set.contains("extra_stats");
 
+        let saved = session::restart_argv(&sess, &probe_cmd, &user_set);
+        let mut final_origins: Vec<Option<String>> = vec![None];
+        final_origins.extend(std::iter::repeat_n(
+            Some(format!("saved session '{}'", path.display())), saved.len()));
+        final_origins.extend(user_origins.into_iter().skip(1));
         let mut final_argv: Vec<String> = vec![user_argv[0].clone()];
-        final_argv.extend(session::restart_argv(&sess, &probe_cmd, &user_set));
+        final_argv.extend(saved);
         final_argv.extend(user_argv.into_iter().skip(1));
 
         let m2 = Args::command()
             .try_get_matches_from(&final_argv)
-            .unwrap_or_else(|e| e.exit());
-        args = Args::from_arg_matches(&m2).unwrap_or_else(|e: clap::Error| e.exit());
+            .unwrap_or_else(|e| clap_exit(e, &final_argv, &final_origins));
+        args = Args::from_arg_matches(&m2)
+            .unwrap_or_else(|e: clap::Error| clap_exit(e, &final_argv, &final_origins));
         restart_loaded = Some((path, sess));
     }
     // Auto-detect: force ASCII mode if terminal doesn't appear to support UTF-8

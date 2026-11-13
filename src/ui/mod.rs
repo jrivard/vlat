@@ -26,6 +26,7 @@ pub mod pong;
 pub mod radar;
 pub mod scatter;
 pub mod status_text;
+pub mod events_cell;
 pub mod worm;
 pub mod theme;
 pub mod widgets;
@@ -204,7 +205,7 @@ pub fn render_screensaver_headers(
 
         if !show_headers { return; }
 
-        let mut post_badge = widgets::build_current_rtt_spans(state, &effective_cw, &args.theme);
+        let mut post_badge = widgets::build_current_rtt_spans(state, &effective_cw, args.ascii, &args.theme, args.graph_interval);
         if circles_w > 0 {
             post_badge.push(Span::raw(" "));
             post_badge.extend(widgets::build_target_sparkline_spans(state, args, circles_w, shared_scale));
@@ -313,7 +314,7 @@ pub fn render_screensaver_headers(
         let (cr, cg, cb) = args.theme.target_color(slot);
         let color = Color::Rgb(cr, cg, cb);
 
-        let mut post_badge = widgets::build_current_rtt_spans(state, &effective_cw, &args.theme);
+        let mut post_badge = widgets::build_current_rtt_spans(state, &effective_cw, args.ascii, &args.theme, args.graph_interval);
         if circles_w > 0 {
             post_badge.push(Span::raw(" "));
             post_badge.extend(widgets::build_target_sparkline_spans(state, args, circles_w, shared_scale));
@@ -380,7 +381,7 @@ pub fn render_screensaver_headers(
                 let mut spans: Vec<Span<'static>> = Vec::new();
                 spans.extend(widgets::build_status_badge_spans(state, tick, &args.theme, args.ascii));
                 spans.extend(post_badge);
-                let tail = widgets::build_stats_line(state, args.ascii, args.is_window(), shared_scale, &effective_cw, false, false, false, &args.theme, show_drp, show_dup, tick, gap, false, args.interval);
+                let tail = widgets::build_stats_line(state, args.ascii, args.is_window(), shared_scale, &effective_cw, false, false, false, &args.theme, show_drp, show_dup, tick, gap, false, args.interval, args.graph_interval);
                 spans.extend(tail.spans);
                 Line::from(spans)
             };
@@ -432,6 +433,7 @@ pub struct ColWidths {
     pub quality: Option<usize>,     // max width of probe_quality_cell() text, e.g. "degraded↗"
     pub jitpct: Option<usize>,      // max width of fmt_jitpct() string, e.g. "61%"
     pub loss:   Option<usize>,      // max width of fmt_loss_col() string, e.g. "0.25%"
+    pub events: Option<usize>,      // fixed: max(header, EVENTS_CELL_W)
     pub stat_order: Vec<ExtraStat>, // display order of active extra stat columns
     pub hidden_base_stats: Vec<BaseStat>, // base stats the user has hidden at runtime
 }
@@ -464,7 +466,8 @@ impl ColWidths {
             + self.lost.map_or(0,            |w| w + gap + 1)
             + self.status.map_or(0,          |w| w + gap + 1)
             + self.jitpct.map_or(0,          |w| w + gap + 1)
-            + self.loss.map_or(0,            |w| w + gap + 1);
+            + self.loss.map_or(0,            |w| w + gap + 1)
+            + self.events.map_or(0,           |w| w + 1); // lead cell before rtt, no gap
         let show_drops = show_drp && !hide(BaseStat::Drops);
         base + extras
             + if show_drops { self.drp + gap + 1 } else { 0 }
@@ -553,7 +556,7 @@ pub fn compute_space_hidden(
     let mut mask = 0u32;
     let hide_b = |b: &BaseStat| cw.hidden_base_stats.contains(b);
     // Simulate left-to-right accumulation in actual rendering order:
-    // status_badge + current_rtt → avg → range → jitter → drops → dup → extras.
+    // status_badge + evt + current_rtt → avg → range → jitter → drops → dup → extras.
     let mut used = STATUS_BADGE_W + cw.rtt.active_w();
     macro_rules! check {
         ($bit:expr, $w:expr) => {{
@@ -562,6 +565,8 @@ pub fn compute_space_hidden(
             used += w;
         }};
     }
+    // evt sits between the status badge and the current rtt.
+    if let Some(w) = cw.events { check!(26u32, 1 + w); }
     if !hide_b(&BaseStat::Avg)    { check!(5u32, gap + 1 + cw.rtt.active_w()); }
     if !hide_b(&BaseStat::Range)  { check!(6u32, gap + 2 + 2 * cw.range_compact); }
     if !hide_b(&BaseStat::Jitter) { check!(7u32, gap + 1 + cw.jitter.active_w()); }
@@ -650,6 +655,7 @@ pub fn compute_no_data(states: &[TargetState], extras: &[ExtraStat], hidden_base
     if want(&ExtraStat::Jitpct) && !any_jitpct { mask |= 1 << 24; }
     let any_sent = states.iter().any(|s| s.total_sent > 0);
     if want(&ExtraStat::Loss) && !any_sent { mask |= 1 << 25; }
+    if want(&ExtraStat::Events) && !any_history { mask |= 1 << 26; }
 
     mask
 }
@@ -681,6 +687,7 @@ pub fn compute_col_widths(states: &[TargetState], stats_window: bool, extras: &[
     let mut quality_w = "quality".len(); // the header label is the widest fixed text
     let mut jitpct_w = 3usize;   // min: header "jit%" = glyph slot + 3
     let mut loss_w   = 4usize;   // min: header "loss%" = glyph slot + 4
+    let events_w      = "evt".len().max(events_cell::EVENTS_CELL_W); // fixed: the cell never changes width
     let now = Instant::now();
     for s in states {
         // name column: custom label, or hostname (non-IP host string), or blank for pure IP targets
@@ -827,6 +834,7 @@ pub fn compute_col_widths(states: &[TargetState], stats_window: bool, extras: &[
         quality:    if want(&ExtraStat::Quality) { Some(quality_w) } else { None },
         jitpct:     if want(&ExtraStat::Jitpct) { Some(jitpct_w) } else { None },
         loss:       if want(&ExtraStat::Loss)   { Some(loss_w) }   else { None },
+        events:      if want(&ExtraStat::Events)  { Some(events_w) }  else { None },
         stat_order: extras.to_vec(),
         hidden_base_stats: hidden_base.to_vec(),
     }
@@ -916,6 +924,7 @@ fn col_widths_max(a: &ColWidths, b: &ColWidths) -> ColWidths {
         quality:       match (a.quality, b.quality) { (Some(x), Some(y)) => Some(x.max(y)), (x, y) => x.or(y) },
         jitpct:        match (a.jitpct, b.jitpct) { (Some(x), Some(y)) => Some(x.max(y)), (x, y) => x.or(y) },
         loss:          match (a.loss, b.loss) { (Some(x), Some(y)) => Some(x.max(y)), (x, y) => x.or(y) },
+        events:         match (a.events, b.events) { (Some(x), Some(y)) => Some(x.max(y)), (x, y) => x.or(y) },
         // Visibility/order reflect the user's current toggle state and shouldn't be
         // held back by the width hysteresis below - only numeric widths get that.
         stat_order:    b.stat_order.clone(),

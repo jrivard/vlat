@@ -437,7 +437,35 @@ pub fn build_status_badge_spans(s: &TargetState, tick: u64, theme: &Theme, ascii
     }
 }
 
-pub fn build_current_rtt_spans(s: &TargetState, cw: &ColWidths, theme: &Theme) -> Vec<Span<'static>> {
+/// The `evt` column, which sits between the UP/DN badge and the current RTT
+/// (rather than among the extra stats).  Empty when the column is off.
+/// Width: events + 1 (one-space separator before the rtt column).
+pub fn build_events_lead_spans(s: &TargetState, cw: &ColWidths, ascii: bool, theme: &Theme, graph_interval_ms: u64) -> Vec<Span<'static>> {
+    let Some(st_w) = cw.events else { return vec![] };
+    let mut spans = Vec::new();
+    if s.resolve_error.is_some() || (s.waiting && s.resolving) {
+        spans.push(Span::raw(" ".repeat(st_w + 1)));
+    } else if s.waiting {
+        spans.push(Span::styled(format!("{:<w$}", "\u{2014}", w = st_w + 1), Style::default().add_modifier(Modifier::DIM)));
+    } else {
+        // Each event glyph is its own span so it fades on its own clock.
+        let cell = super::events_cell::events_cell(s, Instant::now(), s.mtr_trend(graph_interval_ms), ascii);
+        let text_w = cell.parts.len(); // every glyph is one column
+        spans.extend(cell.spans(theme));
+        spans.push(Span::raw(" ".repeat((st_w + 1).saturating_sub(text_w))));
+    }
+    spans
+}
+
+/// Events lead cell followed by the current-RTT value (what every row view
+/// draws right after the status badge).
+pub fn build_current_rtt_spans(s: &TargetState, cw: &ColWidths, ascii: bool, theme: &Theme, graph_interval_ms: u64) -> Vec<Span<'static>> {
+    let mut spans = build_events_lead_spans(s, cw, ascii, theme, graph_interval_ms);
+    spans.extend(current_rtt_value_spans(s, cw, theme));
+    spans
+}
+
+fn current_rtt_value_spans(s: &TargetState, cw: &ColWidths, theme: &Theme) -> Vec<Span<'static>> {
     if s.resolve_error.is_some() || (s.waiting && s.resolving) {
         return vec![Span::raw(" ".repeat(cw.rtt.active_w()))];
     }
@@ -564,6 +592,7 @@ pub fn build_stats_keys_line(
     let rng_w = cw.range_compact;
 
     if show_rtt {
+        if let Some(st_w) = cw.events { spans.push(Span::styled(format!("{:<w$}", "evt", w = st_w + 1), dim)); }
         spans.push(Span::styled(format!("{:<w$}", "rtt", w = rtt_w), dim));
     }
     if pfx.pings_gap > 0 { spans.push(Span::raw(" ".repeat(pfx.pings_gap))); }
@@ -652,6 +681,7 @@ pub fn build_stats_line<'a>(
     gap: usize,
     verbose_labels: bool,
     interval_ms: u64,
+    graph_interval_ms: u64,
 ) -> Line<'a> {
     let is_drop    = s.history.iter().rev().find(|s| !s.is_pending())
                        .map(|s| s.is_drop()).unwrap_or(false);
@@ -702,6 +732,11 @@ pub fn build_stats_line<'a>(
     let mut spans = Vec::new();
     if show_status_badge {
         spans.extend(build_status_badge_spans(s, tick, theme, ascii));
+    }
+    // Compact rows draw `evt` ahead of the current RTT (see build_events_lead_spans);
+    // only the verbose paged view keeps it among the extras.
+    if show_current_rtt && !verbose_labels {
+        spans.extend(build_events_lead_spans(s, cw, ascii, theme, graph_interval_ms));
     }
     if is_drop {
         if show_current_rtt {
@@ -754,6 +789,7 @@ pub fn build_stats_line<'a>(
                 ExtraStat::Quality => if let Some(q_w) = cw.quality { spans.push(Span::raw(sp.clone())); if verbose_labels { spans.push(Span::styled("quality ", dim)); } spans.push(Span::styled(format!("{:<w$}", d, w = q_w + 1), dim)); }
                 ExtraStat::Jitpct => if let Some(jp_w) = cw.jitpct  { spans.push(Span::raw(sp.clone())); spans.push(Span::styled(sym("J", "\u{0394}", "jit%"), dim)); spans.push(Span::styled(format!("{:>w$}", d, w = jp_w), dim)); }
                 ExtraStat::Loss   => if let Some(ls_w) = cw.loss    { spans.push(Span::raw(sp.clone())); spans.push(Span::styled(sym("L", "\u{2113}", "loss%"), dim)); spans.push(Span::styled(format!("{:>w$}", d, w = ls_w), dim)); }
+                ExtraStat::Events  => if let Some(st_w) = cw.events.filter(|_| verbose_labels) { spans.push(Span::raw(sp.clone())); if verbose_labels { spans.push(Span::styled("events ", dim)); } spans.push(Span::styled(format!("{:<w$}", d, w = st_w + 1), dim)); }
                 _ => {}
             }
         }
@@ -970,6 +1006,16 @@ pub fn build_stats_line<'a>(
                 };
                 spans.push(Span::styled(format!("{:>w$}", fmt_loss_col(pct), w = ls_w), style));
             }
+            ExtraStat::Events if !verbose_labels => { spans.pop(); } // drawn ahead of the rtt column instead
+            ExtraStat::Events => if let Some(st_w) = cw.events {
+                // No column glyph (like status/quality); left-aligned. Each event
+                // glyph is its own span so it fades on its own clock.
+                if verbose_labels { spans.push(Span::styled("events ", dim)); }
+                let cell = super::events_cell::events_cell(s, Instant::now(), s.mtr_trend(graph_interval_ms), ascii);
+                let text_w = cell.parts.len(); // every glyph is one column
+                spans.extend(cell.spans(theme));
+                spans.push(Span::raw(" ".repeat((st_w + 1).saturating_sub(text_w)))); // +1: see status
+            }
             _ => { spans.pop(); } // remove the gap we pushed for unrecognised/pseudo variants
         }
     }
@@ -1125,7 +1171,7 @@ pub fn build_combined_row_line<'a>(
     if !post_badge_spans.is_empty() {
         spans.extend(post_badge_spans);
     }
-    spans.extend(build_stats_line(s, args.ascii, args.is_window(), shared_scale, col_widths, false, false, !skip_current_rtt, &args.theme, show_drp, show_dup, tick, gap, false, args.interval).spans);
+    spans.extend(build_stats_line(s, args.ascii, args.is_window(), shared_scale, col_widths, false, false, !skip_current_rtt, &args.theme, show_drp, show_dup, tick, gap, false, args.interval, args.graph_interval).spans);
 
     if !log_fmt.is_empty() {
         let tag = if args.ascii {
@@ -2770,7 +2816,7 @@ mod quality_column_tests {
             inline_range_w: 0, inline_range_label: String::new(), inline_range_spans: vec![],
         };
         let hdr = text(&build_stats_keys_line(&pfx, &cw, 2, false, false, false, false, &theme));
-        let row = text(&build_stats_line(&states[0], false, false, 50.0, &cw, false, false, false, &theme, false, false, 0, 2, false, 1_000));
+        let row = text(&build_stats_line(&states[0], false, false, 50.0, &cw, false, false, false, &theme, false, false, 0, 2, false, 1_000, 1_000));
         // Last match: the status text before it may contain the same word.
         let col = |s: &str, needle: &str| s.chars().collect::<Vec<_>>().windows(needle.len()).rposition(|w| w.iter().collect::<String>() == needle);
         // Compare offsets from the status column, so a label wider than its value
@@ -2796,7 +2842,7 @@ mod quality_column_tests {
             inline_range_w: 0, inline_range_label: String::new(), inline_range_spans: vec![],
         };
         let hdr = text(&build_stats_keys_line(&pfx, &cw, 2, false, false, false, false, &theme));
-        let row = text(&build_stats_line(&states[0], false, false, 50.0, &cw, false, false, false, &theme, false, false, 0, 2, false, 1_000));
+        let row = text(&build_stats_line(&states[0], false, false, 50.0, &cw, false, false, false, &theme, false, false, 0, 2, false, 1_000, 1_000));
         let col = |s: &str, needle: &str| s.chars().collect::<Vec<_>>().windows(needle.chars().count()).position(|w| w.iter().collect::<String>() == needle);
         // Offsets from the cv column, so a label wider than its value earlier in
         // the line (e.g. "jitter" over a 5-char value) doesn't matter.

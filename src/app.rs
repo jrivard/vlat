@@ -444,7 +444,7 @@ fn extra_stat_cli_name(stat: &crate::cli::ExtraStat) -> &'static str {
         ExtraStat::Lost   => "lost",
         ExtraStat::Recent => "recent", ExtraStat::Bar  => "bar",
         ExtraStat::Status => "status", ExtraStat::Quality => "quality",
-        ExtraStat::Jitpct => "jitpct", ExtraStat::Loss => "loss",
+        ExtraStat::Jitpct => "jitpct", ExtraStat::Loss => "loss", ExtraStat::Events => "events",
         _ => "?",
     }
 }
@@ -2854,6 +2854,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                                 states[i].resolve_notice = 8;
                                 if let Some(old_ip) = old_ip {
                                     states[i].ip_changes += 1;
+                                    states[i].ip_changed_at = Some(crate::time::Instant::now());
                                     if let Some(ref host) = hostnames[i] {
                                         crate::logfile::write(&format!(
                                             "dns: '{}' changed from {} to {}", host, old_ip, new_ip

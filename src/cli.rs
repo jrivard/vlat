@@ -680,7 +680,7 @@ pub struct Args {
 
     /// Columns and visual elements to display. Default set includes the recent sparkline
     /// and range bar; numeric extras are off by default. Stat values: mtr std p01 p10
-    /// p50 p95 p99 cv srtt seen lost recent bar status quality jitpct loss.
+    /// p50 p95 p99 cv srtt seen lost recent bar status quality jitpct loss events.
     /// Identity values (auto-shown unless overridden): mode name port addr resolve.
     /// Pseudo-values: all (all columns), none (reset to empty), default (default set).
     /// 'none' may be combined: --columns none,mtr shows only mtr; 'all' is exclusive.
@@ -1063,6 +1063,10 @@ pub enum ExtraStat {
     /// Packet loss as a percentage, over the window or lifetime like the other
     /// numbers; finer precision than the status text, e.g. "0.25%"  (ℓ / L)
     Loss,
+    /// What happened in the last 30s, as glyphs that fade with age: ✕ drop,
+    /// ✕✕ repeated drops, ✕✕✕ outage, ✕✕⤴ recovered from one, ⇄ new IP;
+    /// otherwise the latency+loss trend arrow (↘ → ↗), or ◷ while warming up.
+    Events,
 }
 
 /// Canonical display order of the stat columns used by 'all' and the 'x' dialog.
@@ -1075,7 +1079,7 @@ pub const EXTRA_STAT_ALL: &[ExtraStat] = &[
     ExtraStat::P01, ExtraStat::P10, ExtraStat::P50, ExtraStat::P95, ExtraStat::P99,
     ExtraStat::Cv, ExtraStat::Srtt, ExtraStat::Seen, ExtraStat::Lost,
     ExtraStat::Recent, ExtraStat::Bar,
-    ExtraStat::Status, ExtraStat::Quality, ExtraStat::Jitpct, ExtraStat::Loss,
+    ExtraStat::Status, ExtraStat::Quality, ExtraStat::Jitpct, ExtraStat::Loss, ExtraStat::Events,
 ];
 
 /// The default set: sparkline and range bar are on; numeric extras are off.
