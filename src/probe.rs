@@ -108,7 +108,9 @@ async fn icmp4_dup_listener(seen: Arc<Mutex<IcmpSeenMap>>) {
         Err(_) => return,
     };
     if sock.set_nonblocking(true).is_err() { return; }
-    let fd = match AsyncFd::new(sock) { Ok(f) => f, Err(_) => return };
+    // SAFETY: `sock` owns a valid fd that is never closed or replaced while
+    // owned by the `AsyncFd`.
+    let fd = match unsafe { AsyncFd::register(sock) } { Ok(f) => f, Err(_) => return };
 
     let mut buf = vec![MaybeUninit::<u8>::uninit(); 65536];
     loop {
@@ -143,7 +145,9 @@ async fn icmp6_dup_listener(seen: Arc<Mutex<IcmpSeenMap>>) {
         Err(_) => return,
     };
     if sock.set_nonblocking(true).is_err() { return; }
-    let fd = match AsyncFd::new(sock) { Ok(f) => f, Err(_) => return };
+    // SAFETY: `sock` owns a valid fd that is never closed or replaced while
+    // owned by the `AsyncFd`.
+    let fd = match unsafe { AsyncFd::register(sock) } { Ok(f) => f, Err(_) => return };
 
     let mut buf = vec![MaybeUninit::<u8>::uninit(); 65536];
     loop {
