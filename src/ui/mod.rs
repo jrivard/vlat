@@ -49,7 +49,7 @@ pub use crate::state::scale_bucket;
 /// Fixed character width of the UP/DOWN status badge prepended to every stats line.
 pub const STATUS_BADGE_W: usize = 3;
 
-use ratatui::{Frame, layout::{Constraint, Direction, Layout, Rect}, style::{Color, Style}, text::{Line, Span}, widgets::Paragraph};
+use ratatui::{Frame, layout::Rect, style::Color, text::{Line, Span}, widgets::Paragraph};
 use crate::cli::{Args, BaseStat, ExtraStat, SortMode};
 use crate::state::TargetState;
 use crate::time::Instant;
@@ -158,14 +158,13 @@ pub fn render_screensaver_headers(
         let slot  = sort_order[0];
         let state = &states[slot];
         let mode_label = &mode_labels[slot];
-        let border_ch = if args.ascii { "|" } else { "\u{258c}" }; // ▌
         let show_drp = true;
         let show_dup = show_dups_any(std::slice::from_ref(state), args);
         let ip_changes_slot_w = ip_changes_slot_width(args.column_vis.resolve, state.ip_changes);
         let avail_w = if show_headers && !chunks.is_empty() { chunks[0].width as usize } else {
             col_keys.map(|(a, _)| a.width as usize).unwrap_or(80)
         };
-        let content_w = avail_w.saturating_sub(1); // accent border
+        let content_w = avail_w; // full row width
         let show_badge = args.column_vis.mode.unwrap_or(mode_label != "icmp");
         let global_mode: Option<&str> = if mode_label == "icmp" { Some("icmp") } else { None };
         let badge_pad_w = if show_badge { mode_label.len() } else { 0 };
@@ -184,7 +183,7 @@ pub fn render_screensaver_headers(
             let anim_state = if state.scale_anim.is_some() { Some(state) } else { None };
             let (inline_range_label, inline_range_spans) = if bar_w > 0 { widgets::inline_range_key(anim_state, shared_scale, bar_w, args.ascii, &args.theme) } else { (String::new(), vec![]) };
             let pfx = widgets::KeysPrefix {
-                lead: 3, probe: badge_w, name: name_part_w, addr: col_widths.label,
+                lead: 2, probe: badge_w, name: name_part_w, addr: col_widths.label,
                 trailer: addr_gap, resolve: ip_changes_slot_w, status: STATUS_BADGE_W,
                 pings_gap: if circles_w > 0 { 1 } else { 0 }, pings: circles_w,
                 inline_range_w: if bar_w > 0 { 1 + bar_w } else { 0 }, inline_range_label, inline_range_spans,
@@ -211,21 +210,9 @@ pub fn render_screensaver_headers(
             false, post_badge, false, true, gap, addr_gap,
         );
         if show_headers && !chunks.is_empty() {
-            let ac = accent_color(state, args, Color::DarkGray);
-            let horiz = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Length(1), Constraint::Min(0)])
-                .split(chunks[0]);
-            let bl = Line::from(Span::styled(border_ch, Style::default().fg(ac)));
-            frame.render_widget(Paragraph::new(bl), horiz[0]);
-            let mut spans = combined.spans;
-            if spans.first().map(|sp| sp.content.as_ref()) == Some("  ") {
-                let trend = state.mtr_trend(args.graph_interval);
-                spans[0] = Span::raw(" ");
-                spans.insert(0, widgets::trend_spark_span(trend, args.ascii, &args.theme));
-            }
-            let content_w_actual = horiz[1].width as usize;
-            frame.render_widget(Paragraph::new(truncate_line(Line::from(spans), content_w_actual)), horiz[1]);
+            let spans = combined.spans;
+            let content_w_actual = chunks[0].width as usize;
+            frame.render_widget(Paragraph::new(truncate_line(Line::from(spans), content_w_actual)), chunks[0]);
         }
         return;
     }
@@ -244,11 +231,10 @@ pub fn render_screensaver_headers(
     let terminal_w = col_keys.map(|(a, _)| a.width as usize)
         .or_else(|| chunks.first().map(|c| c.width as usize))
         .unwrap_or(80);
-    let border_ch = if args.ascii { "|" } else { "\u{258c}" }; // ▌
     let name_part_w    = if col_widths.name_w > 0 { col_widths.name_w + 2 } else { 0 };
     let badge_overhead = if show_badges { badge_pad_w + 3 } else { 0 };
     // Budget after fixed prefix for this layout mode.
-    let content_w_row = terminal_w.saturating_sub(1); // accent border
+    let content_w_row = terminal_w; // full row width
     let prefix_w_base = 2 + badge_overhead + name_part_w + col_widths.label + ip_changes_slot_w;
     let prefix_w      = prefix_w_base + 3;
     let extra = if one_row {
@@ -272,7 +258,7 @@ pub fn render_screensaver_headers(
         let (inline_range_label, inline_range_spans) = widgets::inline_range_key(anim_state, shared_scale, bar_w, args.ascii, &args.theme);
         let pfx = if one_row {
             widgets::KeysPrefix {
-                lead: 3, probe: badge_overhead, name: name_part_w, addr: col_widths.label,
+                lead: 2, probe: badge_overhead, name: name_part_w, addr: col_widths.label,
                 trailer: addr_gap, resolve: ip_changes_slot_w, status: STATUS_BADGE_W,
                 pings_gap: if circles_w > 0 { 1 } else { 0 }, pings: circles_w,
                 inline_range_w: if bar_w > 0 { 1 + bar_w } else { 0 }, inline_range_label, inline_range_spans,
@@ -316,49 +302,21 @@ pub fn render_screensaver_headers(
                 global_mode, badge_pad_w, ip_changes_slot_w, sort_arrow, show_drp, show_dup,
                 false, post_badge, false, true, gap, addr_gap,
             );
-            let ac = accent_color(state, args, Color::Rgb(cr, cg, cb));
-            let horiz = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Length(1), Constraint::Min(0)])
-                .split(chunks[row]);
-            let bl = Line::from(Span::styled(border_ch, Style::default().fg(ac)));
-            frame.render_widget(Paragraph::new(bl), horiz[0]);
-            let mut spans = line.spans;
-            if spans.first().map(|sp| sp.content.as_ref()) == Some("  ") {
-                let trend = state.mtr_trend(args.graph_interval);
-                spans[0] = Span::raw(" ");
-                spans.insert(0, widgets::trend_spark_span(trend, args.ascii, &args.theme));
-            }
-            let content_w_actual = horiz[1].width as usize;
-            frame.render_widget(Paragraph::new(truncate_line(Line::from(spans), content_w_actual)), horiz[1]);
+            let spans = line.spans;
+            let content_w_actual = chunks[row].width as usize;
+            frame.render_widget(Paragraph::new(truncate_line(Line::from(spans), content_w_actual)), chunks[row]);
         } else {
-            let ac = accent_color(state, args, Color::Rgb(cr, cg, cb));
 
             // ── Header row ────────────────────────────────────────────────────────
-            let hdr_horiz = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Length(1), Constraint::Min(0)])
-                .split(chunks[row * 2]);
-            frame.render_widget(Paragraph::new(Line::from(Span::styled(border_ch, Style::default().fg(ac)))), hdr_horiz[0]);
             let header = widgets::build_header_line(
                 state, args, true, &mode_labels[slot],
                 if row == 0 { log_fmt } else { "" }, tick,
-                Some(color), show_badges, badge_pad_w, hdr_horiz[1].width, None, false,
+                Some(color), show_badges, badge_pad_w, chunks[row * 2].width, None, false,
             );
-            let mut hdr_spans = header.spans;
-            if hdr_spans.first().map(|sp| sp.content.as_ref()) == Some("  ") {
-                let trend = state.mtr_trend(args.graph_interval);
-                hdr_spans[0] = Span::raw(" ");
-                hdr_spans.insert(0, widgets::trend_spark_span(trend, args.ascii, &args.theme));
-            }
-            frame.render_widget(Paragraph::new(truncate_line(Line::from(hdr_spans), hdr_horiz[1].width as usize)), hdr_horiz[1]);
+            let hdr_spans = header.spans;
+            frame.render_widget(Paragraph::new(truncate_line(Line::from(hdr_spans), chunks[row * 2].width as usize)), chunks[row * 2]);
 
             // ── Stats row ─────────────────────────────────────────────────────────
-            let stats_horiz = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Length(1), Constraint::Min(0)])
-                .split(chunks[row * 2 + 1]);
-            frame.render_widget(Paragraph::new(Line::from(Span::styled(border_ch, Style::default().fg(ac)))), stats_horiz[0]);
             let stats_line = {
                 let mut spans: Vec<Span<'static>> = Vec::new();
                 spans.extend(widgets::build_status_badge_spans(state, tick, &args.theme, args.ascii));
@@ -367,7 +325,7 @@ pub fn render_screensaver_headers(
                 spans.extend(tail.spans);
                 Line::from(spans)
             };
-            frame.render_widget(Paragraph::new(truncate_line(stats_line, stats_horiz[1].width as usize)), stats_horiz[1]);
+            frame.render_widget(Paragraph::new(truncate_line(stats_line, chunks[row * 2 + 1].width as usize)), chunks[row * 2 + 1]);
         }
     }
 }
@@ -943,7 +901,7 @@ pub fn compute_col_widths(states: &[TargetState], stats_window: bool, extras: &[
 
 /// Returns the minimum terminal (width, height) needed to usefully render a given view.
 /// `view` is one of "list", "single", "graph", "worm", "radar", "ekg".
-/// Width: enough to show accent-border + trend + badge + name + addr + spinner + UP/DN badge + RTT.
+/// Width: enough to show sort-arrow slot + badge + name + addr + spinner + UP/DN badge + RTT.
 /// Height: enough for all headers/col-keys plus a useful screensaver/graph area.
 pub fn min_size(
     view: &str,
@@ -977,7 +935,7 @@ pub fn min_size(
     let badge_w = if !mode_badge_visible(mode_vis, mode_labels) { 0 }
                   else { mode_labels.iter().map(|m| m.len()).max().unwrap_or(0) + 3 };
     let name_part_w = if cw.name_w > 0 { cw.name_w + 2 } else { 0 };
-    let base_min_w = (1 + 2 + badge_w + name_part_w + cw.label + 3 + STATUS_BADGE_W + cw.rtt.active_w()) as u16;
+    let base_min_w = (2 + badge_w + name_part_w + cw.label + 3 + STATUS_BADGE_W + cw.rtt.active_w()) as u16;
     // Bars needs at least SCALE_W + N*MIN_COL_W columns to be useful.
     let min_w = if view == "bars" {
         base_min_w.max(5 + n16 * 6)
@@ -985,9 +943,9 @@ pub fn min_size(
         base_min_w.max(cards::MIN_PANEL_W)
     } else if view == "single" {
         // Name/address header and the up/down badge now share one bottom line
-        // (border + arrow-slot + name + addr + gap + badge); the probe/uptime
+        // (arrow-slot + name + addr + gap + badge); the probe/uptime
         // text past that just truncates, so it isn't part of this floor.
-        (1 + 2 + name_part_w + cw.label + 2 + STATUS_BADGE_W) as u16
+        (2 + name_part_w + cw.label + 2 + STATUS_BADGE_W) as u16
     } else {
         base_min_w
     };

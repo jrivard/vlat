@@ -29,7 +29,7 @@ use crate::state::TargetState;
 use super::ViewCtx;
 use crate::types::Sample;
 use super::{
-    show_dups_any, accent_color, trim_range_bar, compute_no_data,
+    show_dups_any, trim_range_bar, compute_no_data,
     dialogs::{
         DialogMode, draw_warning_dialog, draw_help_dialog,
         draw_filename_dialog, draw_explain_dialog, draw_about_dialog, draw_frozen_notice,
@@ -47,7 +47,6 @@ use super::{
         build_target_sparkline_spans, TARGET_SPARK_MIN, SINGLE_RECENT_MAX_W,
         inline_range_key,
         render_area_graph, render_area_graph_multi,
-        trend_spark_span,
     },
 };
 
@@ -444,9 +443,7 @@ fn render_single_target_history(
     state:        &TargetState,
     args:         &Args,
     shared_scale: f64,
-    ac:           Color,
 ) {
-    let border_ch = if args.ascii { "|" } else { "\u{258c}" };
 
     // `since` (the first successful reply's index) keeps a long pre-success drop
     // backlog out of the block: with `n_hist` now reserved at its final size (see
@@ -462,24 +459,13 @@ fn render_single_target_history(
 
     for row in 0..n_hist {
         let chunk = chunks[offset + row];
-        let horiz = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(1), Constraint::Min(0)])
-            .split(chunk);
 
         if row >= recent.len() { continue; } // blank space until history fills in
 
         // Oldest rows fade out; newest row is full brightness.
         let brightness = 0.35 + 0.65 * ((row + 1) as f64 / recent.len() as f64);
 
-        f.render_widget(
-            Paragraph::new(Line::from(
-                Span::styled(border_ch, Style::default().fg(dim_color(ac, brightness)))
-            )),
-            horiz[0],
-        );
-
-        let content_w = horiz[1].width as usize;
+        let content_w = chunk.width as usize;
         const RTT_W: usize = 5;
         const GAP:   usize = 1;
         if content_w <= RTT_W + GAP { continue; }
@@ -686,7 +672,7 @@ fn render_single_target_history(
         }
 
         let line = truncate_line(Line::from(spans), content_w);
-        f.render_widget(Paragraph::new(line), horiz[1]);
+        f.render_widget(Paragraph::new(line), chunk);
     }
 }
 
@@ -729,8 +715,7 @@ pub fn draw_list_ui(f: &mut Frame, states: &[TargetState], ctx: &ViewCtx) {
     let show_dup = show_dups_any(states, args);
     let name_part = if col_widths.name_w > 0 { col_widths.name_w + 2 } else { 0 };
     let terminal_w = area.width as usize;
-    let border_ch = if args.ascii { "|" } else { "\u{258c}" }; // ▌
-    let content_w = terminal_w.saturating_sub(1); // accent border
+    let content_w = terminal_w; // full row width
     // Mirrors build_combined_row_line: sort-arrow slot, mode badge (only when shown),
     // name, addr, resolve slot, then the addr gap (up to 3, settled by pick_gaps).
     let badge_w = if show_badges { badge_pad_w + 3 } else { 0 };
@@ -748,7 +733,7 @@ pub fn draw_list_ui(f: &mut Frame, states: &[TargetState], ctx: &ViewCtx) {
         let anim_state = states.iter().find(|s| s.scale_anim.is_some());
         let (inline_range_label, inline_range_spans) = if bar_w > 0 { inline_range_key(anim_state, shared_scale, bar_w, args.ascii, &args.theme) } else { (String::new(), vec![]) };
         let pfx = KeysPrefix {
-            lead: 3, probe: badge_part, name: name_part, addr: col_widths.label,
+            lead: 2, probe: badge_part, name: name_part, addr: col_widths.label,
             trailer: addr_gap, resolve: ip_changes_slot_w, status: super::STATUS_BADGE_W,
             pings_gap: if circles_w > 0 { 1 } else { 0 }, pings: circles_w,
             inline_range_w: if bar_w > 0 { 1 + bar_w } else { 0 }, inline_range_label, inline_range_spans,
@@ -762,7 +747,6 @@ pub fn draw_list_ui(f: &mut Frame, states: &[TargetState], ctx: &ViewCtx) {
         let sort_arrow = sort_arrows.get(slot).and_then(|&opt| opt).and_then(|(t, up)| {
             if t.elapsed().as_secs() < crate::constants::SORT_ARROW_SECS { Some(up) } else { None }
         });
-        let ac = accent_color(state, args, Color::DarkGray);
         let color = if n > 1 {
             let (cr, cg, cb) = args.theme.target_color(slot);
             Color::Rgb(cr, cg, cb)
@@ -802,24 +786,12 @@ pub fn draw_list_ui(f: &mut Frame, states: &[TargetState], ctx: &ViewCtx) {
         );
 
         let row_chunk = chunks[col_keys_h as usize + display_i];
-        let horiz = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(1), Constraint::Min(0)])
-            .split(row_chunk);
-        let border_area  = horiz[0];
-        let content_area = horiz[1];
+        let content_area = row_chunk;
         let w = content_area.width as usize;
 
-        let bl = Line::from(Span::styled(border_ch, Style::default().fg(ac)));
-        f.render_widget(Paragraph::new(bl), border_area);
 
-        // Layout: [trend][ ][badge?][label][UP/xX][recent×28][ ][rtt+...]  [spinner][↻n]
-        let mut spans = line.spans;
-        if spans.first().map(|sp| sp.content.as_ref()) == Some("  ") {
-            let trend = state.mtr_trend(args.graph_interval);
-            spans[0] = Span::raw(" ");
-            spans.insert(0, trend_spark_span(trend, args.ascii, &args.theme));
-        }
+        // Layout: [sort-arrow slot][badge?][label][UP/xX][recent×28][ ][rtt+...]  [spinner][↻n]
+        let spans = line.spans;
         let line = truncate_line(Line::from(spans), w);
         f.render_widget(Paragraph::new(line), content_area);
     }
@@ -869,7 +841,7 @@ fn compute_single_layout(area: Rect, states: &[TargetState], args: &Args, col_wi
 
     let show_drp   = true;
     let show_dup   = show_dups_any(states, args);
-    let content_w  = (area.width as usize).saturating_sub(1); // accent border (name/address, history)
+    let content_w  = area.width as usize; // full row width (name/address, history)
     let content_w2 = (area.width as usize).saturating_sub(INDENT_W); // 2-space indent (status, recent bar, stats)
     let show_recent = args.extra_stats.contains(&ExtraStat::Recent);
 
@@ -981,8 +953,6 @@ pub fn draw_single_ui(f: &mut Frame, states: &[TargetState], ctx: &ViewCtx) {
     let slot       = sort_order[0];
     let state      = &states[slot];
     let mode_label = &mode_labels[slot];
-    let ac         = accent_color(state, args, Color::DarkGray);
-    let border_ch  = if args.ascii { "|" } else { "\u{258c}" }; // ▌
     const INDENT_W: usize = 2;
 
     let SingleLayout { effective_cw, gap, content_w, show_drp, show_dup, recent_w, recent_row_h, stat_pages, avail } =
@@ -998,17 +968,12 @@ pub fn draw_single_ui(f: &mut Frame, states: &[TargetState], ctx: &ViewCtx) {
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Min(0)])
             .split(area);
-        let horiz = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(1), Constraint::Min(0)])
-            .split(chunks[0]);
-        f.render_widget(Paragraph::new(Line::from(Span::styled(border_ch, Style::default().fg(ac)))), horiz[0]);
 
         let show_mode_badge = super::mode_badge_visible(args.column_vis.mode, std::slice::from_ref(mode_label));
         let badge_pad_w = if show_mode_badge { mode_label.len() } else { 0 };
         let mut line = build_header_line(
             state, args, false, mode_label, log_fmt, tick,
-            None, show_mode_badge, badge_pad_w, horiz[1].width, None, false,
+            None, show_mode_badge, badge_pad_w, chunks[0].width, None, false,
         );
 
         if state.current_ip.is_some() {
@@ -1045,8 +1010,8 @@ pub fn draw_single_ui(f: &mut Frame, states: &[TargetState], ctx: &ViewCtx) {
             }
         }
 
-        let w = horiz[1].width as usize;
-        f.render_widget(Paragraph::new(truncate_line(line, w)), horiz[1]);
+        let w = chunks[0].width as usize;
+        f.render_widget(Paragraph::new(truncate_line(line, w)), chunks[0]);
 
         let space_hidden = super::compute_space_hidden(&effective_cw, false, 0, usize::MAX, gap, show_drp, show_dup);
         let no_data = compute_no_data(states, &args.extra_stats, &args.hidden_base_stats);
@@ -1102,29 +1067,24 @@ pub fn draw_single_ui(f: &mut Frame, states: &[TargetState], ctx: &ViewCtx) {
     };
 
     if n_hist > 0 {
-        const HIST_LINE_MAX_W: usize = 80; // border + RTT label + gap + bar
-        let hist_content_w = content_w.min(HIST_LINE_MAX_W - 1);
+        const HIST_LINE_MAX_W: usize = 80; // RTT label + gap + bar
+        let hist_content_w = content_w.min(HIST_LINE_MAX_W);
         let hist_max_bar_w = hist_content_w.saturating_sub(6); // 5 RTT label + 1 gap
         let since = state.first_success_idx.unwrap_or(0);
-        render_single_target_history(f, &chunks, 0, n_hist, since, hist_max_bar_w, state, args, shared_scale, ac);
+        render_single_target_history(f, &chunks, 0, n_hist, since, hist_max_bar_w, state, args, shared_scale);
     }
 
     // ── Line: name/address · up/down status badge · probe summary ──────────────
-    // Leads the block below the history rows - border, header, badge, probe/uptime
+    // Leads the block below the history rows - header, badge, probe/uptime
     // text - the same shape as the pre-first-reply waiting line, whether or not a
     // reply has ever come back.
     {
-        let horiz = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(1), Constraint::Min(0)])
-            .split(chunks[n_hist]);
-        f.render_widget(Paragraph::new(Line::from(Span::styled(border_ch, Style::default().fg(ac)))), horiz[0]);
 
         let show_mode_badge = super::mode_badge_visible(args.column_vis.mode, std::slice::from_ref(mode_label));
         let badge_pad_w = if show_mode_badge { mode_label.len() } else { 0 };
         let mut line = build_header_line(
             state, args, false, mode_label, log_fmt, tick,
-            None, show_mode_badge, badge_pad_w, horiz[1].width, None, false,
+            None, show_mode_badge, badge_pad_w, chunks[n_hist].width, None, false,
         );
 
         // Currently down reads as the same bold "DOWN" word used by the pre-first-reply
@@ -1143,8 +1103,8 @@ pub fn draw_single_ui(f: &mut Frame, states: &[TargetState], ctx: &ViewCtx) {
             line.spans.extend(super::probe_status_spans(state, Instant::now(), args.interval, args.is_window(), args.ascii, &args.theme, Style::default()));
         }
 
-        let w = horiz[1].width as usize;
-        f.render_widget(Paragraph::new(truncate_line(line, w)), horiz[1]);
+        let w = chunks[n_hist].width as usize;
+        f.render_widget(Paragraph::new(truncate_line(line, w)), chunks[n_hist]);
     }
 
     // ── Lines: remaining enabled statistic columns (wrapped across rows as needed) ──
@@ -1260,8 +1220,7 @@ pub fn draw_fullscreen_ui(f: &mut Frame, s: &TargetState, mode_label: &str, ctx:
     let show_dup = show_dups_any(std::slice::from_ref(s), args);
     let ip_changes_slot_w = super::ip_changes_slot_width(args.column_vis.resolve, s.ip_changes);
     let avail_w = area.width as usize;
-    let border_ch = if args.ascii { "|" } else { "\u{258c}" }; // ▌
-    let content_w = avail_w.saturating_sub(1); // accent border
+    let content_w = avail_w; // full row width
     let global_mode: Option<&str> = if mode_label == "icmp" { Some("icmp") } else { None };
     let show_badge = args.column_vis.mode.unwrap_or(mode_label != "icmp");
     let badge_pad_w = if show_badge { mode_label.len() } else { 0 };
@@ -1280,7 +1239,7 @@ pub fn draw_fullscreen_ui(f: &mut Frame, s: &TargetState, mode_label: &str, ctx:
         let anim_state = if s.scale_anim.is_some() { Some(s) } else { None };
         let (inline_range_label, inline_range_spans) = if bar_w > 0 { inline_range_key(anim_state, shared_scale, bar_w, args.ascii, &args.theme) } else { (String::new(), vec![]) };
         let pfx = KeysPrefix {
-            lead: 3, probe: badge_w, name: name_part_w, addr: col_widths.label,
+            lead: 2, probe: badge_w, name: name_part_w, addr: col_widths.label,
             trailer: addr_gap, resolve: ip_changes_slot_w, status: super::STATUS_BADGE_W,
             pings_gap: if circles_w > 0 { 1 } else { 0 }, pings: circles_w,
             inline_range_w: if bar_w > 0 { 1 + bar_w } else { 0 }, inline_range_label, inline_range_spans,
@@ -1291,15 +1250,8 @@ pub fn draw_fullscreen_ui(f: &mut Frame, s: &TargetState, mode_label: &str, ctx:
 
     if show_headers {
         let hdr_chunk = chunks[2];
-        let horiz = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(1), Constraint::Min(0)])
-            .split(hdr_chunk);
-        let border_area  = horiz[0];
-        let content_area = horiz[1];
+        let content_area = hdr_chunk;
         let hdr_avail_w = content_area.width as usize;
-        let bl = Line::from(Span::styled(border_ch, Style::default().fg(accent_color(s, args, Color::DarkGray))));
-        f.render_widget(Paragraph::new(bl), border_area);
         let mut post_badge = build_current_rtt_spans(s, &effective_cw, args.ascii, &args.theme, args.graph_interval);
         if circles_w > 0 {
             post_badge.push(Span::raw(" "));
@@ -1330,12 +1282,7 @@ pub fn draw_fullscreen_ui(f: &mut Frame, s: &TargetState, mode_label: &str, ctx:
             gap,
             addr_gap,
         );
-        let mut spans = combined.spans;
-        if spans.first().map(|sp| sp.content.as_ref()) == Some("  ") {
-            let trend = s.mtr_trend(args.graph_interval);
-            spans[0] = Span::raw(" ");
-            spans.insert(0, trend_spark_span(trend, args.ascii, &args.theme));
-        }
+        let spans = combined.spans;
         let combined_line = truncate_line(Line::from(spans), hdr_avail_w);
         f.render_widget(Paragraph::new(combined_line), content_area);
     }
@@ -1465,14 +1412,13 @@ pub fn draw_fullscreen_multi_ui(f: &mut Frame, states: &[TargetState], ctx: &Vie
     let show_drp = true;
     let show_dup = show_dups_any(states, args);
     let terminal_w = area.width as usize;
-    let border_ch = if args.ascii { "|" } else { "\u{258c}" }; // ▌
     let name_part_w = if col_widths.name_w > 0 { col_widths.name_w + 2 } else { 0 };
     // Mirrors build_combined_row_line (see draw_list_ui).
     let badge_w = if show_badges { badge_pad_w + 3 } else { 0 };
     let prefix_w = 2 + badge_w + name_part_w + col_widths.label + ip_changes_slot_w + 3;
     let show_recent = args.extra_stats.contains(&ExtraStat::Recent);
     let show_bar    = args.extra_stats.contains(&ExtraStat::Bar);
-    let content_w = terminal_w.saturating_sub(1); // accent border
+    let content_w = terminal_w; // full row width
     let extra = content_w.saturating_sub(prefix_w);
     let super::RowFit { circles_w, bar_w, stats_avail: stats_budget, cw: effective_cw } =
         super::fit_row(col_widths, extra, show_recent, show_bar, show_drp, show_dup);
@@ -1486,7 +1432,7 @@ pub fn draw_fullscreen_multi_ui(f: &mut Frame, states: &[TargetState], ctx: &Vie
         let anim_state = states.iter().find(|s| s.scale_anim.is_some());
         let (inline_range_label, inline_range_spans) = if bar_w > 0 { inline_range_key(anim_state, shared_scale, bar_w, args.ascii, &args.theme) } else { (String::new(), vec![]) };
         let pfx = KeysPrefix {
-            lead: 3, probe: badge_part, name: name_part_w, addr: col_widths.label,
+            lead: 2, probe: badge_part, name: name_part_w, addr: col_widths.label,
             trailer: addr_gap, resolve: ip_changes_slot_w, status: super::STATUS_BADGE_W,
             pings_gap: if circles_w > 0 { 1 } else { 0 }, pings: circles_w,
             inline_range_w: if bar_w > 0 { 1 + bar_w } else { 0 }, inline_range_label, inline_range_spans,
@@ -1537,23 +1483,10 @@ pub fn draw_fullscreen_multi_ui(f: &mut Frame, states: &[TargetState], ctx: &Vie
             gap,
             addr_gap,
         );
-        let ac = accent_color(state, args, Color::Rgb(cr, cg, cb));
         let row_chunk = chunks[col_keys_offset + display_pos];
-        let horiz = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(1), Constraint::Min(0)])
-            .split(row_chunk);
-        let border_area  = horiz[0];
-        let content_area = horiz[1];
+        let content_area = row_chunk;
         let chunk_w = content_area.width as usize;
-        let bl = Line::from(Span::styled(border_ch, Style::default().fg(ac)));
-        f.render_widget(Paragraph::new(bl), border_area);
-        let mut spans = line.spans;
-        if spans.first().map(|sp| sp.content.as_ref()) == Some("  ") {
-            let trend = state.mtr_trend(args.graph_interval);
-            spans[0] = Span::raw(" ");
-            spans.insert(0, trend_spark_span(trend, args.ascii, &args.theme));
-        }
+        let spans = line.spans;
         f.render_widget(Paragraph::new(truncate_line(Line::from(spans), chunk_w)), content_area);
     }
     } // end show_headers
@@ -1913,9 +1846,18 @@ mod single_view_layout_tests {
         out
     }
 
-    fn bordered_row_count(out: &str, width: u16) -> usize {
-        let border = '\u{258c}';
-        out.lines().filter(|l| l.starts_with(border)).count().min(width as usize)
+    /// A history row leads with its 5-col RTT label (a number, or the centred
+    /// drop glyph) and a gap, starting in column 0.
+    fn is_history_row(l: &str) -> bool {
+        let c: Vec<char> = l.chars().collect();
+        if c.len() <= 6 || c[5] != ' ' { return false; }
+        let label: String = c[..5].iter().collect();
+        let t = label.trim();
+        t.parse::<f64>().is_ok() || (t.chars().count() == 1 && !t.chars().any(|ch| ch.is_alphanumeric()))
+    }
+
+    fn history_row_count(out: &str, width: u16) -> usize {
+        out.lines().filter(|l| is_history_row(l)).count().min(width as usize)
     }
 
     #[test]
@@ -1958,12 +1900,12 @@ mod single_view_layout_tests {
         let extra = ["--history-rows", "10"];
         let (width, height) = (100u16, 20u16);
         let out = render_single_state(width, height, &extra, state.clone());
-        assert_eq!(bordered_row_count(&out, width), 2, "1 history row + the name/address row above it, not the full 10");
+        assert_eq!(history_row_count(&out, width), 1, "1 history row, not the full 10");
 
         state.record_sent(1);
         state.record_result(1, Ok(13.0), 0, false);
         let out2 = render_single_state(width, height, &extra, state);
-        assert_eq!(bordered_row_count(&out2, width), 3, "a second real sample should grow the block by exactly one row");
+        assert_eq!(history_row_count(&out2, width), 2, "a second real sample should grow the block by exactly one row");
     }
 
     #[test]
@@ -1985,12 +1927,12 @@ mod single_view_layout_tests {
         let extra = ["--history-rows", "10"];
         let (width, height) = (100u16, 20u16);
         let out = render_single_state(width, height, &extra, state.clone());
-        assert_eq!(bordered_row_count(&out, width), 2, "should still start at 1 history row despite the 30-drop backlog, not jump to 10: {out:?}");
+        assert_eq!(history_row_count(&out, width), 1, "should still start at 1 history row despite the 30-drop backlog, not jump to 10: {out:?}");
 
         state.record_sent(31);
         state.record_result(31, Ok(13.0), 0, false);
         let out2 = render_single_state(width, height, &extra, state);
-        assert_eq!(bordered_row_count(&out2, width), 3, "a second reply since answering should grow the block by exactly one row");
+        assert_eq!(history_row_count(&out2, width), 2, "a second reply since answering should grow the block by exactly one row");
     }
 
     #[test]
@@ -2180,7 +2122,7 @@ mod single_view_layout_tests {
         let lines: Vec<&str> = out.lines().collect();
 
         // First line is now a history row (no separate name/address row above it).
-        assert!(lines[0].starts_with('\u{258c}'), "first line should be a history row: {:?}", lines[0]);
+        assert!(is_history_row(lines[0]), "first line should be a history row: {:?}", lines[0]);
 
         let non_blank: Vec<&str> = out.lines().filter(|l| !l.trim().is_empty()).collect();
         // Bottom three rows are, in order: the combined name/address + status line,
@@ -2198,7 +2140,7 @@ mod single_view_layout_tests {
         let lead = |s: &str| s.chars().take_while(|c| *c == ' ').count();
         assert_eq!(lead(bar), 2, "recent bar indent: {:?}", bar);
         assert_eq!(lead(stats), 2, "stats line indent: {:?}", stats);
-        assert!(status.starts_with('\u{258c}'), "combined name/status line starts right at the border, not indented: {:?}", status);
+        assert_eq!(lead(status), 2, "combined name/status line shares the 2-col sort-arrow/indent lead: {:?}", status);
     }
 
     #[test]
@@ -2275,11 +2217,10 @@ mod single_view_layout_tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| draw_single_ui(f, &states, &ctx)).unwrap();
         let buf = terminal.backend().buffer().clone();
-        let border = '\u{258c}';
-        // Every history row (and the name row above them) leads with the accent
-        // border in column 0; the bar/stats/status rows below are indented instead.
-        let bordered_rows = (0..buf.area.height).filter(|&y| buf[(0, y)].symbol() == border.to_string()).count();
-        let rendered_history_rows = bordered_rows - 1; // minus the name/address row
+        let rendered_history_rows = (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .filter(|l| is_history_row(l))
+            .count();
 
         assert_eq!(rendered_history_rows, avail, "avail should equal what actually rendered");
 
@@ -2406,8 +2347,8 @@ mod row_fit_tests {
 
     #[test]
     fn a_narrower_later_extra_fills_space_the_earlier_one_cannot() {
-        // At 80 cols quality (earlier, wider) doesn't fit but p95 does.
-        let lines = render_list(80, &[]);
+        // At 79 cols quality (earlier, wider) doesn't fit but p95 does.
+        let lines = render_list(79, &[]);
         assert!(!lines[0].contains("quality") && lines[0].contains("p95"), "{}", lines[0]);
     }
 
