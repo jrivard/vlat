@@ -49,7 +49,7 @@ pub use crate::state::scale_bucket;
 /// Fixed character width of the UP/DOWN status badge prepended to every stats line.
 pub const STATUS_BADGE_W: usize = 3;
 
-use ratatui::{Frame, layout::Rect, style::Color, text::{Line, Span}, widgets::Paragraph};
+use ratatui::{Frame, layout::Rect, style::{Color, Modifier, Style}, text::{Line, Span}, widgets::Paragraph};
 use crate::cli::{Args, BaseStat, ExtraStat, SortMode};
 use crate::state::TargetState;
 use crate::time::Instant;
@@ -94,6 +94,42 @@ pub fn accent_color(state: &TargetState, args: &Args, default: Color) -> Color {
     } else {
         default
     }
+}
+
+/// Stable per-target tag letter, keyed by slot (not display position) so a
+/// target keeps its letter across re-sorts, the same way it keeps its colour.
+/// A-Z, then a-z, then `?` past 52 targets.
+pub fn slot_tag(slot: usize) -> char {
+    match slot {
+        0..=25  => (b'A' + slot as u8) as char,
+        26..=51 => (b'a' + (slot - 26) as u8) as char,
+        _       => '?',
+    }
+}
+
+/// Whether multi-target plot views show the bottom key row: only when the
+/// per-target rows (which carry the tags) are hidden with `i`.
+pub fn show_target_key_row(n_targets: usize, show_headers: bool) -> bool {
+    n_targets > 1 && !show_headers
+}
+
+/// Puts the slot's tag letter in column 0 of a target row's 2-column lead (the
+/// sort-arrow slot). A sort arrow (`▲ `/`▼ `) moves over to column 1.
+pub fn tag_row_spans(mut spans: Vec<Span<'static>>, slot: usize, args: &Args) -> Vec<Span<'static>> {
+    if spans.is_empty() { return spans; }
+    let first = spans.remove(0);
+    let chars: Vec<char> = first.content.chars().collect();
+    let (cr, cg, cb) = args.theme.target_color(slot);
+    let tag = Span::styled(
+        slot_tag(slot).to_string(),
+        Style::default().fg(Color::Rgb(cr, cg, cb)).add_modifier(Modifier::BOLD),
+    );
+    // Column 1 keeps the sort arrow (or the blank), then anything past the 2-col slot.
+    let rest: String = chars.first().into_iter().chain(chars.iter().skip(2)).collect();
+    let mut out = vec![tag];
+    if !rest.is_empty() { out.push(Span::styled(rest, first.style)); }
+    out.extend(spans);
+    out
 }
 
 pub fn trim_range_bar(spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
@@ -302,7 +338,7 @@ pub fn render_screensaver_headers(
                 global_mode, badge_pad_w, ip_changes_slot_w, sort_arrow, show_drp, show_dup,
                 false, post_badge, false, true, gap, addr_gap,
             );
-            let spans = line.spans;
+            let spans = tag_row_spans(line.spans, slot, args);
             let content_w_actual = chunks[row].width as usize;
             frame.render_widget(Paragraph::new(truncate_line(Line::from(spans), content_w_actual)), chunks[row]);
         } else {
@@ -313,7 +349,7 @@ pub fn render_screensaver_headers(
                 if row == 0 { log_fmt } else { "" }, tick,
                 Some(color), show_badges, badge_pad_w, chunks[row * 2].width, None, false,
             );
-            let hdr_spans = header.spans;
+            let hdr_spans = tag_row_spans(header.spans, slot, args);
             frame.render_widget(Paragraph::new(truncate_line(Line::from(hdr_spans), chunks[row * 2].width as usize)), chunks[row * 2]);
 
             // ── Stats row ─────────────────────────────────────────────────────────
@@ -921,7 +957,7 @@ pub fn min_size(
     let min_h: u16 = match view {
         "list"  => n16 + col_keys_h,
         "single" => 3, // blank spacer + combined name/address+status line + stats line (history rows self-adjust)
-        "graph" => col_keys_h + n16 * graph_rpt + 6,
+        "graph" => col_keys_h + n16 * graph_rpt + 5 + show_target_key_row(n, show_headers) as u16,
         "worm"  => col_keys_h + n16 * saver_rpt + 4,
         "radar" => col_keys_h + n16 * saver_rpt + 4,
         "pong"  => col_keys_h + n16 * saver_rpt + 4,
@@ -1252,5 +1288,26 @@ mod tests {
         // norm=0.75 > 0.5 → second lerp at t=0.5
         // r = 210 + 0*0.5 = 210, g = 190 - 150*0.5 = 115, b = 0
         assert_eq!(Theme::colorful().gradient_color(0.75), (210, 115, 0));
+    }
+}
+
+#[cfg(test)]
+mod slot_tag_tests {
+    use super::*;
+
+    #[test]
+    fn letters_by_slot() {
+        assert_eq!(slot_tag(0), 'A');
+        assert_eq!(slot_tag(25), 'Z');
+        assert_eq!(slot_tag(26), 'a');
+        assert_eq!(slot_tag(51), 'z');
+        assert_eq!(slot_tag(52), '?');
+    }
+
+    #[test]
+    fn key_row_only_for_multi_target_with_rows_hidden() {
+        assert!(show_target_key_row(2, false));
+        assert!(!show_target_key_row(2, true));
+        assert!(!show_target_key_row(1, false));
     }
 }

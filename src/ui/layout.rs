@@ -1392,7 +1392,8 @@ pub fn draw_fullscreen_multi_ui(f: &mut Frame, states: &[TargetState], ctx: &Vie
     }
     constraints.push(Constraint::Min(4));    // graph
     constraints.push(Constraint::Length(1)); // x-axis
-    constraints.push(Constraint::Length(1)); // legend
+    let show_key_row = super::show_target_key_row(states.len(), show_headers);
+    if show_key_row { constraints.push(Constraint::Length(1)); } // target key
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -1486,7 +1487,7 @@ pub fn draw_fullscreen_multi_ui(f: &mut Frame, states: &[TargetState], ctx: &Vie
         let row_chunk = chunks[col_keys_offset + display_pos];
         let content_area = row_chunk;
         let chunk_w = content_area.width as usize;
-        let spans = line.spans;
+        let spans = if n > 1 { super::tag_row_spans(line.spans, slot, args) } else { line.spans };
         f.render_widget(Paragraph::new(truncate_line(Line::from(spans), chunk_w)), content_area);
     }
     } // end show_headers
@@ -1564,22 +1565,23 @@ pub fn draw_fullscreen_multi_ui(f: &mut Frame, states: &[TargetState], ctx: &Vie
         }
     }
 
-    // Legend row: ⇅mode  ● label  ● label  …
-    let legend_line = build_legend_line(states, args, sort_order, chunks[legend_chunk_idx].width as usize);
-    f.render_widget(Paragraph::new(legend_line), chunks[legend_chunk_idx]);
+    // Target key row (only while `i` hides the tagged target rows): A label   B label   …
+    if show_key_row {
+        let legend_line = build_legend_line(states, args, sort_order, chunks[legend_chunk_idx].width as usize);
+        f.render_widget(Paragraph::new(legend_line), chunks[legend_chunk_idx]);
+    }
 
     render_fullscreen_overlays(f, area, states, args, dialog, frozen, sort_mode, sort_mode_changed, true, tick, !log_fmt.is_empty(), space_hidden, show_col_keys, show_headers);
 }
 
-/// Legend row shown at the bottom of multi-target fullscreen.
-/// Renders "⇅mode  ● target0   ● target1   …" with each label in its target color.
+/// Target key row shown at the bottom of multi-target plot views while `i` hides
+/// the per-target rows. Renders "A target0   B target1   …" in display (sort)
+/// order, each slot tag letter and label in its target color.
 /// When the full labels don't fit `available_width`, shared prefix/suffix
 /// words are stripped (and, if still too wide, labels are shortened to the
 /// shortest prefix that stays unique) - see `ui::labels`. Disabled by
 /// `--no-condense-labels`.
 pub fn build_legend_line<'a>(states: &[TargetState], args: &Args, sort_order: &[usize], available_width: usize) -> Line<'a> {
-    let ascii  = args.ascii;
-    let bullet = if ascii { "* " } else { "\u{25cf} " }; // ●
     let sep    = "   ";
 
     let slots: Vec<usize> = sort_order.iter().copied().filter(|&slot| slot < states.len()).collect();
@@ -1595,7 +1597,7 @@ pub fn build_legend_line<'a>(states: &[TargetState], args: &Args, sort_order: &[
     let labels = if args.no_condense_labels {
         display_labels.iter().map(|s| s.to_string()).collect::<Vec<_>>()
     } else {
-        let overhead = bullet.chars().count() + sep.chars().count();
+        let overhead = 2 + sep.chars().count(); // tag letter + space
         super::labels::condense_for_width(&display_labels, available_width, overhead)
     };
 
@@ -1603,7 +1605,10 @@ pub fn build_legend_line<'a>(states: &[TargetState], args: &Args, sort_order: &[
     for (display_pos, (&slot, label)) in slots.iter().zip(labels.iter()).enumerate() {
         if display_pos > 0 { spans.push(Span::raw(sep)); }
         let (cr, cg, cb) = args.theme.target_color(slot);
-        spans.push(Span::styled(bullet, Style::default().fg(Color::Rgb(cr, cg, cb))));
+        spans.push(Span::styled(
+            format!("{} ", super::slot_tag(slot)),
+            Style::default().fg(Color::Rgb(cr, cg, cb)).add_modifier(Modifier::BOLD),
+        ));
         spans.push(Span::styled(
             label.clone(),
             Style::default().fg(Color::Rgb(cr, cg, cb)).add_modifier(Modifier::BOLD),
@@ -2388,5 +2393,75 @@ mod row_fit_tests {
         for w in [80u16, 100, 120, 160] {
             println!("=== w={w}\n{}", render_list(w, &[]).join("\n"));
         }
+    }
+}
+
+#[cfg(test)]
+mod target_key_tests {
+    use super::*;
+    use crate::cli::Args;
+    use clap::Parser;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    const HOSTS: [&str; 3] = ["1.1.1.1", "8.8.8.8", "9.9.9.9"];
+
+    /// Renders the multi-target graph view with the given display order and returns its text lines.
+    fn render_graph(show_headers: bool, sort_order: &[usize], sort_arrows: &[Option<(Instant, bool)>]) -> Vec<String> {
+        let mut argv = vec!["vlat"];
+        argv.extend_from_slice(&HOSTS);
+        let mut args = Args::parse_from(argv);
+        args.theme = args.theme_name.to_theme();
+        let (stats, vis) = crate::cli::resolve_columns(&args.extra_stats).unwrap();
+        args.extra_stats = stats;
+        args.column_vis = vis;
+        let states: Vec<TargetState> = HOSTS.iter().enumerate().map(|(i, h)| {
+            let mut s = TargetState::new(h.to_string());
+            s.current_ip = h.parse().ok();
+            for seq in 0..60usize {
+                s.record_sent(seq);
+                s.record_result(seq, Ok(10.0 + i as f64 * 5.0), 3600, false);
+            }
+            s
+        }).collect();
+        let col_widths = super::super::compute_col_widths(&states, args.is_window(), &args.extra_stats, &args.hidden_base_stats, args.ipv6, &args.column_vis, args.interval);
+        let mode_labels = vec!["icmp".to_string(); HOSTS.len()];
+        let dialog = super::super::DialogMode::None;
+        let ctx = super::super::ViewCtx {
+            args: &args, mode_labels: &mode_labels, col_widths: &col_widths, shared_scale: 50.0,
+            log_fmt: "", tick: 0, dialog: &dialog, sort_order, sort_arrows,
+            sort_mode: &args.sort, sort_mode_changed: None, frozen: false, show_headers, show_col_keys: false,
+        };
+        let mut terminal = Terminal::new(TestBackend::new(120, 20)).unwrap();
+        terminal.draw(|f| draw_fullscreen_multi_ui(f, &states, &ctx, None)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect()
+    }
+
+    #[test]
+    fn target_rows_lead_with_slot_letters_and_no_key_row() {
+        let lines = render_graph(true, &[2, 0, 1], &[None, None, None]);
+        // Tags follow the slot, not the display position.
+        assert!(lines[0].starts_with("C 9.9.9.9"), "{:?}", lines[0]);
+        assert!(lines[1].starts_with("A 1.1.1.1"), "{:?}", lines[1]);
+        assert!(lines[2].starts_with("B 8.8.8.8"), "{:?}", lines[2]);
+        let last = lines.last().unwrap();
+        assert!(!last.contains("9.9.9.9") && !last.contains("1.1.1.1"), "no key row while target rows are shown: {lines:#?}");
+    }
+
+    #[test]
+    fn sort_arrow_moves_beside_the_tag() {
+        let arrows = [None, Some((Instant::now(), true)), None];
+        let lines = render_graph(true, &[1, 0, 2], &arrows);
+        assert!(lines[0].starts_with("B▲8.8.8.8"), "{:?}", lines[0]);
+        assert!(lines[1].starts_with("A 1.1.1.1"), "{:?}", lines[1]);
+    }
+
+    #[test]
+    fn key_row_returns_in_sort_order_when_target_rows_are_hidden() {
+        let lines = render_graph(false, &[2, 0, 1], &[None, None, None]);
+        // The window label shares the right end of this row.
+        assert!(lines.last().unwrap().starts_with("C 9.9.9.9   A 1.1.1.1   B 8.8.8.8 "), "{lines:#?}");
     }
 }

@@ -286,7 +286,7 @@ pub fn draw_worm(
 
     let rows_per_target: u16 = if !show_headers { 0 } else { 1 };
 
-    let show_legend = states.len() > 1;
+    let show_legend = super::show_target_key_row(states.len(), show_headers);
 
     let mut constraints: Vec<Constraint> = Vec::new();
     if show_col_keys {
@@ -318,8 +318,7 @@ pub fn draw_worm(
     super::render_screensaver_headers(frame, states, ctx, &chunks[col_keys_offset..], true, col_key_areas);
 
     if show_legend {
-        let default_order: Vec<usize> = (0..states.len()).collect();
-        let legend_line = build_legend_line(states, args, &default_order, chunks[legend_chunk_idx].width as usize);
+        let legend_line = build_legend_line(states, args, ctx.sort_order, chunks[legend_chunk_idx].width as usize);
         frame.render_widget(Paragraph::new(legend_line), chunks[legend_chunk_idx]);
     }
 
