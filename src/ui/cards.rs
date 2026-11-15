@@ -325,7 +325,7 @@ pub fn draw_cards(
         render_panel(frame, rect, &states[slot], slot, args, shared_scale);
     }
 
-    render_window_label(frame, area, states, args, sort_mode, sort_mode_changed);
+    render_window_label(frame, area, states, args, sort_mode, sort_mode_changed, true);
     let no_data = compute_no_data(states, &args.extra_stats, &args.hidden_base_stats);
     render_dialogs(frame, area, args, dialog, frozen, sort_mode, states.len(), "cards", tick, !log_fmt.is_empty(), 0, no_data, show_col_keys, show_headers);
 }

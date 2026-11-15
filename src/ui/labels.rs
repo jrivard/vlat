@@ -1,12 +1,12 @@
-//! Condensing target labels for width-constrained legend rows.
+//! Condensing target labels for width-constrained in-graph labels.
 //!
-//! Fullscreen multi-target views (graph/bubble/worm legends) show every
-//! target's label side by side on one row. Labels sharing a common prefix or
+//! Fullscreen multi-target views (graph captions, worm name tags) write each
+//! target's name into a small space. Labels sharing a common prefix or
 //! suffix word (`home-alpha`, `home-beta`) waste width on the redundant part
 //! once several are shown together. This module strips shared leading/
-//! trailing word-tokens first, and only if the row still doesn't fit,
-//! shortens each remaining label to the shortest prefix that stays unique
-//! among the set (the same idea git uses for abbreviated commit hashes).
+//! trailing word-tokens first, and only if a label still doesn't fit,
+//! shortens it (at a word boundary, else to the shortest prefix that stays
+//! unique among the set - the same idea git uses for abbreviated hashes).
 //!
 //! Transformation is applied only as far as needed to fit - the least
 //! destructive result that fits is preferred over always maximally
@@ -92,26 +92,6 @@ fn shortest_unique_prefixes(labels: &[String], min_len: usize) -> Vec<String> {
         }
     }
     chars.iter().zip(lens).map(|(c, k)| c[..k].iter().collect()).collect()
-}
-
-/// Condenses `labels` so the row fits within `budget` columns, trying the
-/// least destructive transformation first:
-/// full labels -> common-affix-stripped -> shortest-unique-prefix.
-/// `per_label_overhead` is the width each label costs beyond its own text
-/// (bullet + separator).
-pub fn condense_for_width(labels: &[&str], budget: usize, per_label_overhead: usize) -> Vec<String> {
-    let width = |items: &[String]| -> usize {
-        items.iter().map(|s| s.chars().count()).sum::<usize>() + per_label_overhead * items.len()
-    };
-    let full: Vec<String> = labels.iter().map(|s| s.to_string()).collect();
-    if labels.len() < 2 || width(&full) <= budget {
-        return full;
-    }
-    let stripped = strip_common_affixes(labels);
-    if width(&stripped) <= budget {
-        return stripped;
-    }
-    shortest_unique_prefixes(&stripped, 1)
 }
 
 /// Display form of a target label: drops a trailing " (...)" annotation.
@@ -219,29 +199,7 @@ mod tests {
         assert_eq!(got, vec!["home", "homew"]);
     }
 
-    #[test]
-    fn condense_for_width_prefers_full_labels_when_they_fit() {
-        let got = condense_for_width(&["home-alpha", "home-beta"], 100, 3);
-        assert_eq!(got, vec!["home-alpha", "home-beta"]);
-    }
 
-    #[test]
-    fn condense_for_width_strips_affixes_before_going_to_unique_prefixes() {
-        // Fits once the shared "home-" prefix is stripped, so it should stop
-        // there rather than shortening further to single letters.
-        let got = condense_for_width(&["home-alpha", "home-beta"], 16, 3);
-        assert_eq!(got, vec!["alpha", "beta"]);
-    }
 
-    #[test]
-    fn condense_for_width_falls_back_to_unique_prefixes_when_still_too_wide() {
-        let got = condense_for_width(&["home-alpha", "home-beta"], 5, 3);
-        assert_eq!(got, vec!["a", "b"]);
-    }
 
-    #[test]
-    fn condense_for_width_single_label_is_never_touched() {
-        let got = condense_for_width(&["home-alpha"], 1, 3);
-        assert_eq!(got, vec!["home-alpha"]);
-    }
 }

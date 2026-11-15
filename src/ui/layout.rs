@@ -136,7 +136,9 @@ fn window_coverage_secs(states: &[TargetState], now: Instant) -> u64 {
 /// The bottom-border window label: "1h window", or "1h window (12m so far)"
 /// while it fills; "lifetime", plus the span the status/quality text
 /// columns use when one is shown (they stay recent in lifetime mode).
-pub fn window_label_text(states: &[TargetState], args: &Args, now: Instant) -> String {
+/// `stat_cols_shown` is false while the view's stat columns are hidden (`i`),
+/// which drops the status/quality span note since it would describe nothing.
+pub fn window_label_text(states: &[TargetState], args: &Args, now: Instant, stat_cols_shown: bool) -> String {
     use crate::constants::GRADE_SPAN_SECS;
     let dot = if args.ascii { "-" } else { "\u{00b7}" };
     let base = if args.window == 0 {
@@ -153,7 +155,7 @@ pub fn window_label_text(states: &[TargetState], args: &Args, now: Instant) -> S
     };
     // The text columns judge only the last GRADE_SPAN_SECS: say so when that's
     // narrower than what the label names, and one of them is on screen.
-    if args.window != 0 && args.window <= GRADE_SPAN_SECS { return base; }
+    if !stat_cols_shown || (args.window != 0 && args.window <= GRADE_SPAN_SECS) { return base; }
     let which = match (args.extra_stats.contains(&ExtraStat::Status), args.extra_stats.contains(&ExtraStat::Quality)) {
         (true, true)   => "status/quality",
         (true, false)  => "status",
@@ -163,9 +165,10 @@ pub fn window_label_text(states: &[TargetState], args: &Args, now: Instant) -> S
     format!("{base} {dot} {which} {}", fmt_window_secs(GRADE_SPAN_SECS))
 }
 
-pub fn render_window_label(f: &mut Frame, area: Rect, states: &[TargetState], args: &Args, sort_mode: &SortMode, sort_mode_changed: Option<Instant>) {
+#[allow(clippy::too_many_arguments)]
+pub fn render_window_label(f: &mut Frame, area: Rect, states: &[TargetState], args: &Args, sort_mode: &SortMode, sort_mode_changed: Option<Instant>, stat_cols_shown: bool) {
     let theme = &args.theme;
-    let label_text = window_label_text(states, args, Instant::now());
+    let label_text = window_label_text(states, args, Instant::now(), stat_cols_shown);
 
     let label_style = Style::default().fg(theme.c(theme.uptime));
 
@@ -1181,7 +1184,8 @@ fn render_fullscreen_overlays(
 ) {
     // Window span - bottom-right corner overlay (suppressed in fullscreen when showing lifetime stats)
     if args.is_window() {
-        render_window_label(f, area, states, args, sort_mode, sort_mode_changed);
+        let stat_cols_shown = !super::dialogs::columns_hidden_by_headers("graph", show_headers);
+        render_window_label(f, area, states, args, sort_mode, sort_mode_changed, stat_cols_shown);
     }
     render_theme_label(f, area, &args.theme, args.theme_changed);
 
@@ -1191,6 +1195,8 @@ fn render_fullscreen_overlays(
 
 pub fn draw_fullscreen_ui(f: &mut Frame, s: &TargetState, mode_label: &str, ctx: &ViewCtx) {
     let &ViewCtx { args, col_widths, shared_scale, log_fmt, dialog, tick, frozen, sort_mode, show_headers, show_col_keys, .. } = ctx;
+    // Column keys label the per-target rows, so they hide along with them.
+    let col_keys = super::col_keys_visible("graph", show_col_keys, show_headers);
     let area = f.area();
     {
         let ml = vec![mode_label.to_string()];
@@ -1202,12 +1208,12 @@ pub fn draw_fullscreen_ui(f: &mut Frame, s: &TargetState, mode_label: &str, ctx:
     }
 
     let hdr_h  = if show_headers  { 1u16 } else { 0 };
-    let keys_h = if show_col_keys { 2u16 } else { 0 };
+    let keys_h = if col_keys { 2u16 } else { 0 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(keys_h.min(1)),  // col-key names (0 or 1)
-            Constraint::Length(if show_col_keys { 1 } else { 0 }), // col-key rule (0 or 1)
+            Constraint::Length(if col_keys { 1 } else { 0 }), // col-key rule (0 or 1)
             Constraint::Length(hdr_h),           // combined header+stats
             Constraint::Min(4),                  // graph
             Constraint::Length(1),               // x-axis time labels
@@ -1235,7 +1241,7 @@ pub fn draw_fullscreen_ui(f: &mut Frame, s: &TargetState, mode_label: &str, ctx:
     let (addr_gap, gap) = super::pick_gaps(stats_avail + 3, &effective_cw, show_drp, show_dup);
     let space_hidden = super::compute_space_hidden(&effective_cw, show_recent, circles_w, stats_avail, gap, show_drp, show_dup);
 
-    if show_col_keys {
+    if col_keys {
         let anim_state = if s.scale_anim.is_some() { Some(s) } else { None };
         let (inline_range_label, inline_range_spans) = if bar_w > 0 { inline_range_key(anim_state, shared_scale, bar_w, args.ascii, &args.theme) } else { (String::new(), vec![]) };
         let pfx = KeysPrefix {
@@ -1368,6 +1374,8 @@ pub fn draw_fullscreen_ui(f: &mut Frame, s: &TargetState, mode_label: &str, ctx:
 
 pub fn draw_fullscreen_multi_ui(f: &mut Frame, states: &[TargetState], ctx: &ViewCtx, fs_logo: Option<&crate::ui::logo::LogoAnim>) {
     let &ViewCtx { args, mode_labels, col_widths, shared_scale, log_fmt, dialog, tick, sort_order, sort_arrows, sort_mode, sort_mode_changed, frozen, show_headers, show_col_keys, .. } = ctx;
+    // Column keys label the per-target rows, so they hide along with them.
+    let col_keys = super::col_keys_visible("graph", show_col_keys, show_headers);
     let area = f.area();
     let n    = states.len() as u16;
 
@@ -1381,9 +1389,9 @@ pub fn draw_fullscreen_multi_ui(f: &mut Frame, states: &[TargetState], ctx: &Vie
         }
     }
 
-    // Build layout constraints: col-key header (optional), rows_per_target per target, graph fill, x-axis, legend
+    // Build layout constraints: col-key header (optional), rows_per_target per target, graph fill, x-axis
     let mut constraints: Vec<Constraint> = Vec::new();
-    if show_col_keys {
+    if col_keys {
         constraints.push(Constraint::Length(1)); // col-key names
         constraints.push(Constraint::Length(1)); // col-key rule
     }
@@ -1392,8 +1400,6 @@ pub fn draw_fullscreen_multi_ui(f: &mut Frame, states: &[TargetState], ctx: &Vie
     }
     constraints.push(Constraint::Min(4));    // graph
     constraints.push(Constraint::Length(1)); // x-axis
-    let show_key_row = super::show_target_key_row(states.len(), show_headers);
-    if show_key_row { constraints.push(Constraint::Length(1)); } // target key
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -1426,9 +1432,9 @@ pub fn draw_fullscreen_multi_ui(f: &mut Frame, states: &[TargetState], ctx: &Vie
     let (addr_gap, gap) = super::pick_gaps(stats_budget + 3, &effective_cw, show_drp, show_dup);
     let space_hidden = super::compute_space_hidden(&effective_cw, show_recent, circles_w, stats_budget, gap, show_drp, show_dup);
 
-    let col_keys_offset = if show_col_keys { 2usize } else { 0 };
+    let col_keys_offset = if col_keys { 2usize } else { 0 };
 
-    if show_col_keys {
+    if col_keys {
         let badge_part = if show_badges { badge_pad_w + 3 } else { 0 };
         let anim_state = states.iter().find(|s| s.scale_anim.is_some());
         let (inline_range_label, inline_range_spans) = if bar_w > 0 { inline_range_key(anim_state, shared_scale, bar_w, args.ascii, &args.theme) } else { (String::new(), vec![]) };
@@ -1511,7 +1517,6 @@ pub fn draw_fullscreen_multi_ui(f: &mut Frame, states: &[TargetState], ctx: &Vie
 
     let graph_chunk_idx  = col_keys_offset + (n * rows_per_target) as usize;
     let xaxis_chunk_idx  = graph_chunk_idx + 1;
-    let legend_chunk_idx = graph_chunk_idx + 2;
 
     // Graph
     {
@@ -1520,7 +1525,7 @@ pub fn draw_fullscreen_multi_ui(f: &mut Frame, states: &[TargetState], ctx: &Vie
         // Suppress the graph while any target is still calibrating.
         let any_calibrating = states.iter().any(|s| s.calibrating.map(|(_, u)| u > now).unwrap_or(false));
         if !any_calibrating {
-            render_area_graph_multi(f, chunks[graph_chunk_idx], states, args, shared_scale, sort_order);
+            render_area_graph_multi(f, chunks[graph_chunk_idx], states, args, shared_scale, sort_order, show_headers);
         }
 
         // Calibrating overlay - shown while any target is still in its calibration window.
@@ -1565,51 +1570,8 @@ pub fn draw_fullscreen_multi_ui(f: &mut Frame, states: &[TargetState], ctx: &Vie
         }
     }
 
-    // Target key row (only while `i` hides the tagged target rows): A label   B label   …
-    if show_key_row {
-        let legend_line = build_legend_line(states, args, sort_order, chunks[legend_chunk_idx].width as usize);
-        f.render_widget(Paragraph::new(legend_line), chunks[legend_chunk_idx]);
-    }
-
     render_fullscreen_overlays(f, area, states, args, dialog, frozen, sort_mode, sort_mode_changed, true, tick, !log_fmt.is_empty(), space_hidden, show_col_keys, show_headers);
 }
-
-/// Target key row shown at the bottom of multi-target plot views while `i` hides
-/// the per-target rows. Renders "A target0   B target1   …" in display (sort)
-/// order, each slot tag letter and label in its target color.
-/// When the full labels don't fit `available_width`, shared prefix/suffix
-/// words are stripped (and, if still too wide, labels are shortened to the
-/// shortest prefix that stays unique) - see `ui::labels`. Disabled by
-/// `--no-condense-labels`.
-pub fn build_legend_line<'a>(states: &[TargetState], args: &Args, sort_order: &[usize], available_width: usize) -> Line<'a> {
-    let sep    = "   ";
-
-    let slots: Vec<usize> = sort_order.iter().copied().filter(|&slot| slot < states.len()).collect();
-    let display_labels: Vec<&str> = slots.iter().map(|&slot| super::labels::display_label(&states[slot].label)).collect();
-
-    let labels = if args.no_condense_labels {
-        display_labels.iter().map(|s| s.to_string()).collect::<Vec<_>>()
-    } else {
-        let overhead = 2 + sep.chars().count(); // tag letter + space
-        super::labels::condense_for_width(&display_labels, available_width, overhead)
-    };
-
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    for (display_pos, (&slot, label)) in slots.iter().zip(labels.iter()).enumerate() {
-        if display_pos > 0 { spans.push(Span::raw(sep)); }
-        let (cr, cg, cb) = args.theme.target_color(slot);
-        spans.push(Span::styled(
-            format!("{} ", super::slot_tag(slot)),
-            Style::default().fg(Color::Rgb(cr, cg, cb)).add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::styled(
-            label.clone(),
-            Style::default().fg(Color::Rgb(cr, cg, cb)).add_modifier(Modifier::BOLD),
-        ));
-    }
-    Line::from(spans)
-}
-
 
 /// Standalone range bar line (bar + scale) for the fullscreen footer.
 pub fn build_range_line<'a>(s: &TargetState, ascii: bool, shared_scale: f64, theme: &Theme) -> Line<'a> {
@@ -2258,22 +2220,23 @@ mod window_label_tests {
     fn a_window_says_how_much_it_holds_until_full() {
         let now = Instant::now() + Duration::from_secs(10_000);
         let a = args(&["-w", "1h", "--columns", "recent,bar"]); // no text columns
-        assert_eq!(window_label_text(&fed(12 * 60 + 30, 3_600, now), &a, now), "1h window (12m so far)");
-        assert_eq!(window_label_text(&fed(40, 3_600, now), &a, now), "1h window (39s so far)");
-        assert_eq!(window_label_text(&fed(3_600, 3_600, now), &a, now), "1h window");
+        assert_eq!(window_label_text(&fed(12 * 60 + 30, 3_600, now), &a, now, true), "1h window (12m so far)");
+        assert_eq!(window_label_text(&fed(40, 3_600, now), &a, now, true), "1h window (39s so far)");
+        assert_eq!(window_label_text(&fed(3_600, 3_600, now), &a, now, true), "1h window");
         let q = args(&["-w", "1h", "--columns", "default,quality"]);
-        assert_eq!(window_label_text(&fed(3_600, 3_600, now), &q, now), "1h window \u{00b7} quality 5m");
+        assert_eq!(window_label_text(&fed(3_600, 3_600, now), &q, now, true), "1h window \u{00b7} quality 5m");
         let short = args(&["-w", "2m", "--columns", "default,quality"]);
-        assert_eq!(window_label_text(&fed(120, 120, now), &short, now), "2m window", "a short window is the span");
+        assert_eq!(window_label_text(&fed(120, 120, now), &short, now, true), "2m window", "a short window is the span");
     }
 
     #[test]
     fn lifetime_names_the_span_of_the_text_columns_when_shown() {
         let now = Instant::now();
-        assert_eq!(window_label_text(&[], &args(&["-w", "0", "--columns", "recent,bar"]), now), "lifetime");
-        assert_eq!(window_label_text(&[], &args(&["-w", "0"]), now), "lifetime \u{00b7} quality 5m", "quality is in the default set");
-        assert_eq!(window_label_text(&[], &args(&["-w", "0", "--columns", "default,quality"]), now), "lifetime \u{00b7} quality 5m");
-        assert_eq!(window_label_text(&[], &args(&["-w", "0", "--columns", "status,quality", "--ascii"]), now), "lifetime - status/quality 5m");
+        assert_eq!(window_label_text(&[], &args(&["-w", "0", "--columns", "recent,bar"]), now, true), "lifetime");
+        assert_eq!(window_label_text(&[], &args(&["-w", "0"]), now, true), "lifetime \u{00b7} quality 5m", "quality is in the default set");
+        assert_eq!(window_label_text(&[], &args(&["-w", "0", "--columns", "default,quality"]), now, true), "lifetime \u{00b7} quality 5m");
+        assert_eq!(window_label_text(&[], &args(&["-w", "0", "--columns", "status,quality", "--ascii"]), now, true), "lifetime - status/quality 5m");
+        assert_eq!(window_label_text(&[], &args(&["-w", "0"]), now, false), "lifetime", "no span note while the stat columns are hidden");
     }
 }
 
@@ -2399,7 +2362,7 @@ mod target_key_tests {
     const HOSTS: [&str; 3] = ["1.1.1.1", "8.8.8.8", "9.9.9.9"];
 
     /// Renders the multi-target graph view with the given display order and returns its text lines.
-    fn render_graph(show_headers: bool, sort_order: &[usize], sort_arrows: &[Option<(Instant, bool)>]) -> Vec<String> {
+    fn render_graph(show_headers: bool, show_col_keys: bool, sort_order: &[usize], sort_arrows: &[Option<(Instant, bool)>]) -> Vec<String> {
         let mut argv = vec!["vlat"];
         argv.extend_from_slice(&HOSTS);
         let mut args = Args::parse_from(argv);
@@ -2422,7 +2385,7 @@ mod target_key_tests {
         let ctx = super::super::ViewCtx {
             args: &args, mode_labels: &mode_labels, col_widths: &col_widths, shared_scale: 50.0,
             log_fmt: "", tick: 0, dialog: &dialog, sort_order, sort_arrows,
-            sort_mode: &args.sort, sort_mode_changed: None, frozen: false, show_headers, show_col_keys: false,
+            sort_mode: &args.sort, sort_mode_changed: None, frozen: false, show_headers, show_col_keys,
         };
         let mut terminal = Terminal::new(TestBackend::new(120, 20)).unwrap();
         terminal.draw(|f| draw_fullscreen_multi_ui(f, &states, &ctx, None)).unwrap();
@@ -2434,7 +2397,7 @@ mod target_key_tests {
 
     #[test]
     fn target_rows_lead_with_slot_letters_and_no_key_row() {
-        let lines = render_graph(true, &[2, 0, 1], &[None, None, None]);
+        let lines = render_graph(true, false, &[2, 0, 1], &[None, None, None]);
         // Tags follow the slot, not the display position.
         assert!(lines[0].starts_with("C 9.9.9.9"), "{:?}", lines[0]);
         assert!(lines[1].starts_with("A 1.1.1.1"), "{:?}", lines[1]);
@@ -2446,15 +2409,23 @@ mod target_key_tests {
     #[test]
     fn sort_arrow_moves_beside_the_tag() {
         let arrows = [None, Some((Instant::now(), true)), None];
-        let lines = render_graph(true, &[1, 0, 2], &arrows);
+        let lines = render_graph(true, false, &[1, 0, 2], &arrows);
         assert!(lines[0].starts_with("B▲8.8.8.8"), "{:?}", lines[0]);
         assert!(lines[1].starts_with("A 1.1.1.1"), "{:?}", lines[1]);
     }
 
     #[test]
-    fn key_row_returns_in_sort_order_when_target_rows_are_hidden() {
-        let lines = render_graph(false, &[2, 0, 1], &[None, None, None]);
-        // The window label shares the right end of this row.
-        assert!(lines.last().unwrap().starts_with("C 9.9.9.9   A 1.1.1.1   B 8.8.8.8 "), "{lines:#?}");
+    fn hidden_target_rows_take_the_key_row_and_column_keys_with_them() {
+        let lines = render_graph(false, true, &[2, 0, 1], &[None, None, None]);
+        let text = lines.join("\n");
+        assert!(!text.contains("9.9.9.9") && !text.contains("1.1.1.1"), "no key row while target rows are hidden: {lines:#?}");
+        assert!(!text.contains("addr") && !text.contains("rtt"), "no column keys while target rows are hidden: {lines:#?}");
+    }
+
+    #[test]
+    fn column_keys_show_with_target_rows() {
+        let lines = render_graph(true, true, &[0, 1, 2], &[None, None, None]);
+        assert!(lines[0].contains("addr"), "{lines:#?}");
+        assert!(lines[2].starts_with("A 1.1.1.1"), "{lines:#?}");
     }
 }

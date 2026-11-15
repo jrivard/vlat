@@ -306,6 +306,8 @@ pub fn draw_pong(
     ctx:   &ViewCtx,
 ) {
     let &ViewCtx { args, mode_labels, col_widths, shared_scale, log_fmt, tick, dialog, sort_order, sort_mode, sort_mode_changed, frozen, show_headers, show_col_keys, .. } = ctx;
+    // Column keys label the per-target rows, so they hide along with them.
+    let col_keys = super::col_keys_visible("pong", show_col_keys, show_headers);
     let area = frame.area();
     let n    = states.len() as u16;
 
@@ -320,7 +322,7 @@ pub fn draw_pong(
     let rows_per_target: u16 = if !show_headers { 0 } else { 1 };
 
     let mut constraints: Vec<Constraint> = Vec::new();
-    if show_col_keys {
+    if col_keys {
         constraints.push(Constraint::Length(1));
         constraints.push(Constraint::Length(1));
     }
@@ -332,7 +334,7 @@ pub fn draw_pong(
         .constraints(constraints)
         .split(area);
 
-    let col_keys_offset = if show_col_keys { 2usize } else { 0 };
+    let col_keys_offset = if col_keys { 2usize } else { 0 };
     let header_rows    = (n * rows_per_target) as usize;
     let pong_chunk_idx = col_keys_offset + header_rows;
 
@@ -341,10 +343,10 @@ pub fn draw_pong(
         area,
     );
 
-    let col_key_areas = if show_col_keys { Some((chunks[0], chunks[1])) } else { None };
+    let col_key_areas = if col_keys { Some((chunks[0], chunks[1])) } else { None };
     super::render_screensaver_headers(frame, states, ctx, &chunks[col_keys_offset..], true, col_key_areas);
 
-    render_window_label(frame, area, states, args, sort_mode, sort_mode_changed);
+    render_window_label(frame, area, states, args, sort_mode, sort_mode_changed, !super::dialogs::columns_hidden_by_headers("pong", show_headers));
 
     let pong_area = chunks[pong_chunk_idx];
     let field_w   = pong_area.width;

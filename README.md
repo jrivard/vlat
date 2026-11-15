@@ -207,7 +207,7 @@ While `vlat` is running, you can use the following keys:
 | `k` | Toggle column key header                               |
 | `s` | Cycle multi-target sort: mtr → avg → none → name       |
 | `t` | Change color theme (picker)                            |
-| `i` | Toggle target headers (graph / worm / radar / ekg / bubble / pong views); while hidden, graph / worm / bubble show a lettered target key row |
+| `i` | Toggle target headers (graph / worm / radar / ekg / bubble / pong views); while hidden, their column keys and in-graph target letters are hidden too |
 | `w` | Set stats window (dialog; 0 = lifetime)                |
 | `r` | Re-resolve DNS for all hostnames now                   |
 | `d` | Save current view / theme / sort as defaults           |

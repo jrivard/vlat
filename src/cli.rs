@@ -671,7 +671,7 @@ pub struct Args {
     #[arg(long)]
     pub no_color: bool,
 
-    /// Always show full target labels in fullscreen legend rows (graph/bubble/worm),
+    /// Always show full target labels in fullscreen in-graph labels (graph/worm),
     /// even when they overflow. By default, overlapping labels (e.g. "home-alpha" /
     /// "home-beta") are shortened to fit - shared words are stripped first, then, if
     /// still too wide, each label is cut to the shortest prefix that stays unique.

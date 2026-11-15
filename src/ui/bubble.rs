@@ -26,7 +26,7 @@ use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    widgets::{Block, Paragraph},
+    widgets::Block,
 };
 use crate::cli::SortMode;
 use crate::state::TargetState;
@@ -34,7 +34,7 @@ use super::ViewCtx;
 use super::{
     compute_no_data,
     lerp_rgb,
-    layout::{build_legend_line, render_dialogs, render_window_label},
+    layout::{render_dialogs, render_window_label},
 };
 
 // ── visual constants ──────────────────────────────────────────────────────────
@@ -445,6 +445,7 @@ fn draw_bubble_label(
     by:       f64,
     _ry:      f64,
     label:    &str,
+    tag:      Option<(char, Style)>,
     avg_ms:   f64,
     base_rgb: (u8, u8, u8),
 ) {
@@ -459,8 +460,44 @@ fn draw_bubble_label(
     let center_col = bx.round() as i32;
     let center_row = by.round() as i32;
 
-    write_centered(buf, area, center_col, center_row - 1, label,    text_style);
+    write_centered_tagged(buf, area, center_col, center_row - 1, tag, label, text_style);
     write_centered(buf, area, center_col, center_row,     &ms_str,  text_style);
+}
+
+/// Text width a label takes once its tag letter (and the space after it) is prepended.
+fn tagged_len(label: &str, tag: Option<(char, Style)>) -> usize {
+    label.chars().count() + if tag.is_some() { 2 } else { 0 }
+}
+
+/// The slot's tag letter, styled as a badge (black on the target color), or
+/// `None` when tags are off (the per-target rows that carry them are hidden).
+fn slot_badge(slot: usize, tags: bool, theme: &super::theme::Theme) -> Option<(char, Style)> {
+    if !tags { return None; }
+    let (r, g, b) = theme.target_color(slot);
+    Some((super::slot_tag(slot), Style::default().fg(Color::Black).bg(Color::Rgb(r, g, b)).add_modifier(Modifier::BOLD)))
+}
+
+/// `write_centered` for "T text": the tag letter in its own style, a space,
+/// then `text`, centered as one run.
+fn write_centered_tagged(
+    buf:   &mut ratatui::buffer::Buffer,
+    area:  Rect,
+    cx:    i32,
+    cy:    i32,
+    tag:   Option<(char, Style)>,
+    text:  &str,
+    style: Style,
+) {
+    let Some((ch, tag_style)) = tag else {
+        write_centered(buf, area, cx, cy, text, style);
+        return;
+    };
+    let full = format!("{ch} {text}");
+    write_centered(buf, area, cx, cy, &full, style);
+    let col = cx - (full.chars().count() as i32 / 2);
+    if cy >= 0 && cy < area.height as i32 && col >= 0 && col < area.width as i32 {
+        buf[(area.x + col as u16, area.y + cy as u16)].set_style(tag_style);
+    }
 }
 
 fn write_centered(
@@ -549,6 +586,7 @@ fn label_fits_inside(
 /// edge to hold it - as a compact label placed outside the bubble and tied
 /// back to it with a dotted leader line, the same technique the scatter view
 /// uses for crowded/overlapping points.
+#[allow(clippy::too_many_arguments)]
 fn draw_bubble_labels(
     buf:     &mut ratatui::buffer::Buffer,
     area:    Rect,
@@ -556,6 +594,8 @@ fn draw_bubble_labels(
     states:  &[TargetState],
     live:    &[LiveBubble],
     ascii:   bool,
+    tags:    bool,
+    theme:   &super::theme::Theme,
 ) {
     let leader_ch = if ascii { ":" } else { "\u{250a}" };
 
@@ -580,11 +620,12 @@ fn draw_bubble_labels(
     for b in live {
         let state = &states[b.slot];
         let ms_str = fmt_bubble_ms(b.metric_val);
+        let tag = slot_badge(b.slot, tags, theme);
         if label_fits_inside(
             area.width, max_row, b.bx, b.by, b.ry, b.rx,
-            state.label.chars().count(), ms_str.chars().count(),
+            tagged_len(&state.label, tag), ms_str.chars().count(),
         ) {
-            draw_bubble_label(buf, area, b.bx, b.by, b.ry, &state.label, b.metric_val, b.base_rgb);
+            draw_bubble_label(buf, area, b.bx, b.by, b.ry, &state.label, tag, b.metric_val, b.base_rgb);
         } else {
             overflow.push(b);
         }
@@ -601,7 +642,11 @@ fn draw_bubble_labels(
             _ => state.label.as_str(),
         };
         let ms_str = fmt_bubble_ms(b.metric_val);
-        let text = format!(" {} {}", display, ms_str);
+        let tag = slot_badge(b.slot, tags, theme);
+        let text = match tag {
+            Some((ch, _)) => format!(" {} {} {}", ch, display, ms_str),
+            None          => format!(" {} {}", display, ms_str),
+        };
         let text_len = text.chars().count() as i32;
         if text_len > area.width as i32 { continue; }
 
@@ -651,7 +696,7 @@ fn draw_bubble_labels(
             if c < 0 || c >= area.width as i32 { continue; }
             let cell = &mut buf[(area.x + c as u16, area.y + row as u16)];
             cell.set_symbol(&ch.to_string());
-            cell.set_style(text_style);
+            cell.set_style(match tag { Some((_, ts)) if i == 1 => ts, _ => text_style });
         }
     }
 }
@@ -666,6 +711,8 @@ pub fn draw_bubble(
     ctx:   &ViewCtx,
 ) {
     let &ViewCtx { args, mode_labels, col_widths, log_fmt, tick, dialog, sort_mode, sort_mode_changed, frozen, show_headers, show_col_keys, .. } = ctx;
+    // Column keys label the per-target rows, so they hide along with them.
+    let col_keys = super::col_keys_visible("bubble", show_col_keys, show_headers);
     let area = frame.area();
     {
         let (min_w, min_h) = super::min_size(
@@ -680,10 +727,9 @@ pub fn draw_bubble(
 
     let rows_per_target: u16 = if show_headers { 1 } else { 0 };
     let n = states.len() as u16;
-    let show_legend = super::show_target_key_row(states.len(), show_headers);
 
     let mut constraints: Vec<Constraint> = Vec::new();
-    if show_col_keys {
+    if col_keys {
         constraints.push(Constraint::Length(1));
         constraints.push(Constraint::Length(1));
     }
@@ -691,17 +737,15 @@ pub fn draw_bubble(
         constraints.push(Constraint::Length(1));
     }
     constraints.push(Constraint::Min(1));
-    if show_legend { constraints.push(Constraint::Length(1)); }
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(constraints)
         .split(area);
 
-    let col_keys_offset  = if show_col_keys { 2usize } else { 0 };
+    let col_keys_offset  = if col_keys { 2usize } else { 0 };
     let header_rows      = (n * rows_per_target) as usize;
     let bubble_chunk_idx = col_keys_offset + header_rows;
-    let legend_chunk_idx = col_keys_offset + header_rows + 1;
 
     // Black background for the whole view
     frame.render_widget(
@@ -709,15 +753,10 @@ pub fn draw_bubble(
         area,
     );
 
-    let col_key_areas = if show_col_keys { Some((chunks[0], chunks[1])) } else { None };
+    let col_key_areas = if col_keys { Some((chunks[0], chunks[1])) } else { None };
     super::render_screensaver_headers(frame, states, ctx, &chunks[col_keys_offset..], true, col_key_areas);
 
-    if show_legend {
-        let legend_line = build_legend_line(states, args, ctx.sort_order, chunks[legend_chunk_idx].width as usize);
-        frame.render_widget(Paragraph::new(legend_line), chunks[legend_chunk_idx]);
-    }
-
-    render_window_label(frame, area, states, args, sort_mode, sort_mode_changed);
+    render_window_label(frame, area, states, args, sort_mode, sort_mode_changed, !super::dialogs::columns_hidden_by_headers("bubble", show_headers));
 
     // ── bubble rendering ──────────────────────────────────────────────────────
     let bubble_area = chunks[bubble_chunk_idx];
@@ -780,7 +819,7 @@ pub fn draw_bubble(
     let down_reserved_h = down_reserved_rows(bubble_area.height, down_ry);
     let labels_max_row  = (bubble_area.height.saturating_sub(down_reserved_h)) as i32;
 
-    draw_bubble_labels(buf, bubble_area, labels_max_row, states, &live, args.ascii);
+    draw_bubble_labels(buf, bubble_area, labels_max_row, states, &live, args.ascii, show_headers, &args.theme);
 
     // ── Down targets: flatlined markers pinned to the bottom edge ─────────────
     // A dead target has no meaningful RTT/loss to size or color a bubble by
@@ -823,16 +862,17 @@ pub fn draw_bubble(
 
                 draw_flatline(buf, down_area, bx, rx, (pr, pg, pb));
 
+                let tag = slot_badge(slot, show_headers, &args.theme);
                 let full_label  = format!("{} (down)", states[slot].label);
                 let short_label = states[slot].label.clone();
-                let label: &str = if full_label.chars().count() as f64 <= slot_w { &full_label } else { &short_label };
+                let label: &str = if tagged_len(&full_label, tag) as f64 <= slot_w { &full_label } else { &short_label };
                 let label_style = Style::default()
                     .fg(Color::Rgb(cr, cg, cb))
                     .bg(Color::Black)
                     .add_modifier(Modifier::BOLD);
 
                 let cx = bx.round() as i32;
-                write_centered(buf, down_area, cx, 0, label, label_style);
+                write_centered_tagged(buf, down_area, cx, 0, tag, label, label_style);
             }
         }
     }
@@ -848,5 +888,37 @@ pub fn draw_bubble(
 
     if frozen {
         super::dialogs::draw_frozen_notice(frame, area, args.ascii, &args.theme, tick);
+    }
+}
+
+#[cfg(test)]
+mod tag_tests {
+    use super::*;
+
+    fn row_text(buf: &ratatui::buffer::Buffer, y: u16) -> String {
+        (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
+    #[test]
+    fn tagged_label_puts_badge_letter_first() {
+        let area = Rect::new(0, 0, 20, 1);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        let badge = Style::default().fg(Color::Black).bg(Color::Rgb(1, 2, 3));
+        let text = Style::default().fg(Color::White);
+        write_centered_tagged(&mut buf, area, 10, 0, Some(('B', badge)), "dns", text);
+        // "B dns" is 5 wide, centered on column 10 -> starts at column 8.
+        assert_eq!(row_text(&buf, 0).trim(), "B dns");
+        assert_eq!(buf[(8, 0)].bg, Color::Rgb(1, 2, 3));
+        assert_eq!(buf[(10, 0)].fg, Color::White);
+        assert_eq!(tagged_len("dns", Some(('B', badge))), 5);
+    }
+
+    #[test]
+    fn untagged_label_is_unchanged() {
+        let area = Rect::new(0, 0, 20, 1);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        write_centered_tagged(&mut buf, area, 10, 0, None, "dns", Style::default());
+        assert_eq!(row_text(&buf, 0).trim(), "dns");
+        assert_eq!(tagged_len("dns", None), 3);
     }
 }

@@ -363,6 +363,8 @@ pub fn draw_bars(
     ctx:   &ViewCtx,
 ) {
     let &ViewCtx { args, mode_labels, col_widths, shared_scale, log_fmt, tick, dialog, sort_order, sort_mode, sort_mode_changed, frozen, show_headers, show_col_keys, .. } = ctx;
+    // Column keys label the per-target rows, so they hide along with them.
+    let col_keys = super::col_keys_visible("bars", show_col_keys, show_headers);
     let area = frame.area();
     let n    = states.len() as u16;
     {
@@ -376,7 +378,7 @@ pub fn draw_bars(
     let rows_per_target: u16 = if !show_headers { 0 } else { 1 };
 
     let mut constraints: Vec<Constraint> = Vec::new();
-    if show_col_keys {
+    if col_keys {
         constraints.push(Constraint::Length(1));
         constraints.push(Constraint::Length(1));
     }
@@ -390,7 +392,7 @@ pub fn draw_bars(
         .constraints(constraints)
         .split(area);
 
-    let col_keys_offset = if show_col_keys { 2usize } else { 0 };
+    let col_keys_offset = if col_keys { 2usize } else { 0 };
     let header_rows     = (n * rows_per_target) as usize;
     let body_idx        = col_keys_offset + header_rows;
     let body            = chunks[body_idx];
@@ -398,7 +400,7 @@ pub fn draw_bars(
     // Black background
     frame.render_widget(Block::default().style(Style::default().bg(Color::Black)), area);
 
-    let col_key_areas = if show_col_keys { Some((chunks[0], chunks[1])) } else { None };
+    let col_key_areas = if col_keys { Some((chunks[0], chunks[1])) } else { None };
     super::render_screensaver_headers(frame, states, ctx, &chunks[col_keys_offset..], true, col_key_areas);
 
     // Compute chart dimensions.  Bail if the body area is too small.
@@ -478,7 +480,7 @@ pub fn draw_bars(
         }
     }
 
-    render_window_label(frame, area, states, args, sort_mode, sort_mode_changed);
+    render_window_label(frame, area, states, args, sort_mode, sort_mode_changed, !super::dialogs::columns_hidden_by_headers("bars", show_headers));
     let no_data = compute_no_data(states, &args.extra_stats, &args.hidden_base_stats);
     render_dialogs(frame, area, args, dialog, frozen, sort_mode, states.len(), "bars", tick, !log_fmt.is_empty(), 0, no_data, show_col_keys, show_headers);
 }

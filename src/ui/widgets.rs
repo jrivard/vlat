@@ -2639,6 +2639,7 @@ pub fn render_area_graph_multi(
     args:       &Args,
     scale:      f64,
     sort_order: &[usize],
+    show_tags:  bool,
 ) {
     if area.height < 2 || area.width < 4 || states.is_empty() { return; }
 
@@ -2647,8 +2648,10 @@ pub fn render_area_graph_multi(
     let graph_w    = area.width.saturating_sub(y_label_w) as usize;
     // With several targets, the rightmost column is reserved for the line-end
     // tag letters (see `render_line_end_labels`), so the newest point never
-    // has to be covered by its label.
-    let label_col  = states.len() > 1;
+    // has to be covered by its label. Tag letters only appear alongside the
+    // per-target header rows that carry them (`show_tags`).
+    let captions   = states.len() > 1;
+    let label_col  = captions && show_tags;
     let total_cols = if label_col { graph_w.saturating_sub(1) } else { graph_w };
     let span_cols  = args.graph_span_cols();
     let render_scale    = layout.effective_scale;
@@ -2804,11 +2807,13 @@ pub fn render_area_graph_multi(
 
         f.render_widget(Paragraph::new(lines), Rect::new(area.x, area.y, area.width, area.height));
 
-        if label_col {
+        if captions {
             let origin = (area.x + y_label_w, area.y + c.blank_top_rows as u16);
             let geometry = (area, c.graph_h, cache_key_scale);
-            render_left_captions(f, origin, states, &targets, &paint_order, &c.col_heights, c.graph_h, c.sub_rows, total_cols, geometry, args);
-            render_line_end_labels(f, origin, &targets, &paint_order, &c.col_heights, c.graph_h, c.sub_rows, args);
+            render_left_captions(f, origin, states, &targets, &paint_order, &c.col_heights, c.graph_h, c.sub_rows, total_cols, geometry, label_col, args);
+            if label_col {
+                render_line_end_labels(f, origin, &targets, &paint_order, &c.col_heights, c.graph_h, c.sub_rows, args);
+            }
         }
     });
 
@@ -2999,6 +3004,7 @@ fn render_left_captions(
     sub_rows:    usize,
     total_cols:  usize,
     geometry:    (Rect, usize, u64),
+    show_tags:   bool,
     args:        &Args,
 ) {
     if graph_h < 2 { return; }
@@ -3053,7 +3059,7 @@ fn render_left_captions(
     // their tags; live captions are then placed around them.
     let group_row = drop_label_row(graph_h);
     let mut reserved: Vec<(usize, usize, usize)> = Vec::new();
-    let tag_span = dead_tag_span(targets, &dead_targets(targets, paint_order));
+    let tag_span = if show_tags { dead_tag_span(targets, &dead_targets(targets, paint_order)) } else { None };
     if let Some((x0, x1)) = tag_span { reserved.push((group_row, x0, x1)); }
     let limit = tag_span.map_or(total_cols, |(x0, _)| x0.saturating_sub(1)).min(total_cols);
     let mut spots: Vec<(usize, &str, usize, usize)> = Vec::new(); // (target index, name, row, x)
@@ -3424,7 +3430,7 @@ mod line_label_tests {
         let mut terminal = Terminal::new(TestBackend::new(60, 14)).unwrap();
         terminal.draw(|f| {
             let area = f.area();
-            render_area_graph_multi(f, area, &states, &args, 50.0, sort_order);
+            render_area_graph_multi(f, area, &states, &args, 50.0, sort_order, true);
         }).unwrap();
         terminal.backend().buffer().clone()
     }

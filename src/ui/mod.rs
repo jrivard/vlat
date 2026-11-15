@@ -107,10 +107,11 @@ pub fn slot_tag(slot: usize) -> char {
     }
 }
 
-/// Whether multi-target plot views show the bottom key row: only when the
-/// per-target rows (which carry the tags) are hidden with `i`.
-pub fn show_target_key_row(n_targets: usize, show_headers: bool) -> bool {
-    n_targets > 1 && !show_headers
+/// Whether the column-key lines (names + rule) are drawn in `view`: they're
+/// on with `k`, but views whose columns live in the per-target rows drop them
+/// while `i` hides those rows, since they'd label nothing.
+pub fn col_keys_visible(view: &str, show_col_keys: bool, show_headers: bool) -> bool {
+    show_col_keys && !dialogs::columns_hidden_by_headers(view, show_headers)
 }
 
 /// Puts the slot's tag letter in column 0 of a target row's 2-column lead (the
@@ -949,7 +950,7 @@ pub fn min_size(
     mode_vis: Option<bool>,
 ) -> (u16, u16) {
     let n16 = n as u16;
-    let col_keys_h: u16 = if show_col_keys { 2 } else { 0 };
+    let col_keys_h: u16 = if col_keys_visible(view, show_col_keys, show_headers) { 2 } else { 0 };
     // graph view always uses 1 row per target in its header; screensavers use 2 rows on narrow terminals
     let graph_rpt: u16 = if show_headers { 1 } else { 0 };
     let saver_rpt: u16 = if !show_headers { 0 } else if n <= 1 { 1 } else { 2 };
@@ -957,7 +958,7 @@ pub fn min_size(
     let min_h: u16 = match view {
         "list"  => n16 + col_keys_h,
         "single" => 3, // blank spacer + combined name/address+status line + stats line (history rows self-adjust)
-        "graph" => col_keys_h + n16 * graph_rpt + 5 + show_target_key_row(n, show_headers) as u16,
+        "graph" => col_keys_h + n16 * graph_rpt + 5,
         "worm"  => col_keys_h + n16 * saver_rpt + 4,
         "radar" => col_keys_h + n16 * saver_rpt + 4,
         "pong"  => col_keys_h + n16 * saver_rpt + 4,
@@ -1305,9 +1306,12 @@ mod slot_tag_tests {
     }
 
     #[test]
-    fn key_row_only_for_multi_target_with_rows_hidden() {
-        assert!(show_target_key_row(2, false));
-        assert!(!show_target_key_row(2, true));
-        assert!(!show_target_key_row(1, false));
+    fn column_keys_hide_with_target_rows_in_plot_views() {
+        assert!(col_keys_visible("worm", true, true));
+        assert!(!col_keys_visible("worm", true, false));
+        assert!(!col_keys_visible("graph", true, false));
+        assert!(!col_keys_visible("graph", false, true));
+        // List keeps its keys: its rows can't be hidden.
+        assert!(col_keys_visible("list", true, false));
     }
 }
