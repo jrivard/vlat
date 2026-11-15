@@ -3123,7 +3123,8 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                         let nw_n        = states.len() as u16;
                         let nw_rpt      = show_headers as u16; // draw_worm: one header row per target
                         let nw_keys_h   = 2 * crate::ui::col_keys_visible("worm", show_col_keys, show_headers) as u16;
-                        let nw_snake_h  = h.saturating_sub(nw_n * nw_rpt + nw_keys_h);
+                        let nw_strip_h  = crate::ui::no_data::no_data_row_shown(&states, show_headers) as u16;
+                        let nw_snake_h  = h.saturating_sub(nw_n * nw_rpt + nw_keys_h + nw_strip_h);
                         nw.step(&states, global_max_metric, w / nw_cell_w, nw_snake_h);
                     } else if let Some(ref mut radar) = radar_state {
                         radar.step(&states);
@@ -3148,7 +3149,8 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                         let n = states.len() as u16;
                         let rows_per_target: u16 = if show_headers { 1 } else { 0 };
                         let col_keys_h: u16 = if crate::ui::col_keys_visible("bubble", show_col_keys, show_headers) { 2 } else { 0 };
-                        let bubble_h = bh.saturating_sub(n * rows_per_target + col_keys_h);
+                        let strip_h: u16 = crate::ui::no_data::no_data_row_shown(&states, show_headers) as u16;
+                        let bubble_h = bh.saturating_sub(n * rows_per_target + col_keys_h + strip_h);
                         bb.step(&states, global_max_jitter, bw, bubble_h, &sort_mode, args.is_window());
                     } else if let Some(ref mut sc) = scatter_state {
                         sc.step(&states, args.is_window());

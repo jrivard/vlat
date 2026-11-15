@@ -2659,7 +2659,8 @@ pub fn render_area_graph_multi(
 
     let mut targets: Vec<MultiTargetInfo> = Vec::new();
     for (ti, s) in states.iter().enumerate() {
-        if s.waiting { continue; }
+        // Waiting and no-data targets aren't plotted (see `no_data`).
+        if super::no_data::hidden_from_plot(s) { continue; }
         let (cr, cg, cb) = args.theme.target_color(ti);
         {
             let mut cache = s.graph_col_cache.borrow_mut();

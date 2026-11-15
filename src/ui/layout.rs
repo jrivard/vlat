@@ -165,15 +165,20 @@ pub fn window_label_text(states: &[TargetState], args: &Args, now: Instant, stat
     format!("{base} {dot} {which} {}", fmt_window_secs(GRADE_SPAN_SECS))
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn render_window_label(f: &mut Frame, area: Rect, states: &[TargetState], args: &Args, sort_mode: &SortMode, sort_mode_changed: Option<Instant>, stat_cols_shown: bool) {
-    let theme = &args.theme;
-    let label_text = window_label_text(states, args, Instant::now(), stat_cols_shown);
+/// Where `render_window_label` draws: the bottom row of `area`, at the left
+/// for lifetime stats, else right-aligned. Other footer content (the no-data
+/// strip) uses this to stay clear of it.
+pub fn window_label_rect(area: Rect, states: &[TargetState], args: &Args, sort_mode: &SortMode, stat_cols_shown: bool) -> Rect {
+    let w = (window_label_text(states, args, Instant::now(), stat_cols_shown).chars().count()
+        + sort_tag(sort_mode).chars().count()) as u16;
+    let y = area.y + area.height.saturating_sub(1);
+    let x = if args.window == 0 { area.x + 1 } else { area.x + area.width.saturating_sub(w + 1) };
+    Rect::new(x, y, w.min(area.width), 1)
+}
 
-    let label_style = Style::default().fg(theme.c(theme.uptime));
-
-    // Sort indicator: "  ⇅a" for name, "  ⇅▲" for mtr, empty for unsorted.
-    let sort_tag: &str = match sort_mode {
+/// Sort indicator after the window label: "  ⇅a" for name, "  ⇅▲" for mtr, empty for unsorted.
+fn sort_tag(sort_mode: &SortMode) -> &'static str {
+    match sort_mode {
         SortMode::None   => "",
         SortMode::Name   => "  \u{21c5}a",                        // ⇅a
         SortMode::Mtr    => "  \u{21c5}\u{25b2}",                 // ⇅▲
@@ -191,7 +196,15 @@ pub fn render_window_label(f: &mut Frame, area: Rect, states: &[TargetState], ar
         SortMode::Srtt   => "  \u{21c5}\u{03c4}",                 // ⇅τ
         SortMode::Seen   => "  \u{21c5}\u{2191}",                 // ⇅↑
         SortMode::Lost   => "  \u{21c5}\u{2193}",                 // ⇅↓
-    };
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_window_label(f: &mut Frame, area: Rect, states: &[TargetState], args: &Args, sort_mode: &SortMode, sort_mode_changed: Option<Instant>, stat_cols_shown: bool) {
+    let theme = &args.theme;
+    let label_text = window_label_text(states, args, Instant::now(), stat_cols_shown);
+    let label_style = Style::default().fg(theme.c(theme.uptime));
+    let sort_tag = sort_tag(sort_mode);
 
     // Highlight briefly after a mode change, then fade to the same grey as the window span.
     let recently_changed = sort_mode_changed
@@ -204,15 +217,7 @@ pub fn render_window_label(f: &mut Frame, area: Rect, states: &[TargetState], ar
     };
 
     let tag_chars = sort_tag.chars().count();
-    let w: u16 = (tag_chars + label_text.chars().count()) as u16;
-
-    let y = area.y + area.height.saturating_sub(1);
-    let x = if args.window == 0 {
-        area.x + 1
-    } else {
-        area.x + area.width.saturating_sub(w + 1)
-    };
-    let rect = Rect::new(x, y, w.min(area.width), 1);
+    let rect = window_label_rect(area, states, args, sort_mode, stat_cols_shown);
 
     if tag_chars > 0 {
         let line = Line::from(vec![
@@ -1400,6 +1405,8 @@ pub fn draw_fullscreen_multi_ui(f: &mut Frame, states: &[TargetState], ctx: &Vie
     }
     constraints.push(Constraint::Min(4));    // graph
     constraints.push(Constraint::Length(1)); // x-axis
+    let no_data_row = super::no_data::no_data_row_shown(states, show_headers);
+    if no_data_row { constraints.push(Constraint::Length(1)); } // no-data strip
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -1526,6 +1533,11 @@ pub fn draw_fullscreen_multi_ui(f: &mut Frame, states: &[TargetState], ctx: &Vie
         let any_calibrating = states.iter().any(|s| s.calibrating.map(|(_, u)| u > now).unwrap_or(false));
         if !any_calibrating {
             render_area_graph_multi(f, chunks[graph_chunk_idx], states, args, shared_scale, sort_order, show_headers);
+            if no_data_row {
+                let stat_cols_shown = !super::dialogs::columns_hidden_by_headers("graph", show_headers);
+                let avoid = args.is_window().then(|| window_label_rect(area, states, args, sort_mode, stat_cols_shown));
+                super::no_data::render_no_data_row(f.buffer_mut(), chunks[xaxis_chunk_idx + 1], states, sort_order, args, tick, avoid);
+            }
         }
 
         // Calibrating overlay - shown while any target is still in its calibration window.

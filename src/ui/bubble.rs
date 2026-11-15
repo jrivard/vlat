@@ -103,8 +103,8 @@ impl BubbleState {
         }
         self.bubbles.truncate(n);
 
-        let down: Vec<bool> = states.iter().map(|s| !s.waiting && bubble_is_down(s)).collect();
-        let down_count = down.iter().filter(|&&d| d).count() as u16;
+        // Waiting and no-data targets have no bubble (see `no_data`) and sit out the physics.
+        let down: Vec<bool> = states.iter().map(super::no_data::hidden_from_plot).collect();
 
         let global_max_metric = states.iter().zip(&down)
             .filter(|(s, &d)| !s.waiting && !d)
@@ -113,12 +113,7 @@ impl BubbleState {
             .max(1.0);
 
         let wf = w as f64;
-        // Down targets are pinned to fixed half-bubble markers at the bottom
-        // (drawn separately, outside the physics sim) rather than floating -
-        // reserve that strip so a real bubble can't drift onto it.
-        let ry_down    = down_marker_ry(w, h, down_count);
-        let reserved_h = down_reserved_rows(h, ry_down);
-        let hf = (h as f64 - reserved_h as f64).max(1.0);
+        let hf = (h as f64).max(1.0);
 
         // Per-bubble position and radius update
         for (i, bubble) in self.bubbles.iter_mut().enumerate() {
@@ -231,46 +226,6 @@ fn rotate(vx: f64, vy: f64, angle: f64) -> (f64, f64) {
 fn rng_next(s: &mut u64) -> u64 {
     *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
     *s >> 17
-}
-
-/// True when a target has no successful pings in the current window (all
-/// recent probes were drops). Its RTT/loss metric is meaningless (win_avg
-/// reads 0.0, the "best" possible value), so it can't be sized/colored as a
-/// normal bubble - it's drawn as a fixed half-bubble marker instead. Mirrors
-/// the "all_dropping" check used by the radar/worm/scatter views.
-fn bubble_is_down(state: &TargetState) -> bool {
-    state.window.is_empty() && state.win_drops > 0
-}
-
-// Bounds for the down-target flatline marker's half-width scale: a few
-// columns wide rather than the full MIN_RY..MAX_RY range live bubbles use,
-// since size here is just a fixed viewport-scaled presentation, not
-// data-driven. Kept smaller than live bubbles get to (~half the max) so a
-// row of dead targets reads as a subdued strip along the floor, not a
-// competing row of bubbles.
-const DOWN_MIN_RY: f64 = 1.0;
-const DOWN_MAX_RY: f64 = 3.0;
-
-/// Half-width scale (in bubble-radius units, for consistency with live
-/// bubble sizing) for down-target flatline markers - scaled gently with the
-/// viewport but capped so they can't crowd out the live play area, and
-/// shrunk to fit side-by-side with the other down markers across the
-/// available width.
-fn down_marker_ry(w: u16, h: u16, n_down: u16) -> f64 {
-    if n_down == 0 { return 0.0; }
-    let pref       = (h as f64 * 0.12).clamp(DOWN_MIN_RY, DOWN_MAX_RY);
-    let slot_w     = w as f64 / n_down as f64;
-    let max_rx     = (slot_w * 0.8) / 2.0;
-    let max_ry_fit = (max_rx / ASPECT).max(1.0);
-    pref.min(max_ry_fit)
-}
-
-/// Rows reserved at the bottom of the bubble area for down-target markers:
-/// the flatline (bottom row) plus one clear row above it for the target's
-/// label.
-fn down_reserved_rows(h: u16, ry: f64) -> u16 {
-    if ry <= 0.0 { return 0; }
-    (ry.ceil() as u16 + 1).min(h.saturating_sub(2).max(1))
 }
 
 fn jitter_norm(state: Option<&TargetState>, global_max_jitter: f64) -> f64 {
@@ -394,43 +349,6 @@ fn draw_oval(
             cell.set_symbol(&braille_ch.to_string());
             cell.set_style(Style::default().fg(Color::Rgb(r, g, b)).bg(Color::Black));
         }
-    }
-}
-
-/// Draw a flatlined marker for a down target: a flat baseline of bottom-row
-/// braille dots with a small upward tick at its centre, like a heart monitor
-/// with no pulse. Drawn on the bottom row of `area`, spanning `rx` columns
-/// either side of `bx`.
-fn draw_flatline(
-    buf:      &mut ratatui::buffer::Buffer,
-    area:     Rect,
-    bx:       f64,
-    rx:       f64,
-    base_rgb: (u8, u8, u8),
-) {
-    if area.height == 0 { return; }
-    let row = area.height - 1;
-
-    let col_lo = (bx - rx).floor().max(0.0) as i32;
-    let col_hi = ((bx + rx).ceil() as i32).min(area.width as i32 - 1);
-    if col_hi < col_lo { return; }
-    let mid = (col_lo + col_hi) / 2;
-
-    const BASELINE: u8 = 0x40 | 0x80;           // bottom-row dots, both columns
-    const BLIP:     u8 = 0x01 | 0x08 | BASELINE; // + top-row dots for the tick
-
-    let style = Style::default()
-        .fg(Color::Rgb(base_rgb.0, base_rgb.1, base_rgb.2))
-        .bg(Color::Black);
-
-    for tc_col in col_lo..=col_hi {
-        let screen_col = area.x as i32 + tc_col;
-        if screen_col < area.x as i32 || screen_col >= (area.x + area.width) as i32 { continue; }
-        let bits = if tc_col == mid { BLIP } else { BASELINE };
-        let ch = char::from_u32(0x2800u32 + bits as u32).unwrap_or('⣀');
-        let cell = &mut buf[(screen_col as u16, area.y + row)];
-        cell.set_symbol(&ch.to_string());
-        cell.set_style(style);
     }
 }
 
@@ -737,6 +655,8 @@ pub fn draw_bubble(
         constraints.push(Constraint::Length(1));
     }
     constraints.push(Constraint::Min(1));
+    let no_data_row = super::no_data::no_data_row_shown(states, show_headers);
+    if no_data_row { constraints.push(Constraint::Length(1)); } // no-data strip
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -756,14 +676,19 @@ pub fn draw_bubble(
     let col_key_areas = if col_keys { Some((chunks[0], chunks[1])) } else { None };
     super::render_screensaver_headers(frame, states, ctx, &chunks[col_keys_offset..], true, col_key_areas);
 
-    render_window_label(frame, area, states, args, sort_mode, sort_mode_changed, !super::dialogs::columns_hidden_by_headers("bubble", show_headers));
+    let stat_cols_shown = !super::dialogs::columns_hidden_by_headers("bubble", show_headers);
+    render_window_label(frame, area, states, args, sort_mode, sort_mode_changed, stat_cols_shown);
+    if no_data_row {
+        let avoid = super::layout::window_label_rect(area, states, args, sort_mode, stat_cols_shown);
+        super::no_data::render_no_data_row(frame.buffer_mut(), chunks[bubble_chunk_idx + 1], states, ctx.sort_order, args, tick, Some(avoid));
+    }
 
     // ── bubble rendering ──────────────────────────────────────────────────────
     let bubble_area = chunks[bubble_chunk_idx];
     if bubble_area.width == 0 || bubble_area.height == 0 { return; }
 
     let global_max_metric = states.iter()
-        .filter(|s| !s.waiting && !bubble_is_down(s))
+        .filter(|s| !super::no_data::hidden_from_plot(s))
         .map(|s| bubble_metric(s, sort_mode, args.is_window()))
         .fold(0.0f64, f64::max)
         .max(1.0);
@@ -775,21 +700,18 @@ pub fn draw_bubble(
 
     let buf = frame.buffer_mut();
 
-    // Render all bubbles — no specific z-ordering needed. Down targets have
-    // no meaningful RTT/loss to size or color a bubble by (win_avg reads 0.0,
-    // the "best" possible value) and don't float in the physics sim - they
-    // get a fixed marker below instead.
-    let mut down_slots: Vec<usize> = Vec::new();
+    // Render all bubbles — no specific z-ordering needed. Waiting and no-data
+    // targets have no meaningful RTT/loss to size or color a bubble by
+    // (win_avg reads 0.0, the "best" possible value), so they get no bubble
+    // at all: their stats row, or the no-data strip while rows are hidden,
+    // says they're down.
     let mut live: Vec<LiveBubble> = Vec::new();
     for (i, bubble) in bs.bubbles.iter().enumerate() {
         if i >= states.len() { break; }
         let state = &states[i];
-        if !state.waiting && bubble_is_down(state) {
-            down_slots.push(i);
-            continue;
-        }
+        if super::no_data::hidden_from_plot(state) { continue; }
 
-        let metric_val = if state.waiting { 0.0 } else { bubble_metric(state, sort_mode, args.is_window()) };
+        let metric_val = bubble_metric(state, sort_mode, args.is_window());
         let norm = (metric_val / global_max_metric).clamp(0.0, 1.0);
         let base_rgb = args.theme.gradient_color(norm);
 
@@ -801,81 +723,16 @@ pub fn draw_bubble(
             state.drop_flash,
         );
 
-        if !state.waiting {
-            live.push(LiveBubble {
-                slot: i,
-                bx: bubble.x, by: bubble.y,
-                ry: bubble.display_ry, rx: bubble.display_ry * ASPECT,
-                base_rgb, metric_val,
-            });
-        }
+        live.push(LiveBubble {
+            slot: i,
+            bx: bubble.x, by: bubble.y,
+            ry: bubble.display_ry, rx: bubble.display_ry * ASPECT,
+            base_rgb, metric_val,
+        });
     }
 
-    // Rows reserved at the bottom for down-target markers, computed once here
-    // so both the label pass (which must not place anything on top of them)
-    // and the marker-drawing block below share the same numbers.
-    let down_n  = down_slots.len() as u16;
-    let down_ry = down_marker_ry(bubble_area.width, bubble_area.height, down_n);
-    let down_reserved_h = down_reserved_rows(bubble_area.height, down_ry);
-    let labels_max_row  = (bubble_area.height.saturating_sub(down_reserved_h)) as i32;
-
+    let labels_max_row = bubble_area.height as i32;
     draw_bubble_labels(buf, bubble_area, labels_max_row, states, &live, args.ascii, show_headers, &args.theme);
-
-    // ── Down targets: flatlined markers pinned to the bottom edge ─────────────
-    // A dead target has no meaningful RTT/loss to size or color a bubble by
-    // (win_avg reads 0.0, the "best" possible value) and doesn't float in the
-    // physics sim - it gets a fixed marker instead: a flat braille baseline
-    // with a small centre tick, evoking a heart monitor with no pulse. (A
-    // static "X" glyph, and a filled dome shape, were both tried first and
-    // dropped - too small at these sizes to read as anything but a blob.)
-    // The marker's width still scales with `down_marker_ry` so it grows a
-    // little on larger viewports, and its color slowly breathes toward
-    // drop-red and back - same ~8s/1Hz triangle cadence as the "waiting"
-    // breathing text in layout.rs, just applied to color instead of brightness.
-    if !down_slots.is_empty() && bubble_area.width > 0 && bubble_area.height > 0 {
-        let n  = down_n;
-        let ry = down_ry;
-        let reserved_h = down_reserved_h;
-
-        if reserved_h > 0 {
-            let down_area = Rect {
-                x:      bubble_area.x,
-                y:      bubble_area.y + bubble_area.height - reserved_h,
-                width:  bubble_area.width,
-                height: reserved_h,
-            };
-            let rx     = ry * ASPECT;
-            let slot_w = down_area.width as f64 / n as f64;
-
-            let pulse_step: u8 = match tick % 8 {
-                0 | 7 => 0,
-                1 | 6 => 1,
-                2 | 5 => 2,
-                _     => 3,
-            };
-            let pulse_t = pulse_step as f64 / 3.0 * 0.75; // 0.0..0.75 blend toward drop_rgb
-
-            for (idx, &slot) in down_slots.iter().enumerate() {
-                let bx = (idx as f64 + 0.5) * slot_w;
-                let (cr, cg, cb) = args.theme.target_color(slot);
-                let (pr, pg, pb) = lerp_rgb(cr, cg, cb, drop_rgb.0, drop_rgb.1, drop_rgb.2, pulse_t);
-
-                draw_flatline(buf, down_area, bx, rx, (pr, pg, pb));
-
-                let tag = slot_badge(slot, show_headers, &args.theme);
-                let full_label  = format!("{} (down)", states[slot].label);
-                let short_label = states[slot].label.clone();
-                let label: &str = if tagged_len(&full_label, tag) as f64 <= slot_w { &full_label } else { &short_label };
-                let label_style = Style::default()
-                    .fg(Color::Rgb(cr, cg, cb))
-                    .bg(Color::Black)
-                    .add_modifier(Modifier::BOLD);
-
-                let cx = bx.round() as i32;
-                write_centered_tagged(buf, down_area, cx, 0, tag, label, label_style);
-            }
-        }
-    }
 
     // ── dialog overlay ────────────────────────────────────────────────────────
     let space_hidden = 0u32;

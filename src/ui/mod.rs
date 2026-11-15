@@ -22,6 +22,7 @@ pub mod labels;
 pub mod layout;
 pub mod cards;
 pub mod logo;
+pub mod no_data;
 pub mod pong;
 pub mod radar;
 pub mod scatter;

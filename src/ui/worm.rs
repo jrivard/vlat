@@ -297,6 +297,8 @@ pub fn draw_worm(
         constraints.push(Constraint::Length(1));
     }
     constraints.push(Constraint::Min(1));
+    let no_data_row = super::no_data::no_data_row_shown(states, show_headers);
+    if no_data_row { constraints.push(Constraint::Length(1)); } // no-data strip
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -315,10 +317,15 @@ pub fn draw_worm(
     let col_key_areas = if col_keys { Some((chunks[0], chunks[1])) } else { None };
     super::render_screensaver_headers(frame, states, ctx, &chunks[col_keys_offset..], true, col_key_areas);
 
-    render_window_label(frame, area, states, args, sort_mode, sort_mode_changed, !super::dialogs::columns_hidden_by_headers("worm", show_headers));
+    let stat_cols_shown = !super::dialogs::columns_hidden_by_headers("worm", show_headers);
+    render_window_label(frame, area, states, args, sort_mode, sort_mode_changed, stat_cols_shown);
 
     let worm_area = chunks[worm_chunk_idx];
     let buf = frame.buffer_mut();
+    if no_data_row {
+        let avoid = super::layout::window_label_rect(area, states, args, sort_mode, stat_cols_shown);
+        super::no_data::render_no_data_row(buf, chunks[worm_chunk_idx + 1], states, ctx.sort_order, args, tick, Some(avoid));
+    }
 
     // Wall-clock milliseconds, captured once per frame.
     let now_ms = {
@@ -334,6 +341,8 @@ pub fn draw_worm(
     if !any_calibrating {
         for (i, worm) in nw.worms.iter().enumerate() {
             if i >= states.len() { break; }
+            // Waiting and no-data targets aren't drawn (see `no_data`).
+            if super::no_data::hidden_from_plot(&states[i]) { continue; }
             let (r, g, b)  = args.theme.target_color(i);
             let drop_segs  = states[i].drop_flash as usize;
             let length     = worm.segs.len();
@@ -592,7 +601,7 @@ fn draw_worm_labels(
     let n = nw.worms.len().min(states.len());
     // (slot, head x, head y, dir) for each drawn worm.
     let heads: Vec<(usize, u16, u16, u8)> = (0..n)
-        .filter(|&i| nw.worms[i].segs.len() >= WORM_MIN_LEN)
+        .filter(|&i| nw.worms[i].segs.len() >= WORM_MIN_LEN && !super::no_data::hidden_from_plot(&states[i]))
         .filter_map(|i| {
             let w = &nw.worms[i];
             let &(x, y) = w.segs.front()?;
