@@ -114,9 +114,68 @@ pub fn condense_for_width(labels: &[&str], budget: usize, per_label_overhead: us
     shortest_unique_prefixes(&stripped, 1)
 }
 
+/// Display form of a target label: drops a trailing " (...)" annotation.
+pub fn display_label(label: &str) -> &str {
+    match label.rfind(" (") {
+        Some(pos) if label.ends_with(')') => &label[..pos],
+        _ => label,
+    }
+}
+
+/// Longest prefix of `label` made of whole word-tokens that fits `max_w`
+/// chars (`home-router` -> `home` at 8), or `None` if even the first doesn't.
+fn whole_token_prefix(label: &str, max_w: usize) -> Option<String> {
+    word_spans(label).iter()
+        .map(|&(_, end)| &label[..end])
+        .take_while(|p| p.chars().count() <= max_w)
+        .last()
+        .map(str::to_string)
+}
+
+/// Condenses `labels` so each one fits within `max_w` columns, least
+/// destructive first: full labels -> common-affix-stripped -> over-long ones
+/// cut at a word boundary (if that keeps them unique) -> cut to `max_w`
+/// chars, kept longer only where needed to stay unique.
+pub fn condense_each(labels: &[&str], max_w: usize) -> Vec<String> {
+    let fits = |items: &[String]| items.iter().all(|s| s.chars().count() <= max_w);
+    let full: Vec<String> = labels.iter().map(|s| s.to_string()).collect();
+    if fits(&full) { return full; }
+    let stripped = strip_common_affixes(labels);
+    if fits(&stripped) { return stripped; }
+    let by_word: Option<Vec<String>> = stripped.iter()
+        .map(|l| if l.chars().count() <= max_w { Some(l.clone()) } else { whole_token_prefix(l, max_w) })
+        .collect();
+    if let Some(words) = by_word {
+        let unique = words.iter().enumerate().all(|(i, a)| words.iter().skip(i + 1).all(|b| a != b));
+        if unique { return words; }
+    }
+    shortest_unique_prefixes(&stripped, max_w)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn condense_each_caps_per_label() {
+        assert_eq!(condense_each(&["gw", "1.1.1.1"], 8), vec!["gw", "1.1.1.1"]);
+        assert_eq!(condense_each(&["home-router", "office-router"], 8), vec!["home", "office"]);
+        assert_eq!(condense_each(&["alphabetical", "alphanumeric"], 8), vec!["alphabet", "alphanum"]);
+        // Cut at a word boundary when the shared word can't be stripped from every label.
+        assert_eq!(condense_each(&["home-router", "office-router", "1.1.1.1"], 8), vec!["home", "office", "1.1.1.1"]);
+        // ...unless that would make two labels identical
+        // (both would be "east"), so it falls back to unique prefixes.
+        assert_eq!(condense_each(&["east-zone-a", "east-zone-b", "gw"], 8), vec!["east-zone-a", "east-zone-b", "gw"]);
+        // Kept past the cap only as far as uniqueness needs.
+        assert_eq!(condense_each(&["server-number-1", "server-number-2"], 4), vec!["1", "2"]);
+        assert_eq!(condense_each(&["abcdefgh1", "abcdefgh2"], 4), vec!["abcdefgh1", "abcdefgh2"]);
+    }
+
+    #[test]
+    fn display_label_drops_trailing_annotation() {
+        assert_eq!(display_label("gw (192.168.1.1)"), "gw");
+        assert_eq!(display_label("plain"), "plain");
+    }
 
     #[test]
     fn strips_common_prefix_word() {

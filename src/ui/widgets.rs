@@ -2577,10 +2577,21 @@ fn render_multi_column(
     // column.  Positions come from `heights` (data only), so the layering never
     // moves a line - it only decides which line wins a shared cell and which
     // crossover glyph is drawn.
+    // Several targets dropping in one column share the single ▾ cell, so the
+    // marker cycles through them by absolute sample column: each dead target
+    // gets an equal share of the ▾ row, and a cell keeps its color as the
+    // graph scrolls (drain counts advance in lockstep across targets).
+    let droppers: Vec<usize> = paint_order.iter().copied().filter(|&ti| drops[ti]).collect();
+    let drop_owner = (!droppers.is_empty()).then(|| {
+        let abs_col = targets.first().map_or(0, |t| t.drain_count) + col;
+        droppers[abs_col % droppers.len()]
+    });
+
     let mut spans: Vec<Option<Span<'static>>> = vec![None; graph_h];
     for &ti in paint_order {
         let t = &targets[ti];
         if drops[ti] {
+            if drop_owner != Some(ti) { continue; }
             let span = if ascii {
                 Span::styled("v", Style::default().fg(t.line_color).add_modifier(Modifier::BOLD))
             } else {
@@ -2634,7 +2645,11 @@ pub fn render_area_graph_multi(
     let y_label_w: u16 = 9;
     let layout     = compute_graph_layout(area, states, scale);
     let graph_w    = area.width.saturating_sub(y_label_w) as usize;
-    let total_cols = graph_w;
+    // With several targets, the rightmost column is reserved for the line-end
+    // tag letters (see `render_line_end_labels`), so the newest point never
+    // has to be covered by its label.
+    let label_col  = states.len() > 1;
+    let total_cols = if label_col { graph_w.saturating_sub(1) } else { graph_w };
     let span_cols  = args.graph_span_cols();
     let render_scale    = layout.effective_scale;
     let cache_key_scale = render_scale.to_bits();
@@ -2788,9 +2803,312 @@ pub fn render_area_graph_multi(
         }
 
         f.render_widget(Paragraph::new(lines), Rect::new(area.x, area.y, area.width, area.height));
+
+        if label_col {
+            let origin = (area.x + y_label_w, area.y + c.blank_top_rows as u16);
+            let geometry = (area, c.graph_h, cache_key_scale);
+            render_left_captions(f, origin, states, &targets, &paint_order, &c.col_heights, c.graph_h, c.sub_rows, total_cols, geometry, args);
+            render_line_end_labels(f, origin, &targets, &paint_order, &c.col_heights, c.graph_h, c.sub_rows, args);
+        }
     });
 
     render_scale_annotation(f, area, &layout, args, states, y_label_w);
+}
+
+/// Writes each target's tag letter one column right of its newest point, on
+/// that point's row (`origin` is the top-left graph cell, right of the y-axis).
+/// A drop at the newest column labels the bottom row, where its marker sits.
+/// Colliding labels are spread out by `place_line_labels`, front-most first.
+#[allow(clippy::too_many_arguments)]
+fn render_line_end_labels(
+    f:           &mut Frame,
+    origin:      (u16, u16),
+    targets:     &[MultiTargetInfo],
+    paint_order: &[usize],
+    col_heights: &[Vec<Option<usize>>],
+    graph_h:     usize,
+    sub_rows:    usize,
+    args:        &Args,
+) {
+    if graph_h == 0 { return; }
+    let sub_to_cell = |sr: usize| -> usize {
+        if sr >= sub_rows { 0 } else { graph_h - 1 - sr / 4 }
+    };
+    // Front-most (painted last) gets first pick of its row.
+    let mut ends: Vec<(usize, usize)> = Vec::new(); // (target index, desired row)
+    for &ti in paint_order.iter().rev() {
+        let t = &targets[ti];
+        if t.data_end == 0 || is_dead(t) { continue; }
+        let col = t.data_end - 1;
+        let row = match col_heights.get(col).and_then(|h| h.get(ti)).copied().flatten() {
+            Some(h) if h > 0 => sub_to_cell(h - 1),
+            Some(_)          => graph_h - 1,
+            None             => continue,
+        };
+        ends.push((ti, row));
+    }
+    let dead = dead_targets(targets, paint_order);
+    let group_row = drop_label_row(graph_h);
+    let reserved: Vec<usize> = if dead.is_empty() { Vec::new() } else { vec![group_row] };
+    let desired: Vec<usize> = ends.iter().map(|&(_, r)| r).collect();
+    let placed = place_line_labels(&desired, graph_h, &reserved);
+    let buf = f.buffer_mut();
+    let mut put_tag = |ti: usize, x: usize, row: usize| {
+        let t = &targets[ti];
+        let (cr, cg, cb) = args.theme.target_color(t.state_idx);
+        let style = Style::default().fg(Color::Rgb(cr, cg, cb)).add_modifier(Modifier::BOLD);
+        put_cell(buf, origin, x, row, &super::slot_tag(t.state_idx).to_string(), style);
+    };
+    for (&(ti, _), row) in ends.iter().zip(placed) {
+        let Some(row) = row else { continue };
+        put_tag(ti, targets[ti].data_end, row);
+    }
+    // Dead targets' tags share one row, side by side, ending in the label column.
+    if let Some((x0, x1)) = dead_tag_span(targets, &dead) {
+        for (x, &ti) in (x0..x1).zip(&dead) { put_tag(ti, x, group_row); }
+    }
+}
+
+/// Writes `symbol` into the buffer cell at (`x`, `row`) relative to `origin`, if on screen.
+fn put_cell(buf: &mut ratatui::buffer::Buffer, origin: (u16, u16), x: usize, row: usize, symbol: &str, style: Style) {
+    let pos = ratatui::layout::Position::new(origin.0 + x as u16, origin.1 + row as u16);
+    if !buf.area.contains(pos) { return; }
+    let cell = &mut buf[pos];
+    cell.set_symbol(symbol);
+    cell.set_style(style);
+}
+
+/// A target whose newest sample is a drop (its line has ended on the ▾ row).
+fn is_dead(t: &MultiTargetInfo) -> bool {
+    t.data_end > 0 && t.samples.get(t.data_end - 1).is_some_and(|s| s.is_drop())
+}
+
+/// Dead targets, front-most first.
+fn dead_targets(targets: &[MultiTargetInfo], paint_order: &[usize]) -> Vec<usize> {
+    paint_order.iter().rev().copied().filter(|&ti| is_dead(&targets[ti])).collect()
+}
+
+/// Graph rows needed before dead targets' labels move from the ▾ row up to
+/// the row above it, so they don't cover the ▾ markers.
+const DROP_LABELS_ABOVE_MIN_ROWS: usize = 6;
+
+/// Row shared by all dead targets' labels (tags and captions).
+fn drop_label_row(graph_h: usize) -> usize {
+    if graph_h >= DROP_LABELS_ABOVE_MIN_ROWS { graph_h - 2 } else { graph_h.saturating_sub(1) }
+}
+
+/// Half-open column span of the dead targets' tags: one letter each, side by
+/// side, the last one in the label column right of the newest dead point.
+/// Tags that would run off the left edge are dropped from the back.
+fn dead_tag_span(targets: &[MultiTargetInfo], dead: &[usize]) -> Option<(usize, usize)> {
+    let right = dead.iter().map(|&ti| targets[ti].data_end).max()?;
+    let n = dead.len().min(right + 1);
+    Some((right + 1 - n, right + 1))
+}
+
+/// Widest a left-edge caption gets before names are shortened (see `labels::condense_each`).
+const CAPTION_MAX_W: usize = 8;
+/// How long a line's left-edge row must hold before its caption follows it,
+/// so scrolling data doesn't make the caption hop on every new sample.
+const CAPTION_SETTLE: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Row a caption is anchored to (its line's row), with a pending move.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CaptionAnchor {
+    shown:   usize,
+    pending: Option<(usize, Instant)>,
+}
+
+/// Caption anchors by target slot, carried between frames for `settle_anchor`.
+/// `geometry` is (graph area, graph rows, scale bits): when any of it changes,
+/// every line's rows legitimately move at once, so the anchors start over.
+#[derive(Default)]
+struct CaptionAnchors {
+    geometry: Option<(Rect, usize, u64)>,
+    by_slot:  std::collections::HashMap<usize, CaptionAnchor>,
+}
+
+thread_local! {
+    static CAPTION_ANCHORS: RefCell<CaptionAnchors> = RefCell::new(CaptionAnchors::default());
+}
+
+/// Moves the anchor to `want` only once `want` has held for `CAPTION_SETTLE`.
+/// The first sighting (no previous anchor) is taken immediately.
+fn settle_anchor(prev: Option<CaptionAnchor>, want: usize, now: Instant) -> CaptionAnchor {
+    match prev {
+        None => CaptionAnchor { shown: want, pending: None },
+        Some(a) if a.shown == want => CaptionAnchor { shown: want, pending: None },
+        Some(a) => match a.pending {
+            Some((row, since)) if row == want => {
+                if now.duration_since(since) >= CAPTION_SETTLE {
+                    CaptionAnchor { shown: want, pending: None }
+                } else {
+                    a
+                }
+            }
+            _ => CaptionAnchor { shown: a.shown, pending: Some((want, now)) },
+        },
+    }
+}
+
+/// Places captions of the given widths, in priority order (index 0 first),
+/// each anchored to a line row: in the row above the line (below it on the top
+/// row), else the other side, else shifted right past captions already on
+/// either row. `reserved` spans (row, x0, x1 half-open) are already taken.
+/// `None` when nothing fits. Returns (row, x).
+fn place_captions(anchors: &[(usize, usize)], rows: usize, cols: usize, reserved: &[(usize, usize, usize)]) -> Vec<Option<(usize, usize)>> {
+    let mut used: Vec<Vec<(usize, usize)>> = vec![Vec::new(); rows]; // (x0, x1) half-open
+    for &(r, a, b) in reserved {
+        if r < rows { used[r].push((a, b)); }
+    }
+    let free = |used: &Vec<Vec<(usize, usize)>>, r: usize, x: usize, w: usize| {
+        x + w <= cols && used[r].iter().all(|&(a, b)| x + w <= a || x >= b)
+    };
+    anchors.iter().map(|&(line_row, w)| {
+        if rows < 2 || w == 0 || w > cols { return None; }
+        let above = line_row.checked_sub(1);
+        let below = (line_row + 1 < rows).then_some(line_row + 1);
+        let sides: Vec<usize> = [above, below].into_iter().flatten().collect();
+        let mut pick = sides.iter().find(|&&r| free(&used, r, 0, w)).map(|&r| (r, 0));
+        if pick.is_none() {
+            // First gap (one column clear of the caption before it) that fits.
+            pick = sides.iter().find_map(|&r| {
+                let mut xs: Vec<usize> = used[r].iter().map(|&(_, b)| b + 1).collect();
+                xs.sort_unstable();
+                xs.into_iter().find(|&x| free(&used, r, x, w)).map(|x| (r, x))
+            });
+        }
+        if let Some((r, x)) = pick { used[r].push((x, x + w)); }
+        pick
+    }).collect()
+}
+
+/// Writes each target's (shortened) name at the left edge of the graph as a
+/// caption just above its line. The line row is the median of the line's rows
+/// under the caption, settled over time so the caption doesn't hop as data
+/// scrolls. Front-most targets are placed first.
+#[allow(clippy::too_many_arguments)]
+fn render_left_captions(
+    f:           &mut Frame,
+    origin:      (u16, u16),
+    states:      &[TargetState],
+    targets:     &[MultiTargetInfo],
+    paint_order: &[usize],
+    col_heights: &[Vec<Option<usize>>],
+    graph_h:     usize,
+    sub_rows:    usize,
+    total_cols:  usize,
+    geometry:    (Rect, usize, u64),
+    args:        &Args,
+) {
+    if graph_h < 2 { return; }
+    let sub_to_cell = |sr: usize| -> usize {
+        if sr >= sub_rows { 0 } else { graph_h - 1 - sr / 4 }
+    };
+    let order: Vec<usize> = paint_order.iter().rev().copied().collect(); // front-most first
+    let raw: Vec<&str> = order.iter().map(|&ti| super::labels::display_label(&states[targets[ti].state_idx].label)).collect();
+    let names = if args.no_condense_labels {
+        raw.iter().map(|s| s.to_string()).collect()
+    } else {
+        super::labels::condense_each(&raw, CAPTION_MAX_W)
+    };
+    let now = Instant::now();
+
+    let mut items: Vec<(usize, String, usize)> = Vec::new(); // (target index, name, line row)
+    let mut grouped: Vec<(usize, String)> = Vec::new();       // dead targets, front-most first
+    CAPTION_ANCHORS.with(|cell| {
+        let mut store = cell.borrow_mut();
+        if store.geometry != Some(geometry) {
+            store.geometry = Some(geometry);
+            store.by_slot.clear();
+        }
+        let anchors = &mut store.by_slot;
+        for (&ti, name) in order.iter().zip(names) {
+            let t = &targets[ti];
+            let w = name.chars().count();
+            let mut line_rows: Vec<usize> = (0..w.min(t.data_end))
+                .filter_map(|col| col_heights.get(col).and_then(|h| h.get(ti)).copied().flatten())
+                .map(|h| if h > 0 { sub_to_cell(h - 1) } else { graph_h - 1 })
+                .collect();
+            // A dead target's caption joins the drop group; the move goes
+            // through the same settle delay so a flapping target doesn't hop.
+            let want = if is_dead(t) {
+                CAPTION_GROUPED
+            } else {
+                if line_rows.is_empty() { continue; }
+                line_rows.sort_unstable();
+                line_rows[line_rows.len() / 2]
+            };
+            let a = settle_anchor(anchors.get(&t.state_idx).copied(), want, now);
+            anchors.insert(t.state_idx, a);
+            if a.shown == CAPTION_GROUPED {
+                grouped.push((ti, name));
+            } else {
+                items.push((ti, name, a.shown.min(graph_h - 1)));
+            }
+        }
+    });
+
+    // Dead targets' captions go side by side on the drop label row, left of
+    // their tags; live captions are then placed around them.
+    let group_row = drop_label_row(graph_h);
+    let mut reserved: Vec<(usize, usize, usize)> = Vec::new();
+    let tag_span = dead_tag_span(targets, &dead_targets(targets, paint_order));
+    if let Some((x0, x1)) = tag_span { reserved.push((group_row, x0, x1)); }
+    let limit = tag_span.map_or(total_cols, |(x0, _)| x0.saturating_sub(1)).min(total_cols);
+    let mut spots: Vec<(usize, &str, usize, usize)> = Vec::new(); // (target index, name, row, x)
+    let mut x = 0;
+    for (ti, name) in &grouped {
+        let w = name.chars().count();
+        if x + w > limit { continue; }
+        spots.push((*ti, name, group_row, x));
+        reserved.push((group_row, x, x + w));
+        x += w + 1;
+    }
+    let live = place_captions(&items.iter().map(|(_, n, r)| (*r, n.chars().count())).collect::<Vec<_>>(), graph_h, total_cols, &reserved);
+    for ((ti, name, _), spot) in items.iter().zip(live) {
+        if let Some((row, x)) = spot { spots.push((*ti, name, row, x)); }
+    }
+
+    let buf = f.buffer_mut();
+    for (ti, name, row, x) in spots {
+        let (cr, cg, cb) = args.theme.target_color(targets[ti].state_idx);
+        let style = Style::default().fg(Color::Rgb(cr, cg, cb)).add_modifier(Modifier::BOLD);
+        for (i, ch) in name.chars().enumerate() {
+            put_cell(buf, origin, x + i, row, &ch.to_string(), style);
+        }
+    }
+}
+
+/// Caption anchor value for a dead target: shown in the drop group, not on a line row.
+const CAPTION_GROUPED: usize = usize::MAX;
+
+/// Assigns each label a distinct row in `0..rows`, in priority order (index 0
+/// first). A label keeps its desired row if free, otherwise takes the nearest
+/// free row, trying first the side away from the mean of all desired rows so
+/// a tight cluster fans out instead of stacking one way. `reserved` rows are
+/// never assigned. `None` when no row is left (more labels than rows).
+fn place_line_labels(desired: &[usize], rows: usize, reserved: &[usize]) -> Vec<Option<usize>> {
+    if desired.is_empty() || rows == 0 { return vec![None; desired.len()]; }
+    let mut taken = vec![false; rows];
+    for &r in reserved {
+        if r < rows { taken[r] = true; }
+    }
+    let mean = desired.iter().sum::<usize>() as f64 / desired.len() as f64;
+    desired.iter().map(|&want| {
+        let want = want.min(rows - 1);
+        let up_first = (want as f64) <= mean; // row 0 is the top
+        for d in 0..rows {
+            let up   = want.checked_sub(d);
+            let down = (want + d < rows).then_some(want + d);
+            let order = if up_first { [up, down] } else { [down, up] };
+            if let Some(r) = order.into_iter().flatten().find(|&r| !taken[r]) {
+                taken[r] = true;
+                return Some(r);
+            }
+        }
+        None
+    }).collect()
 }
 
 #[cfg(test)]
@@ -3040,5 +3358,246 @@ mod cache_tests {
                    &[hit(10.0), Sample::Drop, hit(20.0)]);
         assert!(cache.cols[..cache.data_end].iter().any(|s| s.is_drop()),
                 "drop must surface in cached cols");
+    }
+}
+
+#[cfg(test)]
+mod line_label_tests {
+    use super::*;
+    use clap::Parser;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn free_rows_are_kept() {
+        assert_eq!(place_line_labels(&[2, 5, 9], 10, &[]), vec![Some(2), Some(5), Some(9)]);
+    }
+
+    #[test]
+    fn a_tie_fans_out_around_the_front_most() {
+        // All want row 4: the first keeps it, the rest take the rows beside it.
+        assert_eq!(place_line_labels(&[4, 4, 4], 10, &[]), vec![Some(4), Some(3), Some(5)]);
+    }
+
+    #[test]
+    fn a_cluster_spreads_away_from_its_mean() {
+        // Row 6 sits below the mean, so its displaced label goes further down.
+        assert_eq!(place_line_labels(&[6, 6, 2], 10, &[]), vec![Some(6), Some(7), Some(2)]);
+    }
+
+    #[test]
+    fn edges_push_inward() {
+        assert_eq!(place_line_labels(&[0, 0], 5, &[]), vec![Some(0), Some(1)]);
+        assert_eq!(place_line_labels(&[4, 4], 5, &[]), vec![Some(4), Some(3)]);
+    }
+
+    #[test]
+    fn more_labels_than_rows_drops_the_back_most() {
+        assert_eq!(place_line_labels(&[1, 1, 1], 2, &[]), vec![Some(1), Some(0), None]);
+    }
+
+    /// Renders the multi-target graph for targets with constant RTTs and
+    /// `n_samples` graph samples each, returning the text grid.
+    fn render(rtts: &[f64], n_samples: usize, sort_order: &[usize]) -> Vec<Vec<String>> {
+        render_named(rtts, n_samples, sort_order, &[])
+    }
+
+    /// Like `render`, with optional target labels (defaults to 10.0.0.N).
+    fn render_named(rtts: &[f64], n_samples: usize, sort_order: &[usize], names: &[&str]) -> Vec<Vec<String>> {
+        let series: Vec<Vec<Sample>> = rtts.iter().map(|&rtt| vec![Sample::Hit(rtt); n_samples]).collect();
+        grid_of(&draw_series(&series, sort_order, names))
+    }
+
+    /// Renders the multi-target graph for the given per-target graph samples.
+    fn draw_series(series: &[Vec<Sample>], sort_order: &[usize], names: &[&str]) -> ratatui::buffer::Buffer {
+        let mut argv = vec!["vlat".to_string()];
+        argv.extend((0..series.len()).map(|i| format!("10.0.0.{}", i + 1)));
+        let mut args = Args::parse_from(argv);
+        args.theme = args.theme_name.to_theme();
+        let states: Vec<TargetState> = series.iter().enumerate().map(|(i, samples)| {
+            let mut s = TargetState::new(format!("10.0.0.{}", i + 1));
+            if let Some(n) = names.get(i) { s.label = n.to_string(); }
+            s.waiting = false;
+            s.graph_history.extend(samples.iter().cloned());
+            s.graph_push_count = samples.len();
+            s
+        }).collect();
+        let mut terminal = Terminal::new(TestBackend::new(60, 14)).unwrap();
+        terminal.draw(|f| {
+            let area = f.area();
+            render_area_graph_multi(f, area, &states, &args, 50.0, sort_order);
+        }).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn grid_of(buf: &ratatui::buffer::Buffer) -> Vec<Vec<String>> {
+        (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol().to_string()).collect())
+            .collect()
+    }
+
+    fn find(grid: &[Vec<String>], ch: &str) -> (usize, usize) {
+        for (y, row) in grid.iter().enumerate() {
+            if let Some(x) = row.iter().position(|c| c == ch) { return (x, y); }
+        }
+        panic!("{ch} not found in {:#?}", grid.iter().map(|r| r.concat()).collect::<Vec<_>>());
+    }
+
+    fn dump(grid: &[Vec<String>]) -> Vec<String> { grid.iter().map(|r| r.concat()).collect() }
+
+    /// Column where the plot starts (right of the 9-col y-axis).
+    const PLOT_X: usize = 9;
+
+    fn find_str(grid: &[Vec<String>], text: &str) -> (usize, usize) {
+        for (y, row) in grid.iter().enumerate() {
+            let line = row.concat();
+            if let Some(byte) = line.find(text) { return (line[..byte].chars().count(), y); }
+        }
+        panic!("{text:?} not found in {:#?}", dump(grid));
+    }
+
+    #[test]
+    fn captions_sit_at_the_left_edge_just_above_their_lines() {
+        let grid = render_named(&[10.0, 25.0, 40.0], 5000, &[0, 1, 2], &["home-router", "office-router", "1.1.1.1"]);
+        for (name, tag) in [("home", "A"), ("office", "B"), ("1.1.1.1", "C")] {
+            let (x, y) = find_str(&grid, name);
+            let (_, line_y) = find(&grid, tag);
+            assert_eq!((x, y), (PLOT_X, line_y - 1), "{name} caption: {:#?}", dump(&grid));
+        }
+        assert!(!dump(&grid).iter().any(|l| l.contains("router")), "shared word cut at a word boundary: {:#?}", dump(&grid));
+    }
+
+    #[test]
+    fn overlapping_captions_shift_right_then_go_below() {
+        // dns (B) is front-most and takes the spot above; cloud's line is in the
+        // same cell row, so it shifts right on that row; gw goes below.
+        let grid = render_named(&[20.0, 20.0, 21.0], 5000, &[1, 0, 2], &["gw", "dns", "cloud"]);
+        let (_, line_y) = find(&grid, "B");
+        assert_eq!(find_str(&grid, "dns"), (PLOT_X, line_y - 1), "{:#?}", dump(&grid));
+        assert_eq!(find_str(&grid, "cloud"), (PLOT_X + 4, line_y - 1), "{:#?}", dump(&grid));
+        assert_eq!(find_str(&grid, "gw"), (PLOT_X, line_y + 1), "{:#?}", dump(&grid));
+    }
+
+    #[test]
+    fn caption_on_the_top_row_goes_below_its_line() {
+        assert_eq!(place_captions(&[(0, 3)], 10, 50, &[]), vec![Some((1, 0))]);
+    }
+
+    #[test]
+    fn caption_that_cannot_fit_is_skipped() {
+        assert_eq!(place_captions(&[(5, 4), (5, 4), (5, 4)], 10, 9, &[]), vec![Some((4, 0)), Some((6, 0)), Some((4, 5))]);
+        assert_eq!(place_captions(&[(5, 4), (5, 4), (5, 4), (5, 4), (5, 4)], 10, 9, &[])[4], None);
+        assert_eq!(place_captions(&[(3, 4)], 1, 50, &[]), vec![None]);
+    }
+
+    #[test]
+    fn anchor_waits_for_a_move_to_hold() {
+        let t0 = Instant::now();
+        let a = settle_anchor(None, 5, t0);
+        assert_eq!(a.shown, 5, "first sighting is taken immediately");
+        let a = settle_anchor(Some(a), 6, t0);
+        assert_eq!((a.shown, a.pending.map(|p| p.0)), (5, Some(6)), "a move starts pending");
+        let a = settle_anchor(Some(a), 6, t0 + CAPTION_SETTLE / 2);
+        assert_eq!(a.shown, 5, "not yet held long enough");
+        let a = settle_anchor(Some(a), 6, t0 + CAPTION_SETTLE);
+        assert_eq!((a.shown, a.pending), (6, None), "held long enough: moves");
+    }
+
+    #[test]
+    fn anchor_jitter_restarts_the_wait() {
+        let t0 = Instant::now();
+        let a = settle_anchor(None, 5, t0);
+        let a = settle_anchor(Some(a), 6, t0);
+        let a = settle_anchor(Some(a), 7, t0 + CAPTION_SETTLE);
+        assert_eq!((a.shown, a.pending.map(|p| p.0)), (5, Some(7)), "a different row restarts the pending move");
+        let a = settle_anchor(Some(a), 5, t0 + CAPTION_SETTLE * 2);
+        assert_eq!((a.shown, a.pending), (5, None), "returning to the shown row cancels it");
+    }
+
+    #[test]
+    fn full_graph_labels_sit_in_the_reserved_column_beside_each_line_end() {
+        let grid = render(&[10.0, 25.0, 40.0], 5000, &[0, 1, 2]);
+        let width = grid[0].len();
+        let mut rows = Vec::new();
+        for tag in ["A", "B", "C"] {
+            let (x, y) = find(&grid, tag);
+            assert_eq!(x, width - 1, "{tag} should be in the label column: {:#?}", dump(&grid));
+            assert_eq!(grid[y][x - 1], "─", "{tag} should sit right after its line's newest point: {:#?}", dump(&grid));
+            rows.push(y);
+        }
+        assert!(rows[0] > rows[1] && rows[1] > rows[2], "higher RTT labels sit higher: {rows:?}");
+    }
+
+    #[test]
+    fn filling_graph_labels_follow_the_line_end() {
+        let grid = render(&[10.0, 40.0], 20, &[0, 1]);
+        let width = grid[0].len();
+        for tag in ["A", "B"] {
+            let (x, y) = find(&grid, tag);
+            assert!(x < width - 1, "{tag} should be mid-graph while filling: {:#?}", dump(&grid));
+            assert_eq!(grid[y][x - 1], "─", "{tag} should follow its line end: {:#?}", dump(&grid));
+            assert!(grid[y][x + 1..].iter().all(|c| c == " " || c == "┈"), "nothing right of {tag}: {:#?}", dump(&grid));
+        }
+    }
+
+    #[test]
+    fn overlapping_lines_keep_the_front_most_label_on_the_line() {
+        // Same RTT: B is first in the sort order, so it's drawn in front and keeps the row.
+        let grid = render(&[20.0, 20.0, 20.0], 5000, &[1, 0, 2]);
+        let (bx, by) = find(&grid, "B");
+        assert_eq!(grid[by][bx - 1], "─", "{:#?}", dump(&grid));
+        let (_, ay) = find(&grid, "A");
+        let (_, cy) = find(&grid, "C");
+        let mut ys = [ay, by, cy];
+        ys.sort();
+        assert_eq!(ys, [ys[0], ys[0] + 1, ys[0] + 2], "labels should take adjacent rows: {:#?}", dump(&grid));
+    }
+
+    /// Targets live for most of the graph, then dead for the last `dead_tail` samples.
+    fn dying(rtt: f64, n: usize, dead_tail: usize) -> Vec<Sample> {
+        (0..n).map(|i| if i + dead_tail >= n { Sample::Drop } else { Sample::Hit(rtt) }).collect()
+    }
+
+    #[test]
+    fn drop_markers_share_the_row_equally_between_dead_targets() {
+        let series = vec![dying(10.0, 5000, 5000), dying(20.0, 5000, 5000), dying(30.0, 5000, 5000)];
+        let buf = draw_series(&series, &[0, 1, 2], &[]);
+        let grid = grid_of(&buf);
+        let (_, y) = find(&grid, "\u{25be}");
+        let mut counts = std::collections::HashMap::new();
+        for x in 0..buf.area.width {
+            if buf[(x, y as u16)].symbol() == "\u{25be}" { *counts.entry(buf[(x, y as u16)].fg).or_insert(0usize) += 1; }
+        }
+        assert_eq!(counts.len(), 3, "every dead target shows on the drop row: {counts:?}");
+        let (lo, hi) = (counts.values().min().unwrap(), counts.values().max().unwrap());
+        assert!(hi - lo <= 1, "roughly equal shares: {counts:?}");
+    }
+
+    #[test]
+    fn dead_targets_labels_share_the_row_above_the_drop_markers() {
+        let series = vec![dying(10.0, 5000, 20), dying(25.0, 5000, 30), dying(40.0, 5000, 5000)];
+        let grid = grid_of(&draw_series(&series, &[0, 1, 2], &["gw", "dns", "cloud"]));
+        let width = grid[0].len();
+        let drop_row = (0..grid.len()).max_by_key(|&y| grid[y].iter().filter(|c| *c == "\u{25be}").count()).unwrap();
+        let tags = find_str(&grid, "ABC");
+        assert_eq!(tags, (width - 3, drop_row - 1), "tags side by side ending in the label column: {:#?}", dump(&grid));
+        assert_eq!(find_str(&grid, "gw dns cloud"), (PLOT_X, drop_row - 1), "{:#?}", dump(&grid));
+    }
+
+    #[test]
+    fn live_labels_stay_on_their_lines_beside_a_dead_group() {
+        let series = vec![dying(10.0, 5000, 0), dying(40.0, 5000, 10)];
+        let grid = grid_of(&draw_series(&series, &[0, 1], &["gw", "cloud"]));
+        let width = grid[0].len();
+        let (ax, ay) = find(&grid, "A");
+        assert_eq!((ax, grid[ay][ax - 1].as_str()), (width - 1, "─"), "{:#?}", dump(&grid));
+        assert_eq!(find_str(&grid, "gw"), (PLOT_X, ay - 1), "{:#?}", dump(&grid));
+        let (bx, by) = find(&grid, "B");
+        assert_eq!(bx, width - 1);
+        assert_eq!(find_str(&grid, "cloud").1, by, "{:#?}", dump(&grid));
+    }
+
+    #[test]
+    fn reserved_rows_are_skipped() {
+        assert_eq!(place_line_labels(&[8, 8], 10, &[8]), vec![Some(7), Some(9)]);
     }
 }

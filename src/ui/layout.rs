@@ -1585,14 +1585,7 @@ pub fn build_legend_line<'a>(states: &[TargetState], args: &Args, sort_order: &[
     let sep    = "   ";
 
     let slots: Vec<usize> = sort_order.iter().copied().filter(|&slot| slot < states.len()).collect();
-    let display_labels: Vec<&str> = slots.iter().map(|&slot| {
-        let label = &states[slot].label;
-        if let Some(pos) = label.rfind(" (") {
-            if label.ends_with(')') { &label[..pos] } else { &label[..] }
-        } else {
-            &label[..]
-        }
-    }).collect();
+    let display_labels: Vec<&str> = slots.iter().map(|&slot| super::labels::display_label(&states[slot].label)).collect();
 
     let labels = if args.no_condense_labels {
         display_labels.iter().map(|s| s.to_string()).collect::<Vec<_>>()
