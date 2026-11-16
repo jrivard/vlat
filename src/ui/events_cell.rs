@@ -30,8 +30,11 @@
 //! Severity is the worst of the whole span, so a later blip doesn't downgrade
 //! an outage, and the cell only changes when something happens or a fade step
 //! is crossed. A recovery replaces the outage's last ✕ (`✕✕⤴`: had an outage,
-//! back now). With nothing to report it shows the MTR trend (`↘ → ↗`, bold
-//! when steep), or `◷` (`.` in ASCII) while that is still warming up.
+//! back now). With nothing to report it shows a steady-state `·`, or the MTR
+//! trend arrow (`↘ ↗`, bold when steep) for `EVENTS_EVENT_SECS` after the trend
+//! changes. An outage that has outlasted `EVENTS_EVENT_SECS` is steady too: the
+//! UP column already says it is down. `◷` (`.` in ASCII) shows only during the
+//! same short warm-up as the fullscreen graph (its calibration window).
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
@@ -59,6 +62,8 @@ pub enum Part {
     Recovered { age: f64 },
     IpChanged { age: f64 },
     Trend { trend: MtrTrend, age: f64 },
+    /// Nothing changing: no recent events, latency flat (or a long outage).
+    Steady,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -87,31 +92,48 @@ pub fn events_cell(s: &TargetState, now: Instant, trend: MtrTrend, ascii: bool) 
         t.is_some_and(|t| now.saturating_duration_since(t).as_secs_f64() < span)
     };
 
-    if s.history.iter().all(|x| x.is_pending()) {
+    // Warm-up matches the plot views: until the first result, then the same
+    // calibration window the fullscreen graph waits out.
+    let calibrating = s.calibrating.is_some_and(|(_, until)| until > now);
+    if calibrating || s.history.iter().all(|x| x.is_pending()) {
         return EventsCell { parts: vec![Part::Empty], ascii };
     }
 
     let in_outage = s.cur_drop_streak >= GRADE_OUTAGE_MIN_DROPS;
     let recovered = !in_outage && within(s.recovered_at, EVENTS_EVENT_SECS);
-    let outage    = in_outage || recovered || within(s.last_outage_at, EVENTS_EVENT_SECS);
+    let outage    = recovered || within(s.last_outage_at, EVENTS_EVENT_SECS);
+    // An outage older than the event span is the steady state, not news:
+    // its ongoing drops don't count as events.
+    let steady_outage = in_outage && !outage;
     let severity: u8 = if outage { 3 }
+        else if steady_outage { 0 }
         else if within(s.last_drop_events[1], EVENTS_EVENT_SECS) { 2 }
         else if within(s.last_drop_at, EVENTS_EVENT_SECS) { 1 }
         else { 0 };
     let ip = within(s.ip_changed_at, EVENTS_IP_EVENT_SECS);
-    let quiet = severity == 0 && !ip;
 
     // Note what each group shows now; restart its clock when that changed.
     // Keys are 0 while a group is hidden, so reappearing counts as a change.
     // Recovery keeps the drop key at 3, so ✕✕✕ → ✕✕⤴ pops only the ⤴.
-    let keys = [severity, recovered as u8, ip as u8, if quiet { trend_key(trend) } else { 0 }];
+    // The trend is tracked even while hidden behind events, so it only counts
+    // as changed when the trend itself moves; its first verdict after warming
+    // up isn't a change at all (no clock: settled from the start).
+    let keys = [severity, recovered as u8, ip as u8, trend_key(trend)];
     let mut ages = [0.0f64; 4];
     {
         let mut marks = s.events_cell_marks.borrow_mut();
         for (g, key) in keys.iter().enumerate() {
             let (k, since) = &mut marks[g];
-            if *k != *key || since.is_none() { *k = *key; *since = Some(now); }
-            ages[g] = since.map_or(0.0, |t| now.saturating_duration_since(t).as_secs_f64());
+            if g == G_TREND {
+                if *k != *key {
+                    let first = *k == 0 || *k == trend_key(MtrTrend::WarmingUp);
+                    *since = if first { None } else { Some(now) };
+                    *k = *key;
+                }
+            } else if *k != *key || since.is_none() {
+                *k = *key; *since = Some(now);
+            }
+            ages[g] = since.map_or(f64::INFINITY, |t| now.saturating_duration_since(t).as_secs_f64());
         }
     }
 
@@ -125,9 +147,13 @@ pub fn events_cell(s: &TargetState, now: Instant, trend: MtrTrend, ascii: bool) 
     }
     if ip && parts.len() < EVENTS_CELL_W { parts.push(Part::IpChanged { age: ages[G_IP] }); }
     if parts.is_empty() {
+        // Steady unless the trend changed recently: an arrow is news, a
+        // long-standing slope (or a trend still warming up) is not.
+        let trend_news = ages[G_TREND] < EVENTS_EVENT_SECS;
         parts.push(match trend {
-            MtrTrend::WarmingUp => Part::Empty,
-            t => Part::Trend { trend: t, age: ages[G_TREND] },
+            MtrTrend::GentleUp | MtrTrend::SteepUp | MtrTrend::GentleDown | MtrTrend::SteepDown
+                if trend_news && !steady_outage => Part::Trend { trend, age: ages[G_TREND] },
+            _ => Part::Steady,
         });
     }
     EventsCell { parts, ascii }
@@ -138,6 +164,8 @@ impl Part {
         match (self, ascii) {
             (Part::Empty, false) => "\u{25f7}", // ◷ clock face: "please wait"
             (Part::Empty, true)  => ".",
+            (Part::Steady, false) => "\u{00b7}", // ·
+            (Part::Steady, true)  => ".",
             (Part::Drop { .. }, false) => "\u{2715}",
             (Part::Drop { .. }, true)  => "x",
             (Part::Recovered { .. }, false) => "\u{2934}",
@@ -168,7 +196,7 @@ impl Part {
             else { Style::default().fg(c).add_modifier(Modifier::DIM) }
         };
         match self {
-            Part::Empty => dim,
+            Part::Empty | Part::Steady => dim,
             Part::Drop { age } => fade(age, theme.drop_color, true),
             Part::Recovered { age } => fade(age, theme.rtt_good, true),
             Part::IpChanged { age } => fade(age, theme.ip_change, true),
@@ -222,22 +250,48 @@ mod tests {
     }
 
     #[test]
-    fn dot_until_anything_resolves_and_while_trend_warms_up() {
+    fn clock_only_until_the_first_result_and_through_calibration() {
         let s = TargetState::new("t".into());
-        assert_eq!(events_cell(&s, Instant::now(), MtrTrend::Flat, true).text(), ".");
-        let (s, now) = run("....");
-        assert_eq!(events_cell(&s, now, MtrTrend::WarmingUp, true).text(), ".");
+        assert_eq!(events_cell(&s, Instant::now(), MtrTrend::Flat, false).text(), "\u{25f7}");
+        let (mut s, now) = run("....");
+        s.calibrating = Some((now, now + Duration::from_secs(5)));
+        assert_eq!(events_cell(&s, now, MtrTrend::WarmingUp, false).text(), "\u{25f7}");
+        // Past calibration, a trend still warming up is just steady.
+        assert_eq!(events_cell(&s, now + Duration::from_secs(6), MtrTrend::WarmingUp, false).text(), "\u{00b7}");
     }
 
     #[test]
-    fn quiet_shows_the_trend() {
-        assert_eq!(text("..........", 0), "-");
+    fn quiet_and_flat_is_a_dot() {
+        assert_eq!(text("..........", 0), ".");
+    }
+
+    #[test]
+    fn trend_arrow_only_after_a_change() {
+        let (s, now) = run("..........");
+        // First verdict after warm-up is not a change.
+        assert_eq!(events_cell(&s, now, MtrTrend::WarmingUp, true).text(), ".");
+        assert_eq!(events_cell(&s, now, MtrTrend::GentleUp, true).text(), ".");
+        // Flat -> rising is: arrow for the event span, then a dot again.
+        assert_eq!(events_cell(&s, now, MtrTrend::Flat, true).text(), ".");
+        assert_eq!(events_cell(&s, now, MtrTrend::GentleUp, true).text(), "v");
+        let later = now + Duration::from_secs(EVENTS_EVENT_SECS as u64 + 1);
+        assert_eq!(events_cell(&s, later, MtrTrend::GentleUp, true).text(), ".");
+    }
+
+    #[test]
+    fn long_outage_settles_to_a_dot() {
+        let down = ".....".to_string() + &"x".repeat(40);
+        let (s, now) = run(&down);
+        assert_eq!(events_cell(&s, now, MtrTrend::AllDrops, true).text(), ".");
+        // ...and coming back is news again.
+        let (s, now) = run(&(down + ".."));
+        assert_eq!(events_cell(&s, now, MtrTrend::Flat, true).text(), "xx+");
     }
 
     #[test]
     fn one_drop_then_expires() {
         assert_eq!(text(".....x....", 0), "x");
-        assert_eq!(text(".....x....", 30), "-");
+        assert_eq!(text(".....x....", 30), ".");
     }
 
     #[test]

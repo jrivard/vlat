@@ -361,7 +361,7 @@ pub fn build_header_line<'a>(
     Line::from(spans)
 }
 
-/// Renders the 3-char UP/xX/spinner status badge as a vec of spans (always 3 display chars wide).
+/// Renders the 3-char UP/××/spinner status badge as a vec of spans (always 3 display chars wide).
 /// Returns empty vec if the target is in an error or resolving-wait state (caller should
 /// skip the badge and let build_stats_line render the status text instead).
 pub fn build_status_badge_spans(s: &TargetState, tick: u64, theme: &Theme, ascii: bool) -> Vec<Span<'static>> {
@@ -387,18 +387,28 @@ pub fn build_status_badge_spans(s: &TargetState, tick: u64, theme: &Theme, ascii
             Span::raw(pad),
         ];
     }
-    let is_drop = s.history.iter().rev().find(|s| !s.is_pending())
-                   .map(|s| s.is_drop()).unwrap_or(false);
-    if is_drop {
-        let bright = Style::default().fg(theme.drop_color).add_modifier(Modifier::BOLD);
-        let x = if ascii { "x" } else { "\u{2717}" }; // ✗
-        vec![Span::styled(x, bright), Span::styled(x, bright), Span::raw(" ")]
-    } else {
-        let recent: Vec<&Sample> = s.history.iter().rev()
-            .filter(|s| !s.is_pending())
-            .take(5)
-            .collect();
-        if recent.is_empty() {
+    // Binary up/down from the latest settled probe alone - recent drops are
+    // the evt column's job, so a lossy target simply flips between the two.
+    let latest = s.history.iter().rev().find(|s| !s.is_pending());
+    match latest {
+        Some(l) if l.is_drop() => {
+            let bright = Style::default().fg(theme.drop_color).add_modifier(Modifier::BOLD);
+            let x = if ascii { "xx" } else { "\u{00d7}\u{00d7}" }; // ××
+            vec![Span::styled(x, bright), Span::raw(" ")]
+        }
+        Some(_) => {
+            let now = Instant::now();
+            let secs_since_drop = s.win_drop_times.iter()
+                .map(|t| now.duration_since(*t).as_secs())
+                .min();
+            let up_color = match secs_since_drop {
+                Some(e) if e < 5  => theme.rtt_warn,    // just recovered: warn color (orange/red per theme)
+                Some(e) if e < 30 => theme.ip_change,   // recently had drops: yellow per theme
+                _                 => theme.rtt_good,    // all clear: green
+            };
+            vec![Span::styled("UP ", Style::default().fg(up_color).add_modifier(Modifier::BOLD))]
+        }
+        None => {
             // Waiting for first probe result - clockwise spinner, warm color
             let (frame_str, pad): (String, &'static str) = if ascii {
                 let frames = &["|", "/", "-", "\\"];
@@ -412,28 +422,11 @@ pub fn build_status_badge_spans(s: &TargetState, tick: u64, theme: &Theme, ascii
                 ];
                 (frames[spin_tick % frames.len()].to_string(), " ")
             };
-            return vec![
+            vec![
                 Span::styled(frame_str, Style::default().fg(Color::Gray)),
                 Span::raw(pad),
-            ];
+            ]
         }
-        let recent_drop_count = recent.iter().filter(|s| s.is_drop()).count();
-        let no_drops = recent_drop_count == 0;
-        let (badge, badge_style): (String, Style) = if no_drops {
-            let now = Instant::now();
-            let secs_since_drop = s.win_drop_times.iter()
-                .map(|t| now.duration_since(*t).as_secs())
-                .min();
-            let up_color = match secs_since_drop {
-                Some(e) if e < 5  => theme.rtt_warn,    // just recovered: warn color (orange/red per theme)
-                Some(e) if e < 30 => theme.ip_change,   // recently had drops: yellow per theme
-                _                 => theme.rtt_good,    // all clear: green
-            };
-            ("UP ".into(), Style::default().fg(up_color).add_modifier(Modifier::BOLD))
-        } else {
-            (format!("X{} ", recent_drop_count), Style::default().fg(theme.rtt_warn).add_modifier(Modifier::BOLD))
-        };
-        vec![Span::styled(badge, badge_style)]
     }
 }
 
@@ -578,25 +571,46 @@ pub fn build_stats_keys_line(
     let dim = Style::default().add_modifier(Modifier::DIM);
     let _ = theme;
     let mut spans: Vec<Span<'static>> = Vec::new();
+    // A label wider than its column (e.g. "jitter" over a 5-wide value) would
+    // push every later label right and run the line past the rows. Carry the
+    // overflow as debt and pay it back out of later padding and gaps (always
+    // leaving one space), so labels realign with their columns right after.
+    let debt = std::cell::Cell::new(0usize);
+    let lab = |text: &str, w: usize| -> Span<'static> {
+        let n = text.chars().count();
+        if n >= w {
+            debt.set(debt.get() + n - w);
+            Span::styled(text.to_string(), dim)
+        } else {
+            let take = debt.get().min(w - n);
+            debt.set(debt.get() - take);
+            Span::styled(format!("{text}{}", " ".repeat(w - n - take)), dim)
+        }
+    };
+    let sp = |g: usize| -> Span<'static> {
+        let take = debt.get().min(g.saturating_sub(1));
+        debt.set(debt.get() - take);
+        Span::raw(" ".repeat(g - take))
+    };
 
     if pfx.lead  > 0 { spans.push(Span::raw(" ".repeat(pfx.lead))); }
-    if pfx.probe > 0 { spans.push(Span::styled(format!("{:<w$}", "mode",  w = pfx.probe), dim)); }
-    if pfx.name  > 0 { spans.push(Span::styled(format!("{:<w$}", "name",  w = pfx.name),  dim)); }
-    if pfx.addr  > 0 { spans.push(Span::styled(format!("{:<w$}", "addr",  w = pfx.addr),  dim)); }
+    if pfx.probe > 0 { spans.push(lab("mode", pfx.probe)); }
+    if pfx.name  > 0 { spans.push(lab("name", pfx.name)); }
+    if pfx.addr  > 0 { spans.push(lab("addr", pfx.addr)); }
     if pfx.trailer > 0 { spans.push(Span::raw(" ".repeat(pfx.trailer))); }
-    if pfx.resolve > 0 { spans.push(Span::styled(format!("{:<w$}", "res", w = pfx.resolve), dim)); }
-    if pfx.status  > 0 { spans.push(Span::styled(format!("{:<w$}", "up", w = pfx.status), dim)); }
+    if pfx.resolve > 0 { spans.push(lab("res", pfx.resolve)); }
+    if pfx.status  > 0 { spans.push(lab("up", pfx.status)); }
 
     let rtt_w = cw.rtt.active_w();
     let jit_w = cw.jitter.active_w();
     let rng_w = cw.range_compact;
 
     if show_rtt {
-        if let Some(st_w) = cw.events { spans.push(Span::styled(format!("{:<w$}", "evt", w = st_w + 1), dim)); }
-        spans.push(Span::styled(format!("{:<w$}", "rtt", w = rtt_w), dim));
+        if let Some(st_w) = cw.events { spans.push(lab("!", st_w + 1)); }
+        spans.push(lab("rtt", rtt_w));
     }
-    if pfx.pings_gap > 0 { spans.push(Span::raw(" ".repeat(pfx.pings_gap))); }
-    if pfx.pings     > 0 { spans.push(Span::styled(format!("{:<w$}", "recent", w = pfx.pings), dim)); }
+    if pfx.pings_gap > 0 { spans.push(sp(pfx.pings_gap)); }
+    if pfx.pings     > 0 { spans.push(lab("recent", pfx.pings)); }
     if pfx.inline_range_w > 0 {
         if !pfx.inline_range_spans.is_empty() {
             spans.extend(pfx.inline_range_spans.iter().cloned());
@@ -610,44 +624,44 @@ pub fn build_stats_keys_line(
 
     let hide = |b: &BaseStat| cw.hidden_base_stats.contains(b);
     if !hide(&BaseStat::Avg) {
-        spans.push(Span::raw(" ".repeat(gap)));
-        spans.push(Span::styled(format!("{:<w$}", "avg",    w = 1 + rtt_w), dim));
+        spans.push(sp(gap));
+        spans.push(lab("avg", 1 + rtt_w));
     }
     if !hide(&BaseStat::Range) {
-        spans.push(Span::raw(" ".repeat(gap)));
-        spans.push(Span::styled(format!("{:<w$}", "range",  w = 1 + rng_w + 1 + rng_w), dim));
+        spans.push(sp(gap));
+        spans.push(lab("range", 1 + rng_w + 1 + rng_w));
     }
     if !hide(&BaseStat::Jitter) {
-        spans.push(Span::raw(" ".repeat(gap)));
-        spans.push(Span::styled(format!("{:<w$}", "jitter", w = 1 + jit_w), dim));
+        spans.push(sp(gap));
+        spans.push(lab("jitter", 1 + jit_w));
     }
 
     if show_drp && !hide(&BaseStat::Drops) {
-        spans.push(Span::raw(" ".repeat(gap)));
-        spans.push(Span::styled(format!("{:<w$}", "loss", w = 1 + cw.drp), dim));
+        spans.push(sp(gap));
+        spans.push(lab("loss", 1 + cw.drp));
     }
     if show_dup {
-        spans.push(Span::raw(" ".repeat(gap)));
-        spans.push(Span::styled(format!("{:<w$}", "dup",  w = cw.dup + 6), dim));
+        spans.push(sp(gap));
+        spans.push(lab("dup", cw.dup + 6));
     }
 
     for stat in &cw.stat_order {
         match stat {
-            ExtraStat::Mtr    => if let Some(ref col) = cw.mtr    { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "mtr",    w = 1 + col.active_w()), dim)); }
-            ExtraStat::Std    => if let Some(ref col) = cw.std    { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "std",    w = 1 + col.active_w()), dim)); }
-            ExtraStat::P01    => if let Some(ref col) = cw.p01    { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "p01",    w = 1 + col.active_w()), dim)); }
-            ExtraStat::P10    => if let Some(ref col) = cw.p10    { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "p10",    w = 1 + col.active_w()), dim)); }
-            ExtraStat::P50    => if let Some(ref col) = cw.p50    { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "p50",    w = 1 + col.active_w()), dim)); }
-            ExtraStat::P95    => if let Some(ref col) = cw.p95    { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "p95",    w = 1 + col.active_w()), dim)); }
-            ExtraStat::P99    => if let Some(ref col) = cw.p99    { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "p99",    w = 1 + col.active_w()), dim)); }
-            ExtraStat::Cv     => if let Some(cv_w)   = cw.cv      { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "cv",     w = 1 + cv_w),           dim)); }
-            ExtraStat::Srtt   => if let Some(ref col) = cw.srtt   { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "srtt",   w = 1 + col.active_w()), dim)); }
-            ExtraStat::Seen   => if let Some(seen_w) = cw.seen    { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "seen",   w = 1 + seen_w),         dim)); }
-            ExtraStat::Lost   => if let Some(lost_w) = cw.lost    { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "lost",   w = 1 + lost_w),         dim)); }
-            ExtraStat::Status => if let Some(status_w) = cw.status { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "status", w = 1 + status_w),      dim)); }
-            ExtraStat::Quality => if let Some(q_w) = cw.quality { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "quality", w = 1 + q_w), dim)); }
-            ExtraStat::Jitpct => if let Some(jp_w) = cw.jitpct  { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "jit%",   w = 1 + jp_w),           dim)); }
-            ExtraStat::Loss   => if let Some(ls_w) = cw.loss    { spans.push(Span::raw(" ".repeat(gap))); spans.push(Span::styled(format!("{:<w$}", "loss%",  w = 1 + ls_w),           dim)); }
+            ExtraStat::Mtr    => if let Some(ref col) = cw.mtr    { spans.push(sp(gap)); spans.push(lab("mtr", 1 + col.active_w())); }
+            ExtraStat::Std    => if let Some(ref col) = cw.std    { spans.push(sp(gap)); spans.push(lab("std", 1 + col.active_w())); }
+            ExtraStat::P01    => if let Some(ref col) = cw.p01    { spans.push(sp(gap)); spans.push(lab("p01", 1 + col.active_w())); }
+            ExtraStat::P10    => if let Some(ref col) = cw.p10    { spans.push(sp(gap)); spans.push(lab("p10", 1 + col.active_w())); }
+            ExtraStat::P50    => if let Some(ref col) = cw.p50    { spans.push(sp(gap)); spans.push(lab("p50", 1 + col.active_w())); }
+            ExtraStat::P95    => if let Some(ref col) = cw.p95    { spans.push(sp(gap)); spans.push(lab("p95", 1 + col.active_w())); }
+            ExtraStat::P99    => if let Some(ref col) = cw.p99    { spans.push(sp(gap)); spans.push(lab("p99", 1 + col.active_w())); }
+            ExtraStat::Cv     => if let Some(cv_w)   = cw.cv      { spans.push(sp(gap)); spans.push(lab("cv", 1 + cv_w)); }
+            ExtraStat::Srtt   => if let Some(ref col) = cw.srtt   { spans.push(sp(gap)); spans.push(lab("srtt", 1 + col.active_w())); }
+            ExtraStat::Seen   => if let Some(seen_w) = cw.seen    { spans.push(sp(gap)); spans.push(lab("seen", 1 + seen_w)); }
+            ExtraStat::Lost   => if let Some(lost_w) = cw.lost    { spans.push(sp(gap)); spans.push(lab("lost", 1 + lost_w)); }
+            ExtraStat::Status => if let Some(status_w) = cw.status { spans.push(sp(gap)); spans.push(lab("status", 1 + status_w)); }
+            ExtraStat::Quality => if let Some(q_w) = cw.quality { spans.push(sp(gap)); spans.push(lab("quality", 1 + q_w)); }
+            ExtraStat::Jitpct => if let Some(jp_w) = cw.jitpct  { spans.push(sp(gap)); spans.push(lab("jit%", 1 + jp_w)); }
+            ExtraStat::Loss   => if let Some(ls_w) = cw.loss    { spans.push(sp(gap)); spans.push(lab("loss%", 1 + ls_w)); }
             _ => {}
         }
     }
@@ -765,7 +779,7 @@ pub fn build_stats_line<'a>(
         if !hide_b(&BaseStat::Range) {
             spans.push(Span::raw(sp.clone())); spans.push(Span::styled(sym("r", "\u{21D5}", "range"), dim));
             spans.push(Span::styled(format!("{:>w$}", d, w = cw.range_compact), dim));
-            spans.push(Span::styled(if ascii { "-" } else { "\u{2194}" }, dim));
+            spans.push(Span::styled("-", dim));
             spans.push(Span::styled(format!("{:>w$}", d, w = cw.range_compact), dim));
         }
         if !hide_b(&BaseStat::Jitter) {
@@ -820,7 +834,7 @@ pub fn build_stats_line<'a>(
         spans.push(Span::raw(" ".repeat(gap)));
         spans.push(Span::styled(sym("r", "\u{21D5}", "range"), dim));
         push_range_val(&mut spans, min_val);
-        spans.push(Span::styled(if ascii { "-" } else { "\u{2194}" }, dim));
+        spans.push(Span::styled("-", dim));
         push_range_val(&mut spans, max_val);
     }
     if !hide_b(&BaseStat::Jitter) {
@@ -846,7 +860,7 @@ pub fn build_stats_line<'a>(
             dim
         };
         spans.push(Span::raw(" ".repeat(gap)));
-        spans.push(Span::styled(sym("x", "\u{2717}", "loss"), dim));
+        spans.push(Span::styled(sym("v", "\u{21e3}", "loss"), dim));
         if drop_denom == 0 {
             spans.push(Span::styled(format!("{:>w$}", "\u{2014}", w = cw.drp), dim));
         } else {
@@ -855,7 +869,7 @@ pub fn build_stats_line<'a>(
             let pad = cw.drp.saturating_sub(num_str.len() + 1 + denom_str.len());
             if pad > 0 { spans.push(Span::raw(" ".repeat(pad))); }
             spans.push(Span::styled(num_str,   num_style));
-            spans.push(Span::styled("/",       dim));
+            spans.push(Span::styled(if ascii { "/" } else { "\u{00b7}" }, dim)); // · (ASCII "." would read as a decimal)
             spans.push(Span::styled(denom_str, dim));
         }
     }

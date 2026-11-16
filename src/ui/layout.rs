@@ -798,7 +798,7 @@ pub fn draw_list_ui(f: &mut Frame, states: &[TargetState], ctx: &ViewCtx) {
         let w = content_area.width as usize;
 
 
-        // Layout: [sort-arrow slot][badge?][label][UP/xX][recent×28][ ][rtt+...]  [spinner][↻n]
+        // Layout: [sort-arrow slot][badge?][label][UP/××][recent×28][ ][rtt+...]  [spinner][↻n]
         let spans = line.spans;
         let line = truncate_line(Line::from(spans), w);
         f.render_widget(Paragraph::new(line), content_area);
@@ -1096,7 +1096,7 @@ pub fn draw_single_ui(f: &mut Frame, states: &[TargetState], ctx: &ViewCtx) {
         );
 
         // Currently down reads as the same bold "DOWN" word used by the pre-first-reply
-        // line, rather than the compact "XX"/"✗✗" badge used elsewhere - it reads better
+        // line, rather than the compact "××"/"xx" badge used elsewhere - it reads better
         // paired with the probe-status text than the 3-char badge does.
         line.spans.push(Span::raw("  "));
         if state.is_currently_down() {
@@ -2022,7 +2022,7 @@ mod single_view_layout_tests {
         let out = render_single_state(100, 20, &[], state);
         let status_line = out.lines().find(|l| l.contains("last success")).expect("status line present");
         assert!(status_line.contains("DOWN"), "should show the \"DOWN\" word, matching the pre-first-reply line: {status_line:?}");
-        assert!(!status_line.contains('\u{2717}'), "should not also show the compact \u{2717}\u{2717} badge: {status_line:?}");
+        assert!(!status_line.contains('\u{00d7}'), "should not also show the compact \u{00d7}\u{00d7} badge: {status_line:?}");
     }
 
     #[test]
@@ -2319,6 +2319,35 @@ mod row_fit_tests {
     }
 
     #[test]
+    fn slack_goes_to_two_space_gaps_before_the_bar_and_sparkline() {
+        // 82-112 cols: everything fits at 1-space gaps with a few columns to
+        // spare, and the range bar / sparkline can give those few up.
+        for w in [82u16, 88, 94, 100, 106, 112] {
+            let lines = render_list(w, &[]);
+            assert!(lines[2].contains("  \u{2248}") && lines[2].contains("  \u{21d5}"), "w={w}: gaps not widened: {}", lines[2]);
+        }
+    }
+
+    #[test]
+    fn header_labels_wider_than_their_column_realign_and_stay_on_screen() {
+        // "jitter" overhangs its 5-wide value; with 2-space gaps the labels
+        // after it must still sit over their own columns, and the last label
+        // must never be clipped.
+        for w in (70u16..=130).step_by(3) {
+            let lines = render_list(w, &[]);
+            let (hdr, row) = (&lines[0], &lines[2]);
+            let col = |line: &str, pat: &str| line.find(pat).map(|b| line[..b].chars().count());
+            // At 1-space gaps there is no spare padding to absorb an overhang.
+            let wide_gaps = row.contains("  \u{2248}");
+            if let (true, Some(h), Some(r)) = (wide_gaps, col(hdr, "loss"), col(row, "\u{21e3}")) {
+                assert_eq!(h, r, "w={w}: loss label misaligned\n{hdr}\n{row}");
+            }
+            if hdr.contains("qualit") { assert!(hdr.contains("quality"), "w={w}: clipped: {hdr}"); }
+            assert!(hdr.trim_end().chars().count() <= w as usize, "w={w}: header ran off screen: {hdr}");
+        }
+    }
+
+    #[test]
     fn a_narrower_later_extra_fills_space_the_earlier_one_cannot() {
         // At 79 cols quality (earlier, wider) doesn't fit but p95 does.
         let lines = render_list(79, &[]);
@@ -2441,3 +2470,4 @@ mod target_key_tests {
         assert!(lines[2].starts_with("A 1.1.1.1"), "{lines:#?}");
     }
 }
+

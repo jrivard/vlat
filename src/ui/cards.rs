@@ -127,8 +127,7 @@ fn stat_cells(state: &TargetState, args: &Args, theme: &super::Theme) -> Vec<(&'
     if !hide(BaseStat::Range) {
         let (min, max) = if win { (state.win_min(), state.win_max()) }
                          else    { (state.life_min(), state.life_max()) };
-        let arrow = if ascii { "-" } else { "\u{2194}" };
-        v.push(("rng", format!("{}{}{}", fmt_rtt_nodec(min), arrow, fmt_rtt_nodec(max)), val));
+        v.push(("rng", format!("{}-{}", fmt_rtt_nodec(min), fmt_rtt_nodec(max)), val));
     }
     if !hide(BaseStat::Jitter) {
         let jit = if win { state.win_jitter_avg() } else { state.avg_jitter() };
@@ -173,7 +172,7 @@ fn stat_cells(state: &TargetState, args: &Args, theme: &super::Theme) -> Vec<(&'
             }
             ExtraStat::Events => {
                 let cell = super::events_cell::events_cell(state, Instant::now(), state.mtr_trend(args.graph_interval), ascii);
-                v.push(("evt", cell.text(), cell.lead_style(theme)));
+                v.push(("!", cell.text(), cell.lead_style(theme)));
             }
             // Recent / Bar are dedicated rows; identity / meta variants never appear here.
             _ => {}

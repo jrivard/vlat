@@ -587,6 +587,21 @@ pub fn fit_row(col_widths: &ColWidths, extra: usize, show_recent: bool, show_bar
         }
     }
     let cw = cw.fit_budget(stats_avail, show_drp, show_dup);
+    // The columns were packed at 1-space gaps. If 2-space gaps come up only a
+    // little short, take the difference from the range bar and then the
+    // sparkline (never below their minimums) rather than leave the slack blank.
+    let w2 = cw.stats_width_with_gap(2, show_drp, show_dup);
+    if w2 > stats_avail && cw.stats_width(show_drp, show_dup) <= stats_avail {
+        let need      = w2 - stats_avail;
+        let from_bar  = if bar_w > 0 { bar_w - ROW_BAR_MIN.min(bar_w) } else { 0 };
+        let from_spark = if circles_w > 0 { circles_w - widgets::TARGET_SPARK_MIN.min(circles_w) } else { 0 };
+        if from_bar + from_spark >= need {
+            let take_bar = from_bar.min(need);
+            bar_w       -= take_bar;
+            circles_w   -= need - take_bar;
+            stats_avail += need;
+        }
+    }
     RowFit { circles_w, bar_w, stats_avail, cw }
 }
 
@@ -783,7 +798,7 @@ pub fn compute_col_widths(states: &[TargetState], stats_window: bool, extras: &[
     let mut quality_w = "quality".len(); // the header label is the widest fixed text
     let mut jitpct_w = 3usize;   // min: header "jit%" = glyph slot + 3
     let mut loss_w   = 4usize;   // min: header "loss%" = glyph slot + 4
-    let events_w      = "evt".len().max(events_cell::EVENTS_CELL_W); // fixed: the cell never changes width
+    let events_w      = "!".len().max(events_cell::EVENTS_CELL_W); // fixed: the cell never changes width
     let now = Instant::now();
     for s in states {
         // name column: custom label, or hostname (non-IP host string), or blank for pure IP targets

@@ -164,10 +164,10 @@ pub const HELP_SORTS: &[(&str, &str)] = &[
 /// Reuses the exact glyph the 'c' column dialog shows for the matching stat, so a
 /// sort mode and its column read as the same thing across both dialogs.
 const SORT_SYMBOLS_ASCII: &[&str] = &[
-    " ", "a", "~", "x", "j", "w", "s", "0", "1", "p", "5", "9", "%", "J", "t", "u", "d",
+    " ", "a", "~", "v", "j", "w", "s", "0", "1", "p", "5", "9", "%", "J", "t", "u", "d",
 ];
 const SORT_SYMBOLS_UNICODE: &[&str] = &[
-    " ", "a", "\u{2248}", "\u{2717}", "\u{03b4}", "\u{03a9}", "\u{00b1}",
+    " ", "a", "\u{2248}", "\u{21e3}", "\u{03b4}", "\u{03a9}", "\u{00b1}",
     "\u{2080}", "\u{2081}", "\u{00bd}", "\u{2085}", "\u{2089}", "%", "\u{0394}", "\u{03c4}", "\u{2191}", "\u{2193}",
 ];
 
@@ -1447,14 +1447,14 @@ pub fn explain_content_lines(ascii: bool) -> Vec<Line<'static>> {
             raw("  "),
             span("23.3ms", grn),
             raw("  ~ 27.5ms  r 21ms<>34ms  j 2.1ms  "),
-            span("x 0 0.0%", grn),
+            span("v 0 0.0%", grn),
         ]));
     } else {
         lines.push(Line::from(vec![
             raw("  "),
             span("23.3ms", grn),
-            raw("  \u{2248} 27.5ms  \u{21D5} 21ms\u{2194}34ms  \u{03b4} 2.1ms  "),
-            span("\u{2717} 0 0.0%", grn),
+            raw("  \u{2248} 27.5ms  \u{21D5} 21ms-34ms  \u{03b4} 2.1ms  "),
+            span("\u{21e3} 0 0.0%", grn),
         ]));
     }
     lines.push(Line::from(""));
@@ -1463,7 +1463,7 @@ pub fn explain_content_lines(ascii: bool) -> Vec<Line<'static>> {
             ("~", "window average RTT"),
             ("r", "range \u{2014} best and worst RTT seen in the window"),
             ("j", "average jitter \u{2014} mean abs. difference between consecutive RTTs"),
-            ("x", "drop count and loss %  (green = none  red = drops present)"),
+            ("v", "drop count and loss %  (green = none  red = drops present)"),
             ("+", "duplicate count and %  (shown only when non-zero)"),
         ] {
             lines.push(Line::from(vec![raw("  "), span(sym, bld), raw("  "), raw(desc)]));
@@ -1473,7 +1473,7 @@ pub fn explain_content_lines(ascii: bool) -> Vec<Line<'static>> {
             ("\u{2248}", "window average RTT"),
             ("\u{21D5}", "range \u{2014} best \u{2194} worst RTT seen in the window"),
             ("\u{03b4}", "average jitter \u{2014} mean abs. difference between consecutive RTTs"),
-            ("\u{2717}", "drop count and loss %  (green = none  red = drops present)"),
+            ("\u{21e3}", "drop count and loss %  (green = none  red = drops present)"),
             ("\u{2295}", "duplicate count and %  (shown only when non-zero)"),
         ] {
             lines.push(Line::from(vec![raw("  "), span(sym, bld), raw("  "), raw(desc)]));
@@ -1498,7 +1498,7 @@ pub fn explain_content_lines(ascii: bool) -> Vec<Line<'static>> {
             ("q", "quality", "slow / degraded / jittery / spiky / good / no reply  (~ = too soon)  (*)"),
             ("J", "jitpct", "relative jitter: median jitter / median RTT %  (~ = too soon)"),
             ("L", "loss  ", "packet loss %  (~ = nothing sent yet)"),
-            ("e", "events", "last 30s: x / xx / xxx (drop / repeated / outage), xx+ (recovered), * (new IP); else trend v - ^; . warming up"),
+            ("e", "events", "last 30s: x / xx / xxx (drop / repeated / outage), xx+ (recovered), * (new IP), v ^ (trend changed); else . steady"),
         ] {
             lines.push(Line::from(vec![raw("    "), span(sym, bld), raw("  "), raw(format!("{name:<7}")), raw("  "), raw(desc)]));
         }
@@ -1519,7 +1519,7 @@ pub fn explain_content_lines(ascii: bool) -> Vec<Line<'static>> {
             ("\u{25c7}", "quality", "slow / degraded / jittery / spiky / good / no reply  (~ = too soon)  (*)"),
             ("\u{0394}", "jitpct", "relative jitter: median jitter / median RTT %  (~ = too soon)"),
             ("\u{2113}", "loss  ", "packet loss %  (~ = nothing sent yet)"),
-            ("\u{2301}", "events", "last 30s: \u{2715} / \u{2715}\u{2715} / \u{2715}\u{2715}\u{2715} (drop / repeated / outage), \u{2715}\u{2715}\u{2934} (recovered), \u{21c4} (new IP); else trend \u{2198} \u{2192} \u{2197}; \u{25f7} warming up"),
+            ("\u{2301}", "events", "last 30s: \u{2715} / \u{2715}\u{2715} / \u{2715}\u{2715}\u{2715} (drop / repeated / outage), \u{2715}\u{2715}\u{2934} (recovered), \u{21c4} (new IP), \u{2198} \u{2197} (trend changed); else \u{00b7} steady; \u{25f7} warming up"),
         ] {
             lines.push(Line::from(vec![raw("    "), span(sym, bld), raw("  "), raw(format!("{name:<7}")), raw("  "), raw(desc)]));
         }
@@ -2376,14 +2376,14 @@ pub fn draw_stat_column_toggle_dialog(
     // Space for identity columns that have no single-char key symbol.
     let symbols: [&str; STAT_TOGGLE_COUNT] = if ascii {
         [" ", " ", ":", " ", " ",
-         "~", "r", "j", "x",
+         "~", "r", "j", "v",
          "w", "s", "0", "1", "p", "5", "9", "%", "t", "u", "d",
          "o", "|",
          "i", "q",
          "J", "L", "e"]
     } else {
         [" ", " ", ":", " ", "\u{21bb}",
-         "\u{2248}", "\u{21d5}", "\u{03b4}", "\u{2717}",
+         "\u{2248}", "\u{21d5}", "\u{03b4}", "\u{21e3}",
          "\u{03a9}", "\u{00b1}", "\u{2080}", "\u{2081}", "\u{00bd}", "\u{2085}", "\u{2089}", "%", "\u{03c4}", "\u{2191}", "\u{2193}",
          "\u{25cb}", "\u{258f}",
          "\u{2139}", "\u{25c7}",

@@ -56,16 +56,16 @@ fn print_explain() {
     // Numerical stats (first)
     println!();
     println!("{}", hdr("Numerical stats:"));
-    println!("  {}  {} 27.5ms  {} 21ms↔34ms  {} 2.1ms  {}",
+    println!("  {}  {} 27.5ms  {} 21ms-34ms  {} 2.1ms  {}",
         grn("23.3ms"),
         bld("≈"), bld("⇕"), bld("δ"),
-        grn("✗ 0/60"),
+        grn("⇣ 0·60"),
     );
     println!();
     println!("  {}  window average RTT",                                             bld("≈"));
     println!("  {}  range - best ↔ worst RTT seen in the window",                    bld("⇕"));
     println!("  {}  average jitter - mean abs. difference between consecutive RTTs",  bld("δ"));
-    println!("  {}  drops / probes sent  ({} = none  {} = drops present)",          bld("✗"), grn("green"), red("red"));
+    println!("  {}  drops / probes sent  ({} = none  {} = drops present)",          bld("⇣"), grn("green"), red("red"));
     println!("  {}  duplicate count and %  (shown only when non-zero)",              bld("⊕"));
     println!();
     println!("  Optional extra stat columns - enable with {}  (on by default: quality, p95, events):", bld("--columns"));
@@ -84,7 +84,7 @@ fn print_explain() {
     println!("    {}  seen    time since the last successful reply",       bld("↑"));
     println!("    {}  lost    time since the last drop  (~ = none yet)",   bld("↓"));
     println!("    {}  status  verdict, loss record and coverage, e.g. lossy, worsening  (*)", bld("ℹ"));
-    println!("    {}  events  last 30s: ✕ / ✕✕ / ✕✕✕ (drop / repeated / outage), ✕✕⤴ (recovered), ⇄ (new IP); else trend ↘ → ↗; ◷ warming up", bld("⌁"));
+    println!("    {}  events  last 30s: ✕ / ✕✕ / ✕✕✕ (drop / repeated / outage), ✕✕⤴ (recovered), ⇄ (new IP), ↘ ↗ (trend changed); else · steady; ◷ warming up", bld("⌁"));
     println!("    (*) {}", vlat::ui::dialogs::TEXT_COLUMNS_WINDOW_NOTE);
     println!();
     println!("  cv vs jitpct - both are variation relative to RTT, but not the same kind:");

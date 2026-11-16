@@ -1070,7 +1070,8 @@ pub enum ExtraStat {
     Loss,
     /// What happened in the last 30s, as glyphs that fade with age: ✕ drop,
     /// ✕✕ repeated drops, ✕✕✕ outage, ✕✕⤴ recovered from one, ⇄ new IP;
-    /// otherwise the latency+loss trend arrow (↘ → ↗), or ◷ while warming up.
+    /// ↘ ↗ latency+loss trend changed; otherwise · when steady (including an
+    /// outage older than 30s), or ◷ during the brief graph warm-up  (!)
     Events,
 }
 
