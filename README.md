@@ -209,8 +209,9 @@ While `vlat` is running, you can use the following keys:
 | `t` | Change color theme (picker)                            |
 | `i` | Toggle target headers (graph / worm / radar / ekg / bubble / pong views); while hidden, their column keys and in-graph target letters are hidden too |
 | `w` | Set stats window (dialog; 0 = lifetime)                |
+| `y` | Chart scale (dialog): auto, a preset off the wheel, or a typed max - same as `--max-range` |
 | `r` | Re-resolve DNS for all hostnames now                   |
-| `d` | Save current view / theme / sort as defaults           |
+| `d` | Save current view / theme / sort / scale as defaults   |
 | `l` | Start/stop CSV or JSON logging                         |
 | `Space` | Freeze display (probes continue in background)         |
 | `q` / `Esc` | Quit and show summary (closes an open dialog first)    |
@@ -239,7 +240,7 @@ While `vlat` is running, you can use the following keys:
 - `--theme <name>`: Start with a specific theme (`default`, `nord`, `gruvbox`, `dracula`, `solarized`, `okabe`, `highcontrast`, `phosphor`, `retro`, `nocolor`).
 - `--ascii`: Use ASCII-only characters (no braille/Unicode).
 - `--view <mode>`: Start in a specific view (`list`, `single`, `graph`, `worm`, `radar`, `ekg`, `bars`, `cards`, `bubble`, `scatter`, `pong`). Default: `single` (falls back to `list` with more than one target).
-- `--max-range <ms>`: Fix Y-axis maximum (disables auto-scaling).
+- `--max-range <ms>`: Fix Y-axis maximum (disables auto-scaling). Change it while running with `y`, and save it as a default with `d`.
 - `--span <duration>`: Time range shown by the graph (e.g., `10m`).
 - `-w, --window <duration>`: Time span the stats (avg, loss, jitter, percentiles, `jitpct`, sort order) cover. Default `1h`; `0` = the whole run. The `status` and `quality` text columns always judge the last 5 minutes (or the whole window, if shorter); the loss count and % in `status` cover the window. The exit summary always covers the whole run.
 - `--columns <name,...>`: Columns to display. Stat columns (`mtr`, `std`, `p01`, `p10`, `p50`, `p95`, `p99`, `cv`, `srtt`, `seen`, `lost`, `status`, `quality`, `jitpct`, `loss`, `events`, `recent`, `bar`) are off by default except `recent` (sparkline), `bar` (range bar), `events`, `p95` and `quality`; on narrow terminals the extras give way whole, right-to-left, before the sparkline does. Identity columns (`mode`, `name`, `port`, `addr`, `resolve`) follow automatic display rules; naming one forces it on, and `none` hides everything (values after `none` add back, e.g. `--columns none,addr,p99`). `all` shows every column; `default` is the default set and composes (e.g. `--columns default,mtr`). All columns can also be toggled at runtime with the `c` key.

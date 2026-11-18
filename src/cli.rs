@@ -181,8 +181,9 @@ LIVE KEYS (while running):
   k         toggle column key header
   c         show / hide columns (dialog)
   w         set stats window (dialog; 0 = lifetime)
+  y         chart scale (dialog): auto, preset wheel, or a typed max
   s         cycle sort order  (multi-target): mtr → avg → none → name
-  d         save current view / theme / sort as defaults
+  d         save current view / theme / sort / scale as defaults
   r         re-resolve DNS for all hostnames now
   l         start/stop CSV / JSON logging
   Space     freeze display (probes continue in background)
@@ -711,7 +712,7 @@ pub struct Args {
     #[arg(long)]
     pub reverse_sort: bool,
 
-    /// Fix the maximum range for all charts (ms). Disables auto-scaling.
+    /// Fix the maximum range for all charts (ms). Disables auto-scaling. Change it live with 'y'.
     #[arg(long)]
     pub max_range: Option<f64>,
 

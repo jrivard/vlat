@@ -420,7 +420,7 @@ pub fn draw_worm(
             let secs_left = dismiss_at.saturating_duration_since(Instant::now()).as_secs();
             let sort_name = if states.len() <= 1 { "n/a" } else { sort_mode.as_str() };
             let extra_cols_on = !args.extra_stats.is_empty();
-            draw_help_dialog(frame, area, *page, *scroll, args.ascii, &args.theme, secs_left, sort_name, frozen, "worm", logo, args.window, *cursor, sub_menu.as_ref(), !log_fmt.is_empty(), show_col_keys, show_headers, extra_cols_on, collapsed, states.len());
+            draw_help_dialog(frame, area, *page, *scroll, args.ascii, &args.theme, secs_left, sort_name, frozen, "worm", logo, args.window, *cursor, sub_menu.as_ref(), !log_fmt.is_empty(), show_col_keys, show_headers, extra_cols_on, collapsed, states.len(), args.max_range);
         }
         DialogMode::Explain { scroll } => {
             draw_explain_dialog(frame, area, *scroll, args.ascii, &args.theme);
@@ -449,16 +449,16 @@ pub fn draw_worm(
         }
         DialogMode::SaveDefaults { view_name, theme_name, sort_name, config_path,
                                    save_view, save_theme, save_sort,
-                                   save_keys, save_window, save_cols,
-                                   cursor, keys_current, window_current, cols_delta,
+                                   save_keys, save_window, save_scale, save_cols,
+                                   cursor, keys_current, window_current, scale_current, cols_delta,
                                    file_view, file_theme, file_sort,
-                                   file_keys, file_window, file_cols, .. } => {
+                                   file_keys, file_window, file_scale, file_cols, .. } => {
             draw_save_defaults_dialog(frame, area, *view_name, theme_name, sort_name, config_path,
                                       *save_view, *save_theme, *save_sort,
-                                      *save_keys, *save_window, *save_cols,
-                                      *cursor, *keys_current, *window_current, cols_delta,
+                                      *save_keys, *save_window, *save_scale, *save_cols,
+                                      *cursor, *keys_current, *window_current, *scale_current, cols_delta,
                                       file_view.as_deref(), file_theme.as_deref(), file_sort.as_deref(),
-                                      file_keys.as_deref(), file_window.as_deref(), file_cols.as_deref(),
+                                      file_keys.as_deref(), file_window.as_deref(), *file_scale, file_cols.as_deref(),
                                       args.ascii, &args.theme);
         }
         DialogMode::WindowInput { input } => {
@@ -485,6 +485,8 @@ pub fn draw_worm(
         }
         // Scatter-only dialog; unreachable here, kept for exhaustiveness.
         DialogMode::AxisPicker { .. } => {}
+        // Worm doesn't follow the chart scale, so 'y' never opens this here.
+        DialogMode::ScalePicker(_) => {}
     }
     // ── frozen scrolling banner (drawn last so it sits on top of any dialog) ──
     if frozen { draw_frozen_notice(frame, area, args.ascii, &args.theme, tick); }

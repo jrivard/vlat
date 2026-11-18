@@ -49,6 +49,7 @@ pub enum HelpItem {
     SortMenu,
     ThemeMenu,
     SetWindow,
+    SetScale,
     SaveDefaults,
     ReResolve,
     LoggingMenu,
@@ -183,7 +184,13 @@ pub const HELP_THEMES: &[&str] = &[
     "okabe", "highcontrast", "phosphor", "retro", "nocolor",
 ];
 
-pub fn help_menu_items(sort_available: bool, has_headers: bool, show_axis_menu: bool) -> Vec<HelpItem> {
+/// Views whose drawing follows the shared chart scale (the ones where the
+/// 'y' scale picker does something visible).
+pub fn view_uses_scale(view: &str) -> bool {
+    matches!(view, "list" | "single" | "graph" | "ekg" | "bars" | "cards" | "pong")
+}
+
+pub fn help_menu_items(sort_available: bool, has_headers: bool, show_axis_menu: bool, show_scale: bool) -> Vec<HelpItem> {
     let _ = sort_available; // sort always present; used by caller for dimmed rendering
     let mut items = vec![
         HelpItem::ToggleHelp,
@@ -203,6 +210,9 @@ pub fn help_menu_items(sort_available: bool, has_headers: bool, show_axis_menu: 
         HelpItem::SortMenu,
         HelpItem::ThemeMenu,
         HelpItem::SetWindow,
+    ]);
+    if show_scale { items.push(HelpItem::SetScale); }
+    items.extend([
         HelpItem::Separator { label: "utilities", sec: Some(2) },
         HelpItem::SaveDefaults,
         HelpItem::ReResolve,
@@ -250,6 +260,8 @@ pub enum DialogMode {
     /// active (WormState or RadarState) as the cursor moves (see app.rs), so
     /// this variant only needs to track navigation position.
     MetricPicker { cursor: usize },
+    /// Chart-scale picker ('y'): auto, a preset off the wheel, or a typed max.
+    ScalePicker(ScalePicker),
     ViewNotice  { dismiss_at: crate::time::Instant, view_name: &'static str, view_desc: &'static str },
     WindowInput { input: String },
     /// `identity` caches the effective on/off state of the 5 identity columns
@@ -266,10 +278,12 @@ pub enum DialogMode {
         save_sort:      Option<bool>,
         save_keys:      Option<bool>,
         save_window:    Option<bool>,
+        save_scale:     Option<bool>,
         save_cols:      Option<bool>,
         cursor:         usize,
         keys_current:   bool,
         window_current: u64,
+        scale_current:  Option<f64>,
         cols_delta:     String,
         cols_cli:       String,
         file_view:      Option<String>,
@@ -277,6 +291,7 @@ pub enum DialogMode {
         file_sort:      Option<String>,
         file_keys:      Option<String>,
         file_window:    Option<String>,
+        file_scale:     Option<f64>,
         file_cols:      Option<String>,
     },
 }
@@ -1027,6 +1042,7 @@ pub fn draw_help_dialog(
     extra_cols_on: bool,
     collapsed: &[bool; 3],
     target_count: usize,
+    max_range: Option<f64>,
 ) {
     let key   = Style::default().fg(theme.dlg_help_key).add_modifier(Modifier::BOLD);
     let label = Style::default().fg(theme.c(theme.dlg_help_label));
@@ -1166,7 +1182,7 @@ pub fn draw_help_dialog(
     let is_worm         = current_view == "worm";
     let is_radar        = current_view == "radar";
     let show_axis_menu  = is_scatter || is_worm || is_radar;
-    let items           = help_menu_items(has_sort, has_headers, show_axis_menu);
+    let items           = help_menu_items(has_sort, has_headers, show_axis_menu, view_uses_scale(current_view));
     let cursor     = cursor.min(items.len().saturating_sub(1));
 
     // Every row below shares one fixed column layout - key(10, right-aligned)
@@ -1295,7 +1311,8 @@ pub fn draw_help_dialog(
             HelpItem::SortMenu        => help_row(is_sel, "s", None, true, value_desc("sort", sort_name), false),
             HelpItem::ThemeMenu       => help_row(is_sel, "t", None, true, value_desc("theme", theme.name), false),
             HelpItem::SetWindow       => help_row(is_sel, "w", None, true, value_desc("set window", &win_str), false),
-            HelpItem::SaveDefaults    => help_row(is_sel, "d", None, true, "save view / theme / sort defaults".into(), false),
+            HelpItem::SetScale        => help_row(is_sel, "y", None, true, value_desc("chart scale", &scale_setting_str(max_range)), false),
+            HelpItem::SaveDefaults    => help_row(is_sel, "d", None, true, "save view / theme / sort / scale defaults".into(), false),
             HelpItem::ReResolve       => help_row(is_sel, "r", None, false, "re-resolve DNS now".into(), false),
             HelpItem::LoggingMenu => {
                 if is_logging {
@@ -1857,7 +1874,7 @@ pub fn explain_content_lines(ascii: bool) -> Vec<Line<'static>> {
 /// built in `draw_save_defaults_dialog` below - callers use this (instead of
 /// the generic `DIALOG_ROWS`) to reserve enough inline-viewport space before
 /// opening the dialog, so it isn't clipped in non-fullscreen views.
-pub const SAVE_DEFAULTS_DIALOG_H: u16 = 18;
+pub const SAVE_DEFAULTS_DIALOG_H: u16 = 19;
 
 #[allow(clippy::too_many_arguments)]
 pub fn draw_save_defaults_dialog(
@@ -1872,16 +1889,19 @@ pub fn draw_save_defaults_dialog(
     save_sort:       Option<bool>,
     save_keys:       Option<bool>,
     save_window:     Option<bool>,
+    save_scale:      Option<bool>,
     save_cols:       Option<bool>,
     cursor:          usize,
     keys_current:    bool,
     window_current:  u64,
+    scale_current:   Option<f64>,
     cols_delta:      &str,
     file_view:       Option<&str>,
     file_theme:      Option<&str>,
     file_sort:       Option<&str>,
     file_keys:       Option<&str>,
     file_window:     Option<&str>,
+    file_scale:      Option<f64>,
     file_cols:       Option<&str>,
     ascii:           bool,
     theme:           &Theme,
@@ -1966,6 +1986,8 @@ pub fn draw_save_defaults_dialog(
 
     let keys_str   = if keys_current { "on" } else { "off" };
     let window_str = crate::cli::format_window_hms(window_current);
+    let scale_str  = scale_setting_str(scale_current);
+    let file_scale = file_scale.map(|v| scale_setting_str(Some(v)));
 
     let view_row = if let Some(vn) = view_name {
         make_row("view", save_view, vn, file_view, cursor == 0)
@@ -1985,9 +2007,10 @@ pub fn draw_save_defaults_dialog(
     let sort_row   = make_row("sort",    save_sort,   sort_name,     file_sort,   cursor == 2);
     let keys_row   = make_row("keys",    save_keys,   keys_str,      file_keys,   cursor == 3);
     let window_row = make_row("window",  save_window, &window_str,   file_window, cursor == 4);
-    let cols_row   = make_row("columns", save_cols,   cols_delta,    file_cols,   cursor == 5);
+    let scale_row  = make_row("scale",   save_scale,  &scale_str,    file_scale.as_deref(), cursor == 5);
+    let cols_row   = make_row("columns", save_cols,   cols_delta,    file_cols,   cursor == 6);
 
-    let save_row = if cursor == 6 {
+    let save_row = if cursor == 7 {
         Line::from(vec![
             Span::styled("  [ Save ]  ", sel_fg),
             Span::raw("  "),
@@ -2034,6 +2057,7 @@ pub fn draw_save_defaults_dialog(
         sort_row,
         keys_row,
         window_row,
+        scale_row,
         cols_row,
         action_rule,
         save_row,
@@ -2559,6 +2583,371 @@ fn render_version(f: &mut Frame, area: Rect, y: u16, theme: &Theme) {
     let ver_area = Rect::new(ver_x, y, ver_w, 1);
     f.render_widget(Clear, ver_area);
     f.render_widget(Paragraph::new(Span::styled(ver, Style::default().fg(theme.c(theme.dlg_help_label)))), ver_area);
+}
+
+// ── Chart scale picker ('y') ──────────────────────────────────────────────────
+
+/// Preset chart maxima (ms) for the scale picker's wheel. A 1-1.5-2-3-5-7.5
+/// ladder: it contains every bucket auto-scaling picks up to 500ms (see
+/// `scale_bucket`), so switching from auto to a preset usually lands exactly
+/// on the value already on screen, and it stays fine-grained in the common
+/// 10-500ms range without dozens of steps out to 10s.
+pub const SCALE_PRESETS: &[f64] = &[
+    10.0, 20.0, 30.0, 50.0, 75.0, 100.0, 150.0, 200.0, 300.0, 400.0, 500.0,
+    750.0, 1_000.0, 1_500.0, 2_000.0, 3_000.0, 5_000.0, 10_000.0,
+];
+/// Accepted range for a typed custom maximum (ms).
+pub const SCALE_CUSTOM_MIN: f64 = 1.0;
+pub const SCALE_CUSTOM_MAX: f64 = 60_000.0;
+/// Rows the scale picker needs (inline mode grows the viewport to fit).
+pub const SCALE_PICKER_H: u16 = 15;
+/// Wheel rows shown above and below the selected preset.
+const SCALE_WHEEL_REACH: usize = 2;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ScaleMode { Auto, Preset, Custom }
+
+impl ScaleMode {
+    const ALL: [ScaleMode; 3] = [ScaleMode::Auto, ScaleMode::Preset, ScaleMode::Custom];
+    fn label(self) -> &'static str {
+        match self { ScaleMode::Auto => "auto", ScaleMode::Preset => "preset", ScaleMode::Custom => "custom" }
+    }
+    fn idx(self) -> usize { ScaleMode::ALL.iter().position(|&m| m == self).unwrap_or(0) }
+}
+
+/// State of the chart-scale dialog. The chosen maximum is applied live as the
+/// wheel turns or the mode changes (see the `DialogMode::ScalePicker` handler
+/// in app.rs); a typed custom value applies on Enter. Esc restores `prev`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScalePicker {
+    pub mode: ScaleMode,
+    /// Index into `SCALE_PRESETS`.
+    pub wheel: usize,
+    /// Custom-max text field.
+    pub input: String,
+    /// The field still holds its prefilled text: the first digit typed replaces it.
+    pub input_fresh: bool,
+    /// The last Enter on the custom field was rejected.
+    pub invalid: bool,
+    /// `--max-range` when the dialog opened (restored on Esc).
+    pub prev: Option<f64>,
+    /// The scale auto mode would pick, when the dialog opened (shown as a hint).
+    pub auto_now: f64,
+}
+
+/// What a keypress asks the app to do.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScaleOutcome {
+    /// `Some(v)`: set the fixed max to `v` (`None` inside = auto).
+    pub set: Option<Option<f64>>,
+    pub close: bool,
+}
+
+fn fmt_scale_ms(v: f64) -> String {
+    if v.fract() == 0.0 { format!("{:.0}", v) } else { format!("{}", v) }
+}
+
+/// Text for a `--max-range` setting: "auto" or e.g. "200ms".
+pub fn scale_setting_str(max_range: Option<f64>) -> String {
+    max_range.map_or_else(|| "auto".to_string(), |v| format!("{}ms", fmt_scale_ms(v)))
+}
+
+/// First preset at or above `v` (the last one if `v` is above them all).
+fn preset_at_or_above(v: f64) -> usize {
+    SCALE_PRESETS.iter().position(|&p| p >= v - 1e-9).unwrap_or(SCALE_PRESETS.len() - 1)
+}
+
+pub fn parse_scale_input(s: &str) -> Option<f64> {
+    let v: f64 = s.trim().trim_end_matches("ms").trim().parse().ok()?;
+    (v.is_finite() && (SCALE_CUSTOM_MIN..=SCALE_CUSTOM_MAX).contains(&v)).then_some(v)
+}
+
+impl ScalePicker {
+    pub fn new(current: Option<f64>, auto_now: f64) -> Self {
+        let (mode, wheel, input) = match current {
+            None => (ScaleMode::Auto, preset_at_or_above(auto_now), String::new()),
+            Some(v) => match SCALE_PRESETS.iter().position(|&p| (p - v).abs() < 1e-9) {
+                Some(i) => (ScaleMode::Preset, i, fmt_scale_ms(v)),
+                None    => (ScaleMode::Custom, preset_at_or_above(v), fmt_scale_ms(v)),
+            },
+        };
+        ScalePicker { mode, wheel, input, input_fresh: true, invalid: false, prev: current, auto_now }
+    }
+
+    /// The fixed max this picker's current mode stands for (`Some(None)` = auto;
+    /// `None` = nothing to apply, e.g. an empty or invalid custom field).
+    fn value(&self) -> Option<Option<f64>> {
+        match self.mode {
+            ScaleMode::Auto   => Some(None),
+            ScaleMode::Preset => Some(Some(SCALE_PRESETS[self.wheel])),
+            ScaleMode::Custom => parse_scale_input(&self.input).map(Some),
+        }
+    }
+
+    fn set_mode(&mut self, mode: ScaleMode) -> ScaleOutcome {
+        self.mode = mode;
+        self.invalid = false;
+        if mode == ScaleMode::Custom && self.input.is_empty() {
+            self.input = fmt_scale_ms(SCALE_PRESETS[self.wheel]);
+            self.input_fresh = true;
+        }
+        ScaleOutcome { set: self.value(), close: false }
+    }
+
+    /// Turn the wheel by `delta` steps (positive = larger max). Turning from
+    /// any mode switches to preset.
+    fn turn(&mut self, delta: isize) -> ScaleOutcome {
+        let last = SCALE_PRESETS.len() as isize - 1;
+        self.wheel = (self.wheel as isize + delta).clamp(0, last) as usize;
+        self.set_mode(ScaleMode::Preset)
+    }
+
+    pub fn handle_key(&mut self, code: crossterm::event::KeyCode) -> ScaleOutcome {
+        use crossterm::event::KeyCode;
+        let stay = ScaleOutcome { set: None, close: false };
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') => ScaleOutcome { set: Some(self.prev), close: true },
+            KeyCode::Enter | KeyCode::Char('y') => match self.value() {
+                Some(v) => ScaleOutcome { set: Some(v), close: true },
+                None => { self.invalid = true; stay }
+            },
+            KeyCode::Left | KeyCode::Char('h') | KeyCode::BackTab => {
+                self.set_mode(ScaleMode::ALL[self.mode.idx().saturating_sub(1)])
+            }
+            KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => {
+                self.set_mode(ScaleMode::ALL[(self.mode.idx() + 1).min(ScaleMode::ALL.len() - 1)])
+            }
+            KeyCode::Char('a') => self.set_mode(ScaleMode::Auto),
+            KeyCode::Up   | KeyCode::Char('k') | KeyCode::Char('+') => self.turn(1),
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('-') => self.turn(-1),
+            KeyCode::PageUp   => self.turn(3),
+            KeyCode::PageDown => self.turn(-3),
+            KeyCode::Home => self.turn(-(SCALE_PRESETS.len() as isize)),
+            KeyCode::End  => self.turn(SCALE_PRESETS.len() as isize),
+            KeyCode::Char(c) if c.is_ascii_digit() || c == '.' => {
+                if self.mode != ScaleMode::Custom || self.input_fresh {
+                    self.input.clear();
+                }
+                self.mode = ScaleMode::Custom;
+                self.input_fresh = false;
+                self.invalid = false;
+                if self.input.len() < 8 { self.input.push(c); }
+                // A typed value applies on Enter, not per keystroke (typing
+                // "250" shouldn't flash 2 and 25 on the way).
+                stay
+            }
+            KeyCode::Backspace if self.mode == ScaleMode::Custom => {
+                if self.input_fresh { self.input.clear(); } else { self.input.pop(); }
+                self.input_fresh = false;
+                self.invalid = false;
+                stay
+            }
+            _ => stay,
+        }
+    }
+}
+
+pub fn draw_scale_picker_dialog(f: &mut Frame, area: Rect, ascii: bool, theme: &Theme, p: &ScalePicker) {
+    let key    = Style::default().fg(theme.dlg_help_key).add_modifier(Modifier::BOLD);
+    let sel    = Style::default().fg(Color::Black).bg(theme.dlg_help_title).add_modifier(Modifier::BOLD);
+    let label  = Style::default().fg(theme.c(theme.dlg_help_label));
+    let hint   = label.add_modifier(Modifier::DIM);
+
+    let mut body: Vec<Line> = vec![Line::raw("")];
+
+    // Mode tabs.
+    let mut tabs = vec![Span::raw("   ")];
+    for m in ScaleMode::ALL {
+        let text = format!(" {} ", m.label());
+        tabs.push(Span::styled(text, if m == p.mode { sel } else { key }));
+        tabs.push(Span::raw("   "));
+    }
+    body.push(Line::from(tabs));
+    body.push(Line::raw(""));
+
+    // Wheel (larger values on top, like the y-axis), or the custom field in
+    // its place, so the dialog keeps one height.
+    let wheel_rows = 2 * SCALE_WHEEL_REACH + 1;
+    if p.mode == ScaleMode::Custom {
+        let pad = (wheel_rows - 1) / 2;
+        body.extend(std::iter::repeat_n(Line::raw(""), pad - 1));
+        let field_style = if p.invalid { Style::default().fg(theme.dlg_warning).add_modifier(Modifier::BOLD) } else { key };
+        let cursor = if p.input_fresh { "" } else { "_" };
+        body.push(Line::from(vec![
+            Span::styled("      max: ", label),
+            Span::styled(format!("{}{}", p.input, cursor), field_style),
+            Span::styled(" ms", label),
+        ]));
+        body.push(if p.invalid {
+            Line::from(Span::styled(
+                format!("      enter {}-{} ms", fmt_scale_ms(SCALE_CUSTOM_MIN), fmt_scale_ms(SCALE_CUSTOM_MAX)),
+                Style::default().fg(theme.dlg_warning),
+            ))
+        } else {
+            Line::from(Span::styled("      type a value, Enter to apply", hint))
+        });
+        body.extend(std::iter::repeat_n(Line::raw(""), wheel_rows - pad - 1));
+    } else {
+        let live = p.mode == ScaleMode::Preset;
+        let (l_mark, r_mark) = if ascii { (">", "<") } else { ("\u{25b8}", "\u{25c2}") };
+        for off in (-(SCALE_WHEEL_REACH as isize)..=SCALE_WHEEL_REACH as isize).rev() {
+            let i = p.wheel as isize + off;
+            let text = if (0..SCALE_PRESETS.len() as isize).contains(&i) {
+                fmt_scale_ms(SCALE_PRESETS[i as usize])
+            } else { String::new() };
+            if off == 0 {
+                let style = if live { key } else { hint };
+                let marks = if live { label } else { hint };
+                body.push(Line::from(vec![
+                    Span::styled(format!("      {}  ", l_mark), marks),
+                    Span::styled(format!("{:>6} ms", text), style),
+                    Span::styled(format!("  {}", r_mark), marks),
+                ]));
+            } else {
+                // Fade with distance from the selection, like a drum turning away.
+                let style = if off.unsigned_abs() == 1 && live { label } else { hint };
+                body.push(Line::from(Span::styled(format!("         {:>6}", text), style)));
+            }
+        }
+    }
+
+    body.push(Line::raw(""));
+    let now_str = match p.mode {
+        ScaleMode::Auto => format!("   following the data: {}ms now", fmt_scale_ms(p.auto_now)),
+        _ => format!("   auto would use {}ms", fmt_scale_ms(p.auto_now)),
+    };
+    body.push(Line::from(Span::styled(now_str, label)));
+    body.push(Line::raw(""));
+    let nav = if ascii {
+        "  Up/Down turn  </> mode  0-9 type  Enter ok  Esc cancel"
+    } else {
+        "  \u{2191}\u{2193} turn  \u{2190}\u{2192} mode  0-9 type  \u{23ce} ok  Esc cancel"
+    };
+    body.push(Line::from(Span::styled(nav, hint)));
+
+    let dialog_h    = (body.len() as u16 + 2).min(area.height);
+    let dialog_w    = 60u16.min(area.width.saturating_sub(4));
+    let dialog_area = centered_rect(dialog_w, dialog_h, area);
+    let title = Line::from(Span::styled(
+        " y \u{2014} chart scale ",
+        Style::default().fg(Color::Black).bg(theme.dlg_help_title).add_modifier(Modifier::BOLD),
+    ));
+    f.render_widget(Clear, dialog_area);
+    f.render_widget(
+        Paragraph::new(body)
+            .block(Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.dlg_help_title))
+                .title(title))
+            .alignment(Alignment::Left),
+        dialog_area,
+    );
+}
+
+#[cfg(test)]
+mod scale_picker_tests {
+    use super::*;
+    use crossterm::event::KeyCode;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn opens_on_the_current_setting() {
+        let p = ScalePicker::new(None, 200.0);
+        assert_eq!((p.mode, SCALE_PRESETS[p.wheel]), (ScaleMode::Auto, 200.0));
+        // Auto values between presets open the wheel on the next preset up.
+        assert_eq!(SCALE_PRESETS[ScalePicker::new(None, 600.0).wheel], 750.0);
+        let p = ScalePicker::new(Some(150.0), 50.0);
+        assert_eq!((p.mode, SCALE_PRESETS[p.wheel]), (ScaleMode::Preset, 150.0));
+        let p = ScalePicker::new(Some(250.0), 50.0);
+        assert_eq!((p.mode, p.input.as_str()), (ScaleMode::Custom, "250"));
+    }
+
+    #[test]
+    fn presets_cover_every_auto_bucket_up_to_500() {
+        for ms in [5.0, 40.0, 90.0, 180.0, 260.0, 390.0, 480.0] {
+            let b = crate::state::scale_bucket(ms);
+            assert!(SCALE_PRESETS.contains(&b), "auto bucket {b} missing from presets");
+        }
+    }
+
+    #[test]
+    fn turning_the_wheel_applies_live_and_clamps() {
+        let mut p = ScalePicker::new(None, 100.0);
+        let out = p.handle_key(KeyCode::Up);
+        assert_eq!(out, ScaleOutcome { set: Some(Some(150.0)), close: false });
+        assert_eq!(p.mode, ScaleMode::Preset);
+        assert_eq!(p.handle_key(KeyCode::Down).set, Some(Some(100.0)));
+        assert_eq!(p.handle_key(KeyCode::Home).set, Some(Some(10.0)));
+        assert_eq!(p.handle_key(KeyCode::Down).set, Some(Some(10.0)));
+        assert_eq!(p.handle_key(KeyCode::End).set, Some(Some(10_000.0)));
+    }
+
+    #[test]
+    fn mode_switches_apply_and_auto_is_one_key() {
+        let mut p = ScalePicker::new(Some(200.0), 50.0);
+        assert_eq!(p.handle_key(KeyCode::Left).set, Some(None));
+        assert_eq!(p.handle_key(KeyCode::Right).set, Some(Some(200.0)));
+        // Custom prefills from the wheel, so switching to it changes nothing yet.
+        assert_eq!(p.handle_key(KeyCode::Right).set, Some(Some(200.0)));
+        assert_eq!(p.handle_key(KeyCode::Char('a')).set, Some(None));
+    }
+
+    #[test]
+    fn typed_max_applies_on_enter_and_rejects_bad_values() {
+        let mut p = ScalePicker::new(None, 100.0);
+        for c in "250".chars() { assert_eq!(p.handle_key(KeyCode::Char(c)).set, None); }
+        assert_eq!(p.mode, ScaleMode::Custom);
+        assert_eq!(p.handle_key(KeyCode::Enter), ScaleOutcome { set: Some(Some(250.0)), close: true });
+
+        let mut p = ScalePicker::new(None, 100.0);
+        p.handle_key(KeyCode::Char('0'));
+        assert_eq!(p.handle_key(KeyCode::Enter), ScaleOutcome { set: None, close: false });
+        assert!(p.invalid);
+        p.handle_key(KeyCode::Backspace);
+        p.handle_key(KeyCode::Char('9'));
+        assert!(!p.invalid);
+        assert_eq!(p.handle_key(KeyCode::Enter).set, Some(Some(9.0)));
+        assert_eq!(parse_scale_input("70000"), None);
+        assert_eq!(parse_scale_input("12.5"), Some(12.5));
+    }
+
+    #[test]
+    fn first_digit_replaces_the_prefilled_value() {
+        let mut p = ScalePicker::new(Some(250.0), 50.0);
+        p.handle_key(KeyCode::Char('4'));
+        p.handle_key(KeyCode::Char('0'));
+        assert_eq!(p.input, "40");
+    }
+
+    #[test]
+    fn esc_restores_the_setting_from_before() {
+        let mut p = ScalePicker::new(Some(300.0), 50.0);
+        p.handle_key(KeyCode::Up);
+        p.handle_key(KeyCode::Char('a'));
+        assert_eq!(p.handle_key(KeyCode::Esc), ScaleOutcome { set: Some(Some(300.0)), close: true });
+    }
+
+    fn render(p: &ScalePicker, w: u16) -> String {
+        let mut term = Terminal::new(TestBackend::new(w, 20)).unwrap();
+        term.draw(|f| draw_scale_picker_dialog(f, f.area(), false, &Theme::default(), p)).unwrap();
+        let buf = term.backend().buffer();
+        (0..20).map(|y| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>() + "\n").collect()
+    }
+
+    #[test]
+    fn draws_the_wheel_and_the_custom_field_at_one_height() {
+        let mut p = ScalePicker::new(Some(200.0), 100.0);
+        let wheel = render(&p, 70);
+        for v in ["100", "150", "200 ms", "300", "400"] { assert!(wheel.contains(v), "{v:?} missing:\n{wheel}"); }
+        assert!(wheel.contains("auto would use 100ms"));
+        p.handle_key(KeyCode::Char('7'));
+        let custom = render(&p, 70);
+        assert!(custom.contains("max: 7_ ms"), "{custom}");
+        let rows = |s: &str| s.lines().filter(|l| l.contains('\u{2502}')).count();
+        assert_eq!(rows(&wheel), rows(&custom), "dialog height must not jump between modes");
+        // Narrow terminals don't panic.
+        render(&p, 10);
+    }
 }
 
 #[cfg(test)]

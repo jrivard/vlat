@@ -287,7 +287,7 @@ pub fn render_dialogs(
             let secs_left = dismiss_at.saturating_duration_since(crate::time::Instant::now()).as_secs();
             let sort_name = if target_count <= 1 { "n/a" } else { sort_mode.as_str() };
             let extra_cols_on = !args.extra_stats.is_empty();
-            draw_help_dialog(f, area, *page, *scroll, args.ascii, &args.theme, secs_left, sort_name, frozen, current_view, logo, args.window, *cursor, sub_menu.as_ref(), is_logging, show_col_keys, show_headers, extra_cols_on, collapsed, target_count);
+            draw_help_dialog(f, area, *page, *scroll, args.ascii, &args.theme, secs_left, sort_name, frozen, current_view, logo, args.window, *cursor, sub_menu.as_ref(), is_logging, show_col_keys, show_headers, extra_cols_on, collapsed, target_count, args.max_range);
         }
         DialogMode::Explain { scroll } => {
             draw_explain_dialog(f, area, *scroll, args.ascii, &args.theme);
@@ -317,18 +317,21 @@ pub fn render_dialogs(
         DialogMode::WindowInput { input } => {
             draw_window_input_dialog(f, area, input, args.window, &args.theme);
         }
+        DialogMode::ScalePicker(p) => {
+            super::dialogs::draw_scale_picker_dialog(f, area, args.ascii, &args.theme, p);
+        }
         DialogMode::SaveDefaults { view_name, theme_name, sort_name, config_path,
                                    save_view, save_theme, save_sort,
-                                   save_keys, save_window, save_cols,
-                                   cursor, keys_current, window_current, cols_delta,
+                                   save_keys, save_window, save_scale, save_cols,
+                                   cursor, keys_current, window_current, scale_current, cols_delta,
                                    file_view, file_theme, file_sort,
-                                   file_keys, file_window, file_cols, .. } => {
+                                   file_keys, file_window, file_scale, file_cols, .. } => {
             draw_save_defaults_dialog(f, area, *view_name, theme_name, sort_name, config_path,
                                       *save_view, *save_theme, *save_sort,
-                                      *save_keys, *save_window, *save_cols,
-                                      *cursor, *keys_current, *window_current, cols_delta,
+                                      *save_keys, *save_window, *save_scale, *save_cols,
+                                      *cursor, *keys_current, *window_current, *scale_current, cols_delta,
                                       file_view.as_deref(), file_theme.as_deref(), file_sort.as_deref(),
-                                      file_keys.as_deref(), file_window.as_deref(), file_cols.as_deref(),
+                                      file_keys.as_deref(), file_window.as_deref(), *file_scale, file_cols.as_deref(),
                                       args.ascii, &args.theme);
         }
         DialogMode::StatColumnToggle { cursor, identity } => {

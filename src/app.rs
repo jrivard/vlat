@@ -329,15 +329,16 @@ struct DefaultsFileData {
     sort:    Option<String>,
     keys:    Option<String>,
     window:  Option<String>,
+    scale:   Option<f64>,
     columns: Option<String>,
 }
 
 fn read_defaults_file(path: &std::path::Path) -> DefaultsFileData {
     let content = match std::fs::read_to_string(path) {
         Ok(s) => s,
-        Err(_) => return DefaultsFileData { view: None, theme: None, sort: None, keys: None, window: None, columns: None },
+        Err(_) => return DefaultsFileData { view: None, theme: None, sort: None, keys: None, window: None, scale: None, columns: None },
     };
-    let mut d = DefaultsFileData { view: None, theme: None, sort: None, keys: None, window: None, columns: None };
+    let mut d = DefaultsFileData { view: None, theme: None, sort: None, keys: None, window: None, scale: None, columns: None };
     for line in content.lines() {
         let trimmed = line.trim();
         let mut parts = trimmed.splitn(2, |c: char| c.is_whitespace() || c == '=');
@@ -349,6 +350,7 @@ fn read_defaults_file(path: &std::path::Path) -> DefaultsFileData {
             "--sort"    => { d.sort    = Some(val); }
             "--keys"    => { d.keys    = Some(val); }
             "--window"  => { d.window  = Some(val); }
+            "--max-range" => { d.scale = val.trim().parse().ok(); }
             "--columns" => { d.columns = Some(val); }
             _ => {}
         }
@@ -364,14 +366,19 @@ fn write_defaults_file(
     sort:        &str,
     keys:        bool,
     window:      u64,
+    scale:       Option<f64>,
     cols:        &str,
     save_view:   Option<bool>,
     save_theme:  Option<bool>,
     save_sort:   Option<bool>,
     save_keys:   Option<bool>,
     save_window: Option<bool>,
+    save_scale:  Option<bool>,
     save_cols:   Option<bool>,
 ) -> Result<(), String> {
+    // --max-range has no "auto" value: saving auto means taking the key out.
+    let save_scale = if save_scale == Some(true) && scale.is_none() { Some(false) } else { save_scale };
+    let scale_line = |v: f64| format!("--max-range={}", if v.fract() == 0.0 { format!("{:.0}", v) } else { v.to_string() });
     // Some(true) = write current value, None = leave unchanged, Some(false) = delete key
     let existing = if path.exists() {
         std::fs::read_to_string(path)
@@ -386,6 +393,7 @@ fn write_defaults_file(
     let mut sort_written   = false;
     let mut keys_written   = false;
     let mut window_written = false;
+    let mut scale_written  = false;
     let mut cols_written   = false;
 
     for ln in existing.lines() {
@@ -409,6 +417,7 @@ fn write_defaults_file(
             "--sort"    => handle_key!(save_sort,   sort_written,   format!("--sort={}", sort)),
             "--keys"    => handle_key!(save_keys,   keys_written,   format!("--keys={}", keys)),
             "--window"  => handle_key!(save_window, window_written, format!("--window={}", crate::cli::format_window_hms(window))),
+            "--max-range" => handle_key!(save_scale, scale_written, scale_line(scale.unwrap_or(0.0))),
             "--columns" => handle_key!(save_cols,   cols_written,   format!("--columns={}", cols)),
             _ => { new_lines.push(ln.to_string()); }
         }
@@ -419,6 +428,7 @@ fn write_defaults_file(
     if save_sort   == Some(true) && !sort_written   { new_lines.push(format!("--sort={}", sort)); }
     if save_keys   == Some(true) && !keys_written   { new_lines.push(format!("--keys={}", keys)); }
     if save_window == Some(true) && !window_written { new_lines.push(format!("--window={}", crate::cli::format_window_hms(window))); }
+    if save_scale  == Some(true) && !scale_written  { if let Some(v) = scale { new_lines.push(scale_line(v)); } }
     if save_cols   == Some(true) && !cols_written   { new_lines.push(format!("--columns={}", cols)); }
 
     if let Some(parent) = path.parent() {
@@ -455,6 +465,7 @@ fn make_save_defaults_dialog(
     sort_cli:      &'static str,
     show_col_keys: bool,
     window_secs:   u64,
+    max_range:     Option<f64>,
     extra_stats:   &[crate::cli::ExtraStat],
 ) -> crate::ui::dialogs::DialogMode {
     let config_path = writable_config_path();
@@ -497,10 +508,12 @@ fn make_save_defaults_dialog(
         save_sort:      None,
         save_keys:      None,
         save_window:    None,
+        save_scale:     None,
         save_cols:      None,
         cursor:         if has_view { 0 } else { 1 },
         keys_current:   show_col_keys,
         window_current: window_secs,
+        scale_current:  max_range,
         cols_delta,
         cols_cli,
         file_view:      f.view,
@@ -508,6 +521,7 @@ fn make_save_defaults_dialog(
         file_sort:      f.sort,
         file_keys:      f.keys,
         file_window:    f.window,
+        file_scale:     f.scale,
         file_cols:      f.columns,
     }
 }
@@ -1471,6 +1485,10 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
     let mut key_stream = EventStream::new();
     let mut last_drawn_scale:      f64             = 0.0;
     let mut suppress_scale_anim:   bool            = false;
+    // Set when the 'y' scale picker changes --max-range: the next frame animates
+    // straight to the new scale (from wherever an in-flight animation is), with
+    // no shrink hold - that hold only exists to keep auto-scaling from wobbling.
+    let mut scale_user_changed:    bool            = false;
     let mut scale_decrease_since:  Option<Instant> = None;
     let mut col_widths_stabilizer = ColWidthsStabilizer::new();
 
@@ -1502,6 +1520,19 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
         }
     }
 
+    // Open the 'y' chart-scale picker (views that follow the shared scale only).
+    macro_rules! open_scale_picker {
+        () => {{
+            let global_p95 = states.iter().filter(|st| !st.waiting)
+                .map(|st| st.win_p95()).fold(f64::MIN, f64::max);
+            let auto_now = crate::state::scale_bucket(if global_p95 == f64::MIN { 0.0 } else { global_p95 });
+            if !in_alternate_screen && !args.fullscreen && !args.worm && !args.radar {
+                ensure_dialog_space!(crate::ui::dialogs::SCALE_PICKER_H);
+            }
+            dialog = DialogMode::ScalePicker(crate::ui::dialogs::ScalePicker::new(args.max_range, auto_now));
+        }};
+    }
+
     // Single source of truth for the chart scale.  While a scale animation is
     // running the scale is locked to the animation target so consecutive
     // frames (and all views) agree; otherwise it is computed from the data.
@@ -1530,6 +1561,13 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
             let shared_scale = if frozen {
                 current_scale!(&states_snapshot)
             } else {
+                if scale_user_changed {
+                    scale_user_changed   = false;
+                    scale_decrease_since = None;
+                    let global_p95 = states.iter().filter(|st| !st.waiting)
+                        .map(|st| st.win_p95()).fold(f64::MIN, f64::max);
+                    retarget_scale_anim(&mut states, compute_scale(&args, global_p95), &mut last_drawn_scale);
+                }
                 let s = current_scale!(&states);
                 if suppress_scale_anim {
                     last_drawn_scale    = s;
@@ -1944,7 +1982,8 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                                 let sort_available = states.len() > 1;
                                 let has_headers = matches!(fullscreen_view, FullscreenView::Graph | FullscreenView::Worm | FullscreenView::Radar | FullscreenView::Ekg | FullscreenView::Bars | FullscreenView::Pong);
                                 let show_axis_menu = matches!(fullscreen_view, FullscreenView::Scatter | FullscreenView::Worm | FullscreenView::Radar);
-                                let items       = help_menu_items(sort_available, has_headers, show_axis_menu);
+                                let show_scale = crate::ui::dialogs::view_uses_scale(view_cli_name(fullscreen_view));
+                                let items       = help_menu_items(sort_available, has_headers, show_axis_menu, show_scale);
                                 let item_count  = items.len();
 
                                 match code {
@@ -2033,6 +2072,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                                                     show_headers = !show_headers;
                                                     *dismiss_at = Instant::now() + Duration::from_secs(HELP_DISMISS_SECS);
                                                 }
+                                                HelpItem::SetScale => { open_scale_picker!(); }
                                                 HelpItem::SetWindow => {
                                                     if !in_alternate_screen && !args.fullscreen && !args.worm && !args.radar {
                                                         ensure_dialog_space!(dialog_rows);
@@ -2082,7 +2122,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                                                     if !in_alternate_screen && !args.fullscreen && !args.worm && !args.radar {
                                                         ensure_dialog_space!(crate::ui::dialogs::SAVE_DEFAULTS_DIALOG_H);
                                                     }
-                                                    dialog = make_save_defaults_dialog(view_cli, args.theme.name, sort_cli, show_col_keys, args.window, &args.extra_stats);
+                                                    dialog = make_save_defaults_dialog(view_cli, args.theme.name, sort_cli, show_col_keys, args.window, args.max_range, &args.extra_stats);
                                                 }
                                                 HelpItem::ReResolve => {
                                                     if !args.no_dns_refresh { fire_due_resolves!(true); }
@@ -2120,7 +2160,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                                         if !in_alternate_screen && !args.fullscreen && !args.worm && !args.radar {
                                             ensure_dialog_space!(crate::ui::dialogs::SAVE_DEFAULTS_DIALOG_H);
                                         }
-                                        dialog = make_save_defaults_dialog(view_cli, args.theme.name, sort_cli, show_col_keys, args.window, &args.extra_stats);
+                                        dialog = make_save_defaults_dialog(view_cli, args.theme.name, sort_cli, show_col_keys, args.window, args.max_range, &args.extra_stats);
                                     }
                                     _ => {
                                         // Execute the action but keep help open; reset the timer.
@@ -2202,8 +2242,8 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                         }
                         DialogMode::SaveDefaults { view_name, theme_name, sort_name, config_path,
                                                    save_view, save_theme, save_sort,
-                                                   save_keys, save_window, save_cols,
-                                                   keys_current, window_current, cols_cli,
+                                                   save_keys, save_window, save_scale, save_cols,
+                                                   keys_current, window_current, scale_current, cols_cli,
                                                    cursor, .. } => {
                             let vn = *view_name;
                             let tn = *theme_name;
@@ -2212,11 +2252,11 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                             match code {
                                 KeyCode::Up | KeyCode::Char('k') => {
                                     let min_c = if has_view { 0 } else { 1 };
-                                    let new_c = if *cursor <= min_c { 6 } else { *cursor - 1 };
-                                    *cursor = if new_c == 0 && !has_view { 6 } else { new_c };
+                                    let new_c = if *cursor <= min_c { 7 } else { *cursor - 1 };
+                                    *cursor = if new_c == 0 && !has_view { 7 } else { new_c };
                                 }
                                 KeyCode::Down | KeyCode::Char('j') => {
-                                    let new_c = (*cursor + 1) % 7;
+                                    let new_c = (*cursor + 1) % 8;
                                     *cursor = if new_c == 0 && !has_view { 1 } else { new_c };
                                 }
                                 KeyCode::Char(' ') | KeyCode::Enter => {
@@ -2229,13 +2269,16 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                                         2             => { *save_sort   = cycle(*save_sort); }
                                         3             => { *save_keys   = cycle(*save_keys); }
                                         4             => { *save_window = cycle(*save_window); }
-                                        5             => { *save_cols   = cycle(*save_cols); }
-                                        6 => {
+                                        5             => { *save_scale  = cycle(*save_scale); }
+                                        6             => { *save_cols   = cycle(*save_cols); }
+                                        7 => {
                                             let sv = *save_view;
                                             let st = *save_theme;
                                             let ss = *save_sort;
                                             let sk = *save_keys;
                                             let sw = *save_window;
+                                            let sr = *save_scale;
+                                            let rc = *scale_current;
                                             let sc = *save_cols;
                                             let kc = *keys_current;
                                             let wc = *window_current;
@@ -2243,8 +2286,8 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                                             let cp = config_path.clone();
                                             let result = write_defaults_file(
                                                 &std::path::PathBuf::from(&cp),
-                                                vn, tn, sn, kc, wc, &cc,
-                                                sv, st, ss, sk, sw, sc,
+                                                vn, tn, sn, kc, wc, rc, &cc,
+                                                sv, st, ss, sk, sw, sr, sc,
                                             );
                                             dialog = match result {
                                                 Ok(()) => DialogMode::Warning {
@@ -2462,6 +2505,16 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                                 dialog = DialogMode::None;
                             }
                         }
+                        DialogMode::ScalePicker(picker) => {
+                            let out = picker.handle_key(code);
+                            if let Some(v) = out.set {
+                                if args.max_range != v {
+                                    args.max_range     = v;
+                                    scale_user_changed = true;
+                                }
+                            }
+                            if out.close { dialog = DialogMode::None; }
+                        }
                         DialogMode::MetricPicker { cursor } => {
                             let n = AxisMetric::ALL.len();
                             if worm_state.is_some() || radar_state.is_some() {
@@ -2592,6 +2645,9 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                                     dialog = DialogMode::ThemePicker { cursor };
                                 }
                                 // Shift-T is handled globally above (before dialog routing).
+                                KeyCode::Char('y') if crate::ui::dialogs::view_uses_scale(view_cli_name(fullscreen_view)) => {
+                                    open_scale_picker!();
+                                }
                                 KeyCode::Char('a') if scatter_state.is_some() || worm_state.is_some() || radar_state.is_some() => {
                                     if let Some(nw) = worm_state.as_ref() {
                                         let cursor = AxisMetric::ALL.iter().position(|&m| m == nw.metric).unwrap_or(0);
@@ -2697,7 +2753,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                                     if !in_alternate_screen && !args.fullscreen && !args.worm && !args.radar {
                                         ensure_dialog_space!(crate::ui::dialogs::SAVE_DEFAULTS_DIALOG_H);
                                     }
-                                    dialog = make_save_defaults_dialog(view_cli, args.theme.name, sort_cli, show_col_keys, args.window, &args.extra_stats);
+                                    dialog = make_save_defaults_dialog(view_cli, args.theme.name, sort_cli, show_col_keys, args.window, args.max_range, &args.extra_stats);
                                 }
                                 KeyCode::Char('l') => {
                                     if output_file.is_some() {
@@ -3370,6 +3426,32 @@ fn trigger_scale_anim(states: &mut [TargetState], shared_scale: f64, last_drawn:
         }
     }
     *last_drawn = shared_scale;
+}
+
+/// Animate straight to a scale the user just picked: from wherever the
+/// on-screen scale is now (mid-animation included) toward `target`, in either
+/// direction. `trigger_scale_anim` only ever retargets upward, which would
+/// leave a downward wheel turn waiting out the current animation.
+fn retarget_scale_anim(states: &mut [TargetState], target: f64, last_drawn: &mut f64) {
+    let from = states.iter().find(|s| !s.waiting && s.scale_anim.is_some())
+        .map(|s| {
+            let elapsed = s.bar_anim_start.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
+            let frac    = (elapsed / crate::constants::BAR_ANIM_SECS).clamp(0.0, 1.0);
+            s.scale_anim_old + (s.scale_anim_new - s.scale_anim_old) * frac
+        })
+        .unwrap_or(*last_drawn);
+    if from > 0.0 && from != target {
+        let now = Instant::now();
+        for s in states.iter_mut().filter(|s| !s.waiting) {
+            s.scale_anim_old   = from;
+            s.scale_anim_new   = target;
+            s.scale_anim_up    = target > from;
+            s.scale_anim       = Some(8);
+            s.bar_anim_start   = Some(now);
+            s.graph_anim_start = Some(now);
+        }
+    }
+    *last_drawn = target;
 }
 
 fn tick_graph_anim(states: &mut [TargetState]) {
@@ -4272,5 +4354,38 @@ mod icmp_error_tests {
         assert_eq!(parse_target_spec("udp://1.1.1.1", &args).unwrap().mode, PingMode::Udp);
         let p = parse_target_spec("tcp://[2001:db8::1]:443", &args).unwrap();
         assert_eq!((p.mode, p.port), (PingMode::Tcp, 443));
+    }
+}
+
+#[cfg(test)]
+mod defaults_file_scale_tests {
+    use super::*;
+
+    fn write(dir: &std::path::Path, existing: &str, scale: Option<f64>, save_scale: Option<bool>) -> String {
+        let path = dir.join("defaults");
+        std::fs::write(&path, existing).unwrap();
+        write_defaults_file(&path, Some("graph"), "nord", "none", true, 3600, scale, "none",
+            None, None, None, None, None, save_scale, None).unwrap();
+        std::fs::read_to_string(&path).unwrap()
+    }
+
+    #[test]
+    fn scale_row_saves_replaces_and_clears_max_range() {
+        let dir = std::env::temp_dir().join(format!("vlat-defaults-scale-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Save adds it; other keys untouched.
+        assert_eq!(write(&dir, "--theme=nord\n", Some(200.0), Some(true)), "--theme=nord\n--max-range=200\n");
+        // Save replaces an existing value in place; fractional values keep their decimals.
+        assert_eq!(write(&dir, "--max-range 50\n--sort=avg\n", Some(12.5), Some(true)), "--max-range=12.5\n--sort=avg\n");
+        // Saving auto has no value to write, so it takes the key out.
+        assert_eq!(write(&dir, "--max-range=50\n--sort=avg\n", None, Some(true)), "--sort=avg\n");
+        // Skip leaves it; clear removes it.
+        assert_eq!(write(&dir, "--max-range=50\n", Some(200.0), None), "--max-range=50\n");
+        assert_eq!(write(&dir, "--max-range=50\n--sort=avg\n", Some(200.0), Some(false)), "--sort=avg\n");
+        // Read back for the dialog's "saved default" column.
+        let path = dir.join("defaults");
+        std::fs::write(&path, "--max-range=300\n").unwrap();
+        assert_eq!(read_defaults_file(&path).scale, Some(300.0));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
