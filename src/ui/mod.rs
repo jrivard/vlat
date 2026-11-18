@@ -28,6 +28,7 @@ pub mod radar;
 pub mod scatter;
 pub mod status_text;
 pub mod events_cell;
+pub mod exit_summary;
 pub mod worm;
 pub mod theme;
 pub mod widgets;

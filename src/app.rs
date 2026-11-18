@@ -3265,10 +3265,11 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
     // CompletedFrame (NOT terminal.current_buffer_mut(), which ratatui has already reset).
     let saved_buf = captured_buf;
     // A session that spent its whole life in the single-target view, never switching
-    // to any other view, gets a brief plain-English one-line summary in place of the
-    // full end-of-session table - see single_exit_summary_line. Single is always
-    // inline (never the alternate screen), so it has its own exit branch below
-    // (which still honours keep_display) rather than threading through the others.
+    // to any other view, replaces the view with its summary rather than printing it
+    // below. Single is always inline (never the alternate screen), so it has its own
+    // exit branch below (which still honours keep_display) rather than threading
+    // through the others. (Which summary prints - the three-line single-target one
+    // or the table - is print_summary's call, by target count, in every view.)
     let single_only_session = fullscreen_view == FullscreenView::Single && !used_other_view;
     // The buffer's own area carries the viewport's absolute y-offset, which the
     // single-view-only exit path needs too (to anchor its one-line summary right
@@ -3316,18 +3317,8 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                 inline_viewport_top
             };
             let _ = execute!(out, cursor::MoveTo(0, clear_from), terminal::Clear(terminal::ClearType::FromCursorDown));
-            // A colorful "vlat:" wordmark, then a brief plain-English final summary -
-            // not the live status line's text, which is meaningless once the run has
-            // actually ended (a newcomer wants sent/received/loss/time/latency, not
-            // "ok · no loss for 12s"). This is the last thing printed before the shell
-            // prompt returns.
-            for (i, ch) in "vlat:".chars().enumerate() {
-                let (r, g, b) = args.theme.target_color(i);
-                let _ = write!(out, "\x1b[38;2;{r};{g};{b}m{ch}");
-            }
-            let _ = write!(out, "\x1b[0m ");
-            let elapsed_secs = crate::session::epoch_ms().saturating_sub(session_ctx.started_at_ms) / 1000;
-            let _ = write!(out, "{}\r\n", single_exit_summary_line(&states[0], elapsed_secs, &args.theme, args.no_color));
+            // The summary (below) is the last thing printed before the shell prompt
+            // returns, in place of the view.
         } else if in_alternate_screen {
             // Leave alternate screen - restores the main buffer and the cursor to
             // the position saved when EnterAlternateScreen was called.
@@ -3363,8 +3354,10 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
         }
         out.flush().ok();
     }
-    if !single_only_session {
-        println!();
+    {
+        // The single-view-only path cleared the view away and prints in its place;
+        // every other path leaves a blank line after whatever is still on screen.
+        if !single_only_session { println!(); }
         let exec_cmd_strs: Vec<String> = exec_cmd_arcs.iter().map(|a| (**a).clone()).collect();
         let elapsed_secs = crate::session::epoch_ms().saturating_sub(session_ctx.started_at_ms) / 1000;
         print_summary(&states, &mode_labels, &exec_cmd_strs, &deleted_states, &deleted_mode_labels, &[], &args, elapsed_secs);
@@ -3504,9 +3497,7 @@ fn dump_buffer_ansi(buf: &ratatui::buffer::Buffer) {
 /// single-view-only exit path (just its last row, skipping the border glyph column
 /// so a colorful "vlat:" wordmark can take its place instead).
 fn dump_buffer_ansi_rows(buf: &ratatui::buffer::Buffer, top: u16, bottom: u16, left: u16) {
-    use std::fmt::Write as FmtWrite;
     use std::io::Write;
-    use ratatui::style::{Color, Modifier};
     let mut out = io::stdout();
 
     let area = buf.area;
@@ -3518,64 +3509,87 @@ fn dump_buffer_ansi_rows(buf: &ratatui::buffer::Buffer, top: u16, bottom: u16, l
             let Some(cell) = buf.cell((x, y)) else { continue };
             if cell.diff_option == ratatui::buffer::CellDiffOption::Skip { continue; }
             line.push_str("\x1b[0m");
-            match cell.fg {
-                Color::Reset        => {}
-                Color::Black        => line.push_str("\x1b[30m"),
-                Color::Red          => line.push_str("\x1b[31m"),
-                Color::Green        => line.push_str("\x1b[32m"),
-                Color::Yellow       => line.push_str("\x1b[33m"),
-                Color::Blue         => line.push_str("\x1b[34m"),
-                Color::Magenta      => line.push_str("\x1b[35m"),
-                Color::Cyan         => line.push_str("\x1b[36m"),
-                Color::Gray         => line.push_str("\x1b[37m"),
-                Color::DarkGray     => line.push_str("\x1b[90m"),
-                Color::LightRed     => line.push_str("\x1b[91m"),
-                Color::LightGreen   => line.push_str("\x1b[92m"),
-                Color::LightYellow  => line.push_str("\x1b[93m"),
-                Color::LightBlue    => line.push_str("\x1b[94m"),
-                Color::LightMagenta => line.push_str("\x1b[95m"),
-                Color::LightCyan    => line.push_str("\x1b[96m"),
-                Color::White        => line.push_str("\x1b[97m"),
-                Color::Rgb(r, g, b) => { let _ = write!(line, "\x1b[38;2;{r};{g};{b}m"); }
-                Color::Indexed(n)   => { let _ = write!(line, "\x1b[38;5;{n}m"); }
-            }
-            match cell.bg {
-                Color::Reset        => {}
-                Color::Black        => line.push_str("\x1b[40m"),
-                Color::Red          => line.push_str("\x1b[41m"),
-                Color::Green        => line.push_str("\x1b[42m"),
-                Color::Yellow       => line.push_str("\x1b[43m"),
-                Color::Blue         => line.push_str("\x1b[44m"),
-                Color::Magenta      => line.push_str("\x1b[45m"),
-                Color::Cyan         => line.push_str("\x1b[46m"),
-                Color::Gray         => line.push_str("\x1b[47m"),
-                Color::DarkGray     => line.push_str("\x1b[100m"),
-                Color::LightRed     => line.push_str("\x1b[101m"),
-                Color::LightGreen   => line.push_str("\x1b[102m"),
-                Color::LightYellow  => line.push_str("\x1b[103m"),
-                Color::LightBlue    => line.push_str("\x1b[104m"),
-                Color::LightMagenta => line.push_str("\x1b[105m"),
-                Color::LightCyan    => line.push_str("\x1b[106m"),
-                Color::White        => line.push_str("\x1b[107m"),
-                Color::Rgb(r, g, b) => { let _ = write!(line, "\x1b[48;2;{r};{g};{b}m"); }
-                Color::Indexed(n)   => { let _ = write!(line, "\x1b[48;5;{n}m"); }
-            }
-            let m = cell.modifier;
-            if m.contains(Modifier::BOLD)        { line.push_str("\x1b[1m"); }
-            if m.contains(Modifier::DIM)         { line.push_str("\x1b[2m"); }
-            if m.contains(Modifier::ITALIC)      { line.push_str("\x1b[3m"); }
-            if m.contains(Modifier::UNDERLINED)  { line.push_str("\x1b[4m"); }
-            if m.contains(Modifier::SLOW_BLINK)  { line.push_str("\x1b[5m"); }
-            if m.contains(Modifier::RAPID_BLINK) { line.push_str("\x1b[6m"); }
-            if m.contains(Modifier::REVERSED)    { line.push_str("\x1b[7m"); }
-            if m.contains(Modifier::HIDDEN)      { line.push_str("\x1b[8m"); }
-            if m.contains(Modifier::CROSSED_OUT) { line.push_str("\x1b[9m"); }
+            push_sgr(&mut line, cell.fg, cell.bg, cell.modifier);
             line.push_str(cell.symbol());
         }
         line.push_str("\x1b[0m\r\n");
         out.write_all(line.as_bytes()).ok();
     }
     out.flush().ok();
+}
+
+/// Append the SGR escapes for a ratatui fg/bg/modifier set to `line`.
+fn push_sgr(line: &mut String, fg: ratatui::style::Color, bg: ratatui::style::Color, modifier: ratatui::style::Modifier) {
+    use std::fmt::Write as FmtWrite;
+    use ratatui::style::{Color, Modifier};
+    match fg {
+        Color::Reset        => {}
+        Color::Black        => line.push_str("\x1b[30m"),
+        Color::Red          => line.push_str("\x1b[31m"),
+        Color::Green        => line.push_str("\x1b[32m"),
+        Color::Yellow       => line.push_str("\x1b[33m"),
+        Color::Blue         => line.push_str("\x1b[34m"),
+        Color::Magenta      => line.push_str("\x1b[35m"),
+        Color::Cyan         => line.push_str("\x1b[36m"),
+        Color::Gray         => line.push_str("\x1b[37m"),
+        Color::DarkGray     => line.push_str("\x1b[90m"),
+        Color::LightRed     => line.push_str("\x1b[91m"),
+        Color::LightGreen   => line.push_str("\x1b[92m"),
+        Color::LightYellow  => line.push_str("\x1b[93m"),
+        Color::LightBlue    => line.push_str("\x1b[94m"),
+        Color::LightMagenta => line.push_str("\x1b[95m"),
+        Color::LightCyan    => line.push_str("\x1b[96m"),
+        Color::White        => line.push_str("\x1b[97m"),
+        Color::Rgb(r, g, b) => { let _ = write!(line, "\x1b[38;2;{r};{g};{b}m"); }
+        Color::Indexed(n)   => { let _ = write!(line, "\x1b[38;5;{n}m"); }
+    }
+    match bg {
+        Color::Reset        => {}
+        Color::Black        => line.push_str("\x1b[40m"),
+        Color::Red          => line.push_str("\x1b[41m"),
+        Color::Green        => line.push_str("\x1b[42m"),
+        Color::Yellow       => line.push_str("\x1b[43m"),
+        Color::Blue         => line.push_str("\x1b[44m"),
+        Color::Magenta      => line.push_str("\x1b[45m"),
+        Color::Cyan         => line.push_str("\x1b[46m"),
+        Color::Gray         => line.push_str("\x1b[47m"),
+        Color::DarkGray     => line.push_str("\x1b[100m"),
+        Color::LightRed     => line.push_str("\x1b[101m"),
+        Color::LightGreen   => line.push_str("\x1b[102m"),
+        Color::LightYellow  => line.push_str("\x1b[103m"),
+        Color::LightBlue    => line.push_str("\x1b[104m"),
+        Color::LightMagenta => line.push_str("\x1b[105m"),
+        Color::LightCyan    => line.push_str("\x1b[106m"),
+        Color::White        => line.push_str("\x1b[107m"),
+        Color::Rgb(r, g, b) => { let _ = write!(line, "\x1b[48;2;{r};{g};{b}m"); }
+        Color::Indexed(n)   => { let _ = write!(line, "\x1b[48;5;{n}m"); }
+    }
+    let m = modifier;
+    if m.contains(Modifier::BOLD)        { line.push_str("\x1b[1m"); }
+    if m.contains(Modifier::DIM)         { line.push_str("\x1b[2m"); }
+    if m.contains(Modifier::ITALIC)      { line.push_str("\x1b[3m"); }
+    if m.contains(Modifier::UNDERLINED)  { line.push_str("\x1b[4m"); }
+    if m.contains(Modifier::SLOW_BLINK)  { line.push_str("\x1b[5m"); }
+    if m.contains(Modifier::RAPID_BLINK) { line.push_str("\x1b[6m"); }
+    if m.contains(Modifier::REVERSED)    { line.push_str("\x1b[7m"); }
+    if m.contains(Modifier::HIDDEN)      { line.push_str("\x1b[8m"); }
+    if m.contains(Modifier::CROSSED_OUT) { line.push_str("\x1b[9m"); }
+}
+
+/// A styled line as ANSI text (plain text when `nc`), for printing after the TUI is gone.
+fn line_to_ansi(line: &ratatui::text::Line, nc: bool) -> String {
+    let mut out = String::new();
+    for span in &line.spans {
+        let st = line.style.patch(span.style);
+        if nc || st == ratatui::style::Style::default() {
+            out.push_str(&span.content);
+            continue;
+        }
+        push_sgr(&mut out, st.fg.unwrap_or(ratatui::style::Color::Reset), st.bg.unwrap_or(ratatui::style::Color::Reset), st.add_modifier);
+        out.push_str(&span.content);
+        out.push_str("\x1b[0m");
+    }
+    out
 }
 
 fn fmt_thousands(n: u64) -> String {
@@ -3595,55 +3609,6 @@ fn fmt_recv(s: &TargetState) -> String {
     let received = s.total_sent.saturating_sub(s.drops as u64);
     let pct = received as f64 / s.total_sent as f64 * 100.0;
     format!("{} ({:.1}%)", fmt_thousands(received), pct)
-}
-
-/// Brief, plain-English final summary for the single-view-only exit path: sent,
-/// received, loss %, total time, and min/avg/max latency. Deliberately spelled out
-/// rather than using the live view's compact "N probes, elapsed" text, which reads
-/// as a snapshot mid-run and isn't self-explanatory once the run has actually ended.
-///
-/// Colored with the same themable properties as the live view and the wrapped
-/// summary table (`print_summary`), so the palette stays consistent end to end;
-/// `nc` (mirrors `args.no_color`) strips all ANSI for plain output.
-fn single_exit_summary_line(state: &TargetState, elapsed_secs: u64, theme: &crate::ui::Theme, nc: bool) -> String {
-    use ratatui::style::Color;
-    let color = |c: Color, s: &str| -> String {
-        if nc { return s.to_string(); }
-        let (r, g, b) = crate::ui::theme::color_to_rgb(c);
-        format!("\x1b[38;2;{r};{g};{b}m{s}\x1b[0m")
-    };
-    let dim = |s: &str| -> String { if nc { s.to_string() } else { format!("\x1b[2m{s}\x1b[0m") } };
-
-    let sent     = state.total_sent;
-    let received = sent.saturating_sub(state.drops as u64);
-    let loss_pct = if sent > 0 { state.drops as f64 / sent as f64 * 100.0 } else { 0.0 };
-    let all_lost = sent > 0 && state.drops as u64 == sent;
-
-    let host_txt     = color(theme.hostname, &state.host);
-    let received_txt = {
-        let txt = fmt_thousands(received);
-        if all_lost { color(theme.c(theme.drop_marker), &txt) } else { txt }
-    };
-    let loss_txt = {
-        let txt = format!("{:.1}%", loss_pct);
-        if state.drops > 0 { color(theme.c(theme.drop_marker), &txt) } else { dim(&txt) }
-    };
-    let latency_txt = |ms: f64| -> String {
-        let txt = crate::ui::fmt_rtt(ms);
-        if txt == "~" { dim(&txt) } else { color(theme.latency_threshold_color(ms), &txt) }
-    };
-
-    format!(
-        "{}: sent {}, received {}, {} loss, ran {}, latency min/avg/max {}/{}/{} ms",
-        host_txt,
-        fmt_thousands(sent),
-        received_txt,
-        loss_txt,
-        fmt_duration(elapsed_secs),
-        latency_txt(state.life_min()),
-        latency_txt(state.avg_latency()),
-        latency_txt(state.life_max()),
-    )
 }
 
 /// Print the end-of-session summary for a saved session file - the picker's
@@ -3676,6 +3641,10 @@ pub fn print_saved_summary(sess: &crate::session::SessionFile, args: &Args) {
         s.life_rtt_hist   = d.rtt_hist.clone();
         s.life_jitter_hist = d.jitter_hist.clone();
         s.current_ip      = d.addr.as_deref().and_then(|a| a.parse().ok());
+        // Saved labels can carry an " (ip)" suffix (the table strips it the same way).
+        if !d.custom_label {
+            if let Some(i) = d.label.rfind(" (") { s.host = d.label[..i].to_string(); }
+        }
         mode_labels.push(if d.mode_label.is_empty() { "?".to_string() } else { d.mode_label.clone() });
         exec_cmds.push(d.exec_cmd.clone());
         states.push(s);
@@ -3767,6 +3736,16 @@ fn fmt_duration(total_secs: u64) -> String {
 /// terminal width wrap onto extra, indented lines per row rather than being
 /// dropped, so nothing that was requested silently disappears.
 fn print_summary(states: &[TargetState], mode_labels: &[String], exec_cmds: &[String], deleted: &[TargetState], deleted_mode_labels: &[String], deleted_exec_cmds: &[String], args: &Args, elapsed_secs: u64) {
+    // One target (and none deleted along the way), in any view: three lines
+    // shaped like the single view instead of a one-row table.
+    if states.len() == 1 && deleted.is_empty() {
+        let term_w = terminal::size().map(|(w, _)| w as usize).unwrap_or(120);
+        let mode = mode_labels.first().map(String::as_str).unwrap_or("");
+        for line in crate::ui::exit_summary::single_exit_lines(&states[0], mode, args, &fmt_duration(elapsed_secs), term_w) {
+            println!("{}", line_to_ansi(&line, args.no_color));
+        }
+        return;
+    }
     use ratatui::style::Color;
     let nc    = args.no_color;
     let theme = &args.theme;
@@ -4239,69 +4218,30 @@ fn print_summary(states: &[TargetState], mode_labels: &[String], exec_cmds: &[St
 }
 
 #[cfg(test)]
-mod exit_summary_tests {
+mod exit_summary_ansi_tests {
     use super::*;
+    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::text::{Line, Span};
 
-    fn theme() -> crate::ui::Theme { crate::ui::Theme::default() }
-
-    #[test]
-    fn reports_sent_received_loss_time_and_latency() {
-        let mut s = TargetState::new("example.org".to_string());
-        for i in 0..10usize {
-            s.record_sent(i);
-            if i == 3 { s.record_result(i, Err(()), 0, false); } else { s.record_result(i, Ok(10.0 + i as f64), 0, false); }
-        }
-        let line = single_exit_summary_line(&s, 125, &theme(), true); // 2m 05s
-
-        assert!(line.starts_with("example.org:"), "{line:?}");
-        assert!(line.contains("sent 10"), "{line:?}");
-        assert!(line.contains("received 9"), "{line:?}");
-        assert!(line.contains("10.0% loss"), "{line:?}");
-        assert!(line.contains("ran 2m 05s"), "{line:?}");
-        assert!(line.contains("latency min/avg/max"), "{line:?}");
+    fn line() -> Line<'static> {
+        Line::from(vec![
+            Span::raw("sent "),
+            Span::styled("9", Style::default().fg(Color::Rgb(255, 0, 0)).add_modifier(Modifier::BOLD)),
+            Span::styled(" ms", Style::default().add_modifier(Modifier::DIM)),
+        ])
     }
 
     #[test]
-    fn never_received_shows_placeholder_latency_not_a_panic() {
-        let mut s = TargetState::new("example.org".to_string());
-        s.record_sent(0);
-        s.record_result(0, Err(()), 0, false);
-        let line = single_exit_summary_line(&s, 5, &theme(), true);
-
-        assert!(line.contains("sent 1"), "{line:?}");
-        assert!(line.contains("received 0"), "{line:?}");
-        assert!(line.contains("100.0% loss"), "{line:?}");
-        assert!(line.contains("min/avg/max ~/~/~"), "no data should fall back to the \"~\" placeholder, not 0ms: {line:?}");
+    fn no_color_is_plain_text() {
+        assert_eq!(line_to_ansi(&line(), true), "sent 9 ms");
     }
 
     #[test]
-    fn zero_probes_sent_does_not_divide_by_zero() {
-        let s = TargetState::new("example.org".to_string());
-        let line = single_exit_summary_line(&s, 0, &theme(), true);
-        assert!(line.contains("sent 0"), "{line:?}");
-        assert!(line.contains("0.0% loss"), "{line:?}");
-    }
-
-    #[test]
-    fn no_color_flag_strips_all_ansi() {
-        let mut s = TargetState::new("example.org".to_string());
-        for i in 0..10usize {
-            s.record_sent(i);
-            if i == 3 { s.record_result(i, Err(()), 0, false); } else { s.record_result(i, Ok(10.0 + i as f64), 0, false); }
-        }
-        let line = single_exit_summary_line(&s, 125, &theme(), true);
-        assert!(!line.contains('\x1b'), "no_color should emit no ANSI escapes: {line:?}");
-    }
-
-    #[test]
-    fn colors_are_emitted_when_enabled() {
-        let mut s = TargetState::new("example.org".to_string());
-        for i in 0..10usize {
-            s.record_sent(i);
-            if i == 3 { s.record_result(i, Err(()), 0, false); } else { s.record_result(i, Ok(10.0 + i as f64), 0, false); }
-        }
-        let line = single_exit_summary_line(&s, 125, &theme(), false);
-        assert!(line.contains('\x1b'), "colors should be emitted when no_color is false: {line:?}");
+    fn colors_and_modifiers_become_sgr_and_reset() {
+        let s = line_to_ansi(&line(), false);
+        assert!(s.starts_with("sent "), "unstyled spans carry no escapes: {s:?}");
+        assert!(s.contains("\x1b[38;2;255;0;0m\x1b[1m9\x1b[0m"), "{s:?}");
+        assert!(s.contains("\x1b[2m ms\x1b[0m"), "{s:?}");
     }
 }
 

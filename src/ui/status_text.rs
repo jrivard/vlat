@@ -216,6 +216,28 @@ pub fn probe_quality_cell(state: &TargetState) -> QualityCell {
     }
 }
 
+/// The quality word judged over the whole run, for the exit summary, rather
+/// than the last `GRADE_SPAN_SECS` the live column and status line judge. It
+/// reads the lifetime histograms, so it works for saved sessions too.
+///
+/// It uses the grades' entry thresholds without hysteresis, because there's no
+/// earlier verdict to hold onto. `degraded` is left out: it compares the recent
+/// median against the target's own running baseline, and a whole run has nothing
+/// to compare against. `warn_rtt` is `--warn-rtt` (the `slow` grade).
+pub fn run_quality_cell(state: &TargetState, warn_rtt: Option<f64>) -> QualityCell {
+    use crate::constants::*;
+    let min = GRADE_QUALITY_MIN_SAMPLES;
+    if state.life_replies() == 0 && state.total_sent >= min as u64 { return QualityCell::NoReply; }
+    let m = state.life_medians();
+    if m.n < min { return QualityCell::NoData; }
+    let slow    = warn_rtt.is_some_and(|w| m.med >= w);
+    let jittery = m.jmed >= m.med * GRADE_JITTERY_ENTER_RATIO && m.jmed >= GRADE_JITTERY_ENTER_MS;
+    let spiky   = m.p99 >= m.med * GRADE_SPIKY_ENTER_RATIO && m.p99 - m.med >= GRADE_SPIKY_ENTER_MS;
+    [(slow, Quality::Slow), (jittery, Quality::Jittery), (spiky, Quality::Spiky)]
+        .into_iter().find(|&(on, _)| on)
+        .map_or(QualityCell::Good, |(_, q)| QualityCell::Word(q, None))
+}
+
 /// Which way the loss rate is clearly moving (last minute vs the rest of the
 /// stats window), or `None` if steady / too little data. Usable on its own,
 /// e.g. as a column; the status line shows it only on `flapping`,

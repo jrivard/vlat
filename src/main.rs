@@ -85,6 +85,7 @@ fn print_explain() {
     println!("    {}  lost    time since the last drop  (~ = none yet)",   bld("↓"));
     println!("    {}  status  verdict, loss record and coverage, e.g. lossy, worsening  (*)", bld("ℹ"));
     println!("    {}  events  last 30s: ✕ / ✕✕ / ✕✕✕ (drop / repeated / outage), ✕✕⤴ (recovered), ⇄ (new IP), ↘ ↗ (trend changed); else · steady; ◷ warming up", bld("⌁"));
+    println!("         a changed glyph blinks once, then pulses and lightens on a 2s beat: ✕ → × → ˣ");
     println!("    (*) {}", vlat::ui::dialogs::TEXT_COLUMNS_WINDOW_NOTE);
     println!();
     println!("  cv vs jitpct - both are variation relative to RTT, but not the same kind:");
@@ -173,7 +174,7 @@ fn print_explain() {
     println!();
     println!("  {}   one line per target, no graph", bld("list   "));
     println!("  {}   detailed view for one target - only available with a single target", bld("single "));
-    println!("  {}   fullscreen area chart - Y-axis, gridlines, {} / {} reference lines", bld("graph  "), dim("avg"), dim("p95"));
+    println!("  {}   fullscreen area chart - Y-axis, gridlines, {} / {} reference lines  ({} sets the chart scale)", bld("graph  "), dim("avg"), dim("p95"), bld("y"));
     println!("  {}   EKG monitor - scrolling latency trace", bld("ekg    "));
     println!("  {}   radar sweep - targets plotted by RTT", bld("radar  "));
     println!("  {}   vertical bar chart", bld("bars   "));
@@ -217,7 +218,7 @@ fn print_explain() {
     println!("  Not window-based (lifetime totals):");
     for (name, what) in [
         ("sent / received", "probe counts for the full session"),
-        ("exit summary   ", "every column of the table printed on exit"),
+        ("exit summary   ", "everything printed on exit, quality word included"),
     ] {
         println!("    {}  {}", bld(name), what);
     }
@@ -248,9 +249,17 @@ fn print_explain() {
     println!("  Targets with fewer than 3 samples or still waiting for a reply are not reordered.");
 
     println!();
-    println!("{}", hdr("Output columns - summary (shown on exit):"));
+    println!("{}", hdr("Exit summary:"));
     println!("  (every value covers the whole session, whatever the -w window)");
     println!();
+    println!("  One target: three lines shaped like the single view, in every view:");
+    println!("    vlat: example.org  93.184.216.34  ran 2h 14m 05s");
+    println!("          avg 12.4  range 10-88  jitter 1.58  loss 9·8,040 (0.11%)  quality good  p95 15.0");
+    println!("          sent 8,040  received 8,031  address changes 2");
+    println!("    line 2: the base stats not hidden with x, then the quality word and number columns that are on");
+    println!("    quality: judged over the whole run (slow / jittery / spiky / good; never degraded, which needs a recent baseline)");
+    println!("    dup and address changes appear only when non-zero");
+    println!("  Several targets (or any deleted during the run): a table, columns:");
     for (name, desc) in [
         ("avg     ", "lifetime average RTT"),
         ("stddev  ", "standard deviation of RTT - spread around the average"),
@@ -263,7 +272,7 @@ fn print_explain() {
         ("loss    ", "drop count and loss % (column omitted when zero for all targets)"),
         ("changes ", "number of times the target's IP address changed (omitted when none)"),
     ] {
-        println!("  {}  {}", bld(name), desc);
+        println!("    {}  {}", bld(name), desc);
     }
 
     // Probe modes

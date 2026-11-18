@@ -1515,7 +1515,7 @@ pub fn explain_content_lines(ascii: bool) -> Vec<Line<'static>> {
             ("q", "quality", "slow / degraded / jittery / spiky / good / no reply  (~ = too soon)  (*)"),
             ("J", "jitpct", "relative jitter: median jitter / median RTT %  (~ = too soon)"),
             ("L", "loss  ", "packet loss %  (~ = nothing sent yet)"),
-            ("e", "events", "last 30s: x / xx / xxx (drop / repeated / outage), xx+ (recovered), * (new IP), v ^ (trend changed); else . steady"),
+            ("e", "events", "last 30s: X / XX / XXX (drop / repeated / outage), XX+ (recovered), * (new IP), v ^ (trend changed); else . steady; blinks once when it changes, then X fades to x"),
         ] {
             lines.push(Line::from(vec![raw("    "), span(sym, bld), raw("  "), raw(format!("{name:<7}")), raw("  "), raw(desc)]));
         }
@@ -1536,7 +1536,7 @@ pub fn explain_content_lines(ascii: bool) -> Vec<Line<'static>> {
             ("\u{25c7}", "quality", "slow / degraded / jittery / spiky / good / no reply  (~ = too soon)  (*)"),
             ("\u{0394}", "jitpct", "relative jitter: median jitter / median RTT %  (~ = too soon)"),
             ("\u{2113}", "loss  ", "packet loss %  (~ = nothing sent yet)"),
-            ("\u{2301}", "events", "last 30s: \u{2715} / \u{2715}\u{2715} / \u{2715}\u{2715}\u{2715} (drop / repeated / outage), \u{2715}\u{2715}\u{2934} (recovered), \u{21c4} (new IP), \u{2198} \u{2197} (trend changed); else \u{00b7} steady; \u{25f7} warming up"),
+            ("\u{2301}", "events", "last 30s: \u{2715} / \u{2715}\u{2715} / \u{2715}\u{2715}\u{2715} (drop / repeated / outage), \u{2715}\u{2715}\u{2934} (recovered), \u{21c4} (new IP), \u{2198} \u{2197} (trend changed); else \u{00b7} steady; \u{25f7} warming up; blinks once when it changes, then lightens \u{2715} \u{2192} \u{00d7} \u{2192} \u{02e3}"),
         ] {
             lines.push(Line::from(vec![raw("    "), span(sym, bld), raw("  "), raw(format!("{name:<7}")), raw("  "), raw(desc)]));
         }
@@ -1726,7 +1726,7 @@ pub fn explain_content_lines(ascii: bool) -> Vec<Line<'static>> {
     lines.push(Line::from("  1=list  2=graph  3=worm  4=radar  5=ekg"));
     lines.push(Line::from(""));
     lines.push(Line::from(vec![raw("  "), span("list   ", bld), raw("  one line per target, no graph - useful for many targets")]));
-    lines.push(Line::from(vec![raw("  "), span("graph  ", bld), raw("  fullscreen area chart with labelled Y-axis, gridlines, and "), span("avg", dim), raw(" / "), span("p95", dim), raw(" reference lines")]));
+    lines.push(Line::from(vec![raw("  "), span("graph  ", bld), raw("  fullscreen area chart with labelled Y-axis, gridlines, and "), span("avg", dim), raw(" / "), span("p95", dim), raw(" reference lines  ("), span("y", bld), raw(" sets the chart scale)")]));
     lines.push(Line::from(vec![raw("  "), span("worm   ", bld), raw("  retro worm screensaver - classic CGA palette")]));
     lines.push(Line::from(vec![raw("  "), span("radar  ", bld), raw("  radar sweep - targets plotted by current RTT")]));
     lines.push(Line::from(vec![raw("  "), span("ekg    ", bld), raw("  EKG monitor - scrolling latency trace")] ));
@@ -1811,9 +1811,17 @@ pub fn explain_content_lines(ascii: bool) -> Vec<Line<'static>> {
     ]));
 
     lines.push(Line::from(""));
-    lines.push(Line::from(span("Output columns \u{2014} summary (shown on exit):", hdr)));
+    lines.push(Line::from(span("Exit summary:", hdr)));
     lines.push(Line::from("  (every value covers the whole session, whatever the -w window)"));
     lines.push(Line::from(""));
+    lines.push(Line::from("  One target: three lines shaped like the single view, in every view:"));
+    lines.push(Line::from("    vlat: example.org  93.184.216.34  ran 2h 14m 05s"));
+    lines.push(Line::from("          avg 12.4  range 10-88  jitter 1.58  loss 9\u{00b7}8,040 (0.11%)  quality good  p95 15.0"));
+    lines.push(Line::from("          sent 8,040  received 8,031  address changes 2"));
+    lines.push(Line::from("    line 2: the base stats not hidden with x, then the quality word and number columns that are on"));
+    lines.push(Line::from("    quality: judged over the whole run (slow / jittery / spiky / good; never degraded, which needs a recent baseline)"));
+    lines.push(Line::from("    dup and address changes appear only when non-zero"));
+    lines.push(Line::from("  Several targets (or any deleted during the run): a table, columns:"));
     for (name, desc) in [
         ("avg     ", "lifetime average RTT"),
         ("stddev  ", "standard deviation of RTT \u{2014} spread around the average"),
@@ -1826,7 +1834,7 @@ pub fn explain_content_lines(ascii: bool) -> Vec<Line<'static>> {
         ("loss    ", "drop count and loss % (column omitted when zero for all targets)"),
         ("changes ", "number of times the target's IP address changed (omitted when none)"),
     ] {
-        lines.push(Line::from(vec![raw("  "), span(name, bld), raw("  "), raw(desc)]));
+        lines.push(Line::from(vec![raw("    "), span(name, bld), raw("  "), raw(desc)]));
     }
 
     // Probe modes

@@ -164,6 +164,25 @@ vlat --dual-stack https://www.google.com example.net
 
 Hostnames stay hostnames, so TLS certificate checks and periodic DNS re-resolution keep working.
 
+## Exit summary
+
+When vlat quits it prints a summary of the whole run, whatever the `-w` window.
+With one target, in any view, the summary is three lines shaped like the single view:
+
+```
+vlat: example.org  93.184.216.34  ran 2h 14m 05s
+      avg 12.4  range 10-88  jitter 1.58  loss 9·8,040 (0.11%)  quality good  p95 15.0
+      sent 8,040  received 8,031  address changes 2
+```
+
+The second line follows the columns you have on: base stats hidden with `x` stay
+hidden, and the `quality` word and number columns (`p95` by default) are added when
+enabled. Widgets (`recent`, `bar`, `events`), `status` and the `seen`/`lost` ages are
+left out. `quality` here is judged over the whole run (`slow`, `jittery`, `spiky` or
+`good`; `degraded` needs a recent baseline, so it never appears). `dup` and address
+changes appear only when non-zero. With several targets, or if any were deleted
+during the run, the summary is a table instead.
+
 ## Sessions
 
 vlat saves its session (settings + summary stats) to `$XDG_STATE_HOME/vlat/sessions`
@@ -242,7 +261,7 @@ While `vlat` is running, you can use the following keys:
 - `--view <mode>`: Start in a specific view (`list`, `single`, `graph`, `worm`, `radar`, `ekg`, `bars`, `cards`, `bubble`, `scatter`, `pong`). Default: `single` (falls back to `list` with more than one target).
 - `--max-range <ms>`: Fix Y-axis maximum (disables auto-scaling). Change it while running with `y`, and save it as a default with `d`.
 - `--span <duration>`: Time range shown by the graph (e.g., `10m`).
-- `-w, --window <duration>`: Time span the stats (avg, loss, jitter, percentiles, `jitpct`, sort order) cover. Default `1h`; `0` = the whole run. The `status` and `quality` text columns always judge the last 5 minutes (or the whole window, if shorter); the loss count and % in `status` cover the window. The exit summary always covers the whole run.
+- `-w, --window <duration>`: Time span the stats (avg, loss, jitter, percentiles, `jitpct`, sort order) cover. Default `1h`; `0` = the whole run. The `status` and `quality` text columns always judge the last 5 minutes (or the whole window, if shorter); the loss count and % in `status` cover the window. The [exit summary](#exit-summary) always covers the whole run, its `quality` word included.
 - `--columns <name,...>`: Columns to display. Stat columns (`mtr`, `std`, `p01`, `p10`, `p50`, `p95`, `p99`, `cv`, `srtt`, `seen`, `lost`, `status`, `quality`, `jitpct`, `loss`, `events`, `recent`, `bar`) are off by default except `recent` (sparkline), `bar` (range bar), `events`, `p95` and `quality`; on narrow terminals the extras give way whole, right-to-left, before the sparkline does. Identity columns (`mode`, `name`, `port`, `addr`, `resolve`) follow automatic display rules; naming one forces it on, and `none` hides everything (values after `none` add back, e.g. `--columns none,addr,p99`). `all` shows every column; `default` is the default set and composes (e.g. `--columns default,mtr`). All columns can also be toggled at runtime with the `c` key.
 
 Use `--help` for full option list.
