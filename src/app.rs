@@ -1496,6 +1496,8 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                 || states.iter().any(|s| s.graph_anim_start.is_some())
                 || states.iter().any(|s| s.bar_anim_start.is_some())
                 || states.iter().any(|s| s.current_ip.is_none() || s.waiting)
+                // An evt glyph's change blink: a few crisp frames, not the 1 Hz tick's luck.
+                || { let now = crate::time::Instant::now(); states.iter().any(|s| crate::ui::events_cell::flashing(s, now)) }
                 || frozen
         }
     }
@@ -3209,8 +3211,8 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
     // A session that spent its whole life in the single-target view, never switching
     // to any other view, gets a brief plain-English one-line summary in place of the
     // full end-of-session table - see single_exit_summary_line. Single is always
-    // inline (never the alternate screen), so this overrides the alternate-screen/
-    // keep_display handling below rather than threading through it.
+    // inline (never the alternate screen), so it has its own exit branch below
+    // (which still honours keep_display) rather than threading through the others.
     let single_only_session = fullscreen_view == FullscreenView::Single && !used_other_view;
     // The buffer's own area carries the viewport's absolute y-offset, which the
     // single-view-only exit path needs too (to anchor its one-line summary right
@@ -3247,11 +3249,21 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
             // ensure_dialog_space! inflated viewport_h at some point this run. If the
             // terminal has already scrolled that row off screen, this is best-effort -
             // there's no ANSI escape that un-scrolls a terminal.
-            let _ = execute!(out, cursor::MoveTo(0, inline_viewport_top), terminal::Clear(terminal::ClearType::FromCursorDown));
+            //
+            // Ctrl-C (keep_display) leaves the rendered view on screen, same as every
+            // other view: jump to the row just below the content (see inline_content_rows)
+            // and clear only what's beneath it, so the one-line summary hugs the view.
+            let clear_from = if keep_display {
+                let rows = if inline_content_rows > 0 { inline_content_rows } else { viewport_h };
+                inline_viewport_top + rows
+            } else {
+                inline_viewport_top
+            };
+            let _ = execute!(out, cursor::MoveTo(0, clear_from), terminal::Clear(terminal::ClearType::FromCursorDown));
             // A colorful "vlat:" wordmark, then a brief plain-English final summary -
             // not the live status line's text, which is meaningless once the run has
             // actually ended (a newcomer wants sent/received/loss/time/latency, not
-            // "ok · no loss · 3 sent over 12s"). This is the last thing printed before the shell
+            // "ok · no loss for 12s"). This is the last thing printed before the shell
             // prompt returns.
             for (i, ch) in "vlat:".chars().enumerate() {
                 let (r, g, b) = args.theme.target_color(i);

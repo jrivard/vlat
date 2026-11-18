@@ -407,7 +407,7 @@ pub struct ColWidths {
     pub srtt:   Option<RttColWidth>,
     pub seen:   Option<usize>,      // max width of fmt_since(last_up), e.g. "12m"
     pub lost:   Option<usize>,      // max width of fmt_since(last_drop_at), e.g. "3h"
-    pub status: Option<usize>,      // max width of probe_status_text(), e.g. "ok · no loss · 31 sent over 30s"
+    pub status: Option<usize>,      // max width of probe_status_text(), e.g. "ok · no loss for 30s"
     pub quality: Option<usize>,     // max width of probe_quality_cell() text, e.g. "degraded↗"
     pub jitpct: Option<usize>,      // max width of fmt_jitpct() string, e.g. "61%"
     pub loss:   Option<usize>,      // max width of fmt_loss_col() string, e.g. "0.25%"

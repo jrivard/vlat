@@ -51,11 +51,17 @@ pub const SUMMARY_JSON_DEFAULT_SECS: u64 = 5;
 // Events column (ui/events_cell.rs): events are remembered for EVENT secs (IP
 // changes, rarer and easier to miss, for IP_EVENT). A glyph's look follows how
 // long it has shown what it shows now - not the event's age - so a steady
-// state (an ongoing outage, a lasting trend) goes quiet: inverse flash under
-// FLASH (events only), bold under FRESH, normal under RECENT, then dim.
-pub const EVENTS_FLASH_SECS: f64    = 1.0;
-pub const EVENTS_FRESH_SECS: f64    = 5.0;
-pub const EVENTS_RECENT_SECS: f64   = 15.0;
+// state (an ongoing outage, a lasting trend) goes quiet. On a change the glyph
+// blinks inverse once for FLASH secs (events only; the UI runs at the fast tick
+// meanwhile so the blink is crisp), then steps on a shared BEAT that every row
+// crosses at the same moment: it pulses bold/normal for PULSE_BEATS beats,
+// holds plain, turns to a lighter glyph shape at MID_BEAT, and to the lightest
+// shape, dimmed, at LIGHT_BEAT.
+pub const EVENTS_FLASH_SECS: f64    = 0.6;
+pub const EVENTS_BEAT_SECS: f64     = 2.0;
+pub const EVENTS_PULSE_BEATS: u64   = 4;
+pub const EVENTS_MID_BEAT: u64      = 6;
+pub const EVENTS_LIGHT_BEAT: u64    = 9;
 pub const EVENTS_EVENT_SECS: f64    = 30.0;
 pub const EVENTS_IP_EVENT_SECS: f64 = 60.0;
 

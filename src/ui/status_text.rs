@@ -1,4 +1,5 @@
-//! The probe-status summary text ("ok · no loss · 31 sent over 30s"): the
+//! The probe-status summary text ("ok · no loss for 30s", or "ok · no loss · 11 sent
+//! over 30s" at intervals other than 1s): the
 //! single-target view's header line and the `status` column in every other view.
 //!
 //! # The line's format
@@ -46,7 +47,9 @@
 //!   Trends compare the last minute of the stats window with the rest of it,
 //!   and need a clear change (ratio and absolute gap) with hysteresis.
 //! - The coverage slot appears only on an `ok` that has never lost a probe.
-//!   Anywhere else the earlier slots are the news.
+//!   Anywhere else the earlier slots are the news. At a 1s interval the probe
+//!   count only restates the elapsed time, so there the slot is dropped and the
+//!   record reads `no loss for <elapsed>` instead (`ok · no loss for 2m 15s`).
 //! - The record slot appears only once the target has replied at least once.
 //!   Before that, "waiting for reply" and "unreachable" already say everything.
 //! - The record slot ends with the most recent event *opposite* to the verdict:
@@ -254,6 +257,10 @@ pub struct StatusSummary {
     pub last: Option<(Event, When)>,
     pub sent: u64,
     pub watched_secs: f64,
+    /// Whether the coverage slot names the probe count. At a 1s interval the
+    /// count just restates the elapsed time, so the slot folds into the record
+    /// as `no loss for <T>` instead.
+    pub show_sent: bool,
 }
 
 impl StatusSummary {
@@ -304,6 +311,7 @@ impl StatusSummary {
             last,
             sent: state.history.len() as u64, // includes probes still in flight
             watched_secs: state.first_sent_at.map(age).unwrap_or(0.0),
+            show_sent: interval_ms != 1_000,
         }
     }
 
@@ -329,6 +337,11 @@ impl StatusSummary {
         if let (Now::Ok, Some((_, When::Ago(a)))) = (self.now, self.last) {
             // Had trouble once, but long enough ago that it's not news.
             parts.push(format!("no loss for {}", format_elapsed(a)));
+        } else if self.now == Now::Ok && self.last.is_none() && !self.show_sent {
+            // Never lost one, at a 1s interval: the probe count would only restate
+            // the elapsed time, so say how long it's been clean, in the same words
+            // as the recovered case above.
+            parts.push(format!("no loss for {}", format_elapsed(self.watched_secs)));
         } else if !matches!(self.now, Now::Waiting | Now::Unreachable) {
             // A failure older than the stats window: say the window is clean
             // rather than a bare "no loss" next to "last failure 20m ago".
@@ -351,7 +364,7 @@ impl StatusSummary {
 
         // Coverage only on a plain "ok": it's the reassuring "watched this long, no
         // trouble". Anywhere else the earlier slots are the news, and it's clutter.
-        if self.now == Now::Ok && self.last.is_none() {
+        if self.now == Now::Ok && self.last.is_none() && self.show_sent {
             parts.push(format!("{} sent over {}", fmt_count(self.sent), format_elapsed(self.watched_secs)));
         }
         parts
@@ -588,6 +601,7 @@ mod tests {
             sc("first reply", ".", 0.5, 0.0, 0.0),
             sc("healthy", "..", 135.0, 1.0, 0.0),
             sc("healthy, long run", rep('.', 1_500), 86_400.0 * 2.0 + 3_600.0 * 5.0, 1.0, 0.0),
+            sc("healthy, 2s interval (count shown)", "..", 135.0, 1.0, 0.0).interval(2_000),
             sc("one drop, unsettled, back up", "x.", 2.0, 1.0, 1.0),
             sc("one drop, settled", "x.", 31.0, 1.0, 30.0),
             sc("two drops, last 45s ago (flaky)", ".x.x.", 120.0, 1.0, 45.0).spaced(30.0),
@@ -795,8 +809,10 @@ mod tests {
         s.record_sent(0);
         s.record_result(0, Ok(10.0), 0, false);
         let now = s.first_sent_at.unwrap() + Duration::from_secs(135);
-        assert_eq!(probe_status_text(&s, now, 1_000, true, false), "ok \u{00b7} no loss \u{00b7} 1 sent over 2m 15s");
-        assert_eq!(probe_status_text(&s, now, 1_000, true, true), "ok - no loss - 1 sent over 2m 15s");
+        assert_eq!(probe_status_text(&s, now, 2_000, true, false), "ok \u{00b7} no loss \u{00b7} 1 sent over 2m 15s");
+        assert_eq!(probe_status_text(&s, now, 2_000, true, true), "ok - no loss - 1 sent over 2m 15s");
+        // At a 1s interval the count would just restate the time, so it folds away.
+        assert_eq!(probe_status_text(&s, now, 1_000, true, false), "ok \u{00b7} no loss for 2m 15s");
     }
 
     #[test]
@@ -806,7 +822,7 @@ mod tests {
         s.record_result(0, Ok(10.0), 0, false);
         let theme = crate::cli::ThemeName::Default.to_theme();
         let base = Style::default().fg(Color::White);
-        let spans = probe_status_spans(&s, Instant::now(), 1_000, true, false, &theme, base);
+        let spans = probe_status_spans(&s, Instant::now(), 2_000, true, false, &theme, base);
         assert_eq!(spans.len(), 5);
         let sep = Style::default().fg(theme.c(theme.status_sep));
         for (i, sp) in spans.iter().enumerate() {

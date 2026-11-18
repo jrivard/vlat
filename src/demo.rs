@@ -180,7 +180,7 @@ pub enum Script {
 /// (`DEMO_WINDOW_SECS`). Takes about 17 minutes, then loops. The test
 /// `tour_reaches_every_status_state` checks that it still does.
 pub const TOUR: &[Episode] = &[
-    // ok · no loss · N sent over T
+    // ok · no loss for T
     Episode::new(Effect::Quiet, 0.0, 60.0),
     // ok, jittery
     Episode::new(Effect::Jitter(20.0), 5.0, 100.0),
@@ -341,7 +341,7 @@ fn bump_addr(addr: &str, bump: u8) -> String {
 pub fn demo_targets(n: usize) -> Vec<DemoTarget> {
     if n <= 1 {
         return vec![DemoTarget {
-            label: "web-api".to_string(), addr: "172.16.8.40".to_string(), mode_tag: "https",
+            label: "web-api".to_string(), addr: "172.16.8.40".to_string(), mode_tag: "icmp",
             profile: Profile {
                 base: 20.0, jitter: 1.5, loss: 0.0, spike_chance: 0.0, spike_mult: 1.0,
                 outage_chance: 0.0, outage_min: 0, outage_max: 0,

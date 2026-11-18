@@ -971,7 +971,7 @@ pub fn build_stats_line<'a>(
                 }
             }
             ExtraStat::Status => if let Some(status_w) = cw.status {
-                // No compact glyph (self-explanatory text, e.g. "ok · no loss · 31 sent over 30s") -
+                // No compact glyph (self-explanatory text, e.g. "ok · no loss for 30s") -
                 // only the single-target verbose view gets a word label. Left-aligned,
                 // unlike the numeric columns, since it's free text.
                 if verbose_labels { spans.push(Span::styled("status ", dim)); }

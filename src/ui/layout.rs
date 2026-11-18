@@ -2072,11 +2072,11 @@ mod single_view_layout_tests {
         // On by default in the single view (though `status` isn't a default list column),
         // drawn once on the header line.
         let out_default = render_single_state(100, 20, &[], state.clone());
-        assert_eq!(out_default.matches("2 sent over").count(), 1, "status text should be on by default, once: {out_default:?}");
+        assert_eq!(out_default.matches("no loss for").count(), 1, "status text should be on by default, once: {out_default:?}");
 
         // Enabling the column explicitly doesn't add a second copy in the stats rows.
         let out_on = render_single_state(100, 20, &["--columns", "default,status"], state.clone());
-        assert_eq!(out_on.matches("2 sent over").count(), 1, "status text must not be duplicated into the stats rows: {out_on:?}");
+        assert_eq!(out_on.matches("no loss for").count(), 1, "status text must not be duplicated into the stats rows: {out_on:?}");
         assert!(!out_on.contains("status "), "no stats-row \"status\" label: {out_on:?}");
 
         // An explicit --columns without status turns it off.
@@ -2124,8 +2124,8 @@ mod single_view_layout_tests {
         // `--columns all` there are far more labels than fit on one 60-wide row, so
         // they must be spread across several rows rather than truncated onto one.
         let labels = ["avg ", "range ", "jitter ", "loss ", "mtr ", "std ", "p01 ", "p10 ", "p50 ", "p95 ", "p99 ", "cv ", "srtt ", "seen ", "lost "];
-        // The header's status text ("ok · no loss · …", "N lost") isn't a stats row.
-        let is_stats_row = |l: &&str| !l.contains(" sent over ") && labels.iter().any(|lbl| l.contains(lbl));
+        // The header's status text ("ok · no loss for …", "N lost") isn't a stats row.
+        let is_stats_row = |l: &&str| !l.contains("no loss") && labels.iter().any(|lbl| l.contains(lbl));
         let stats_lines: Vec<&str> = lines.iter().copied().filter(is_stats_row).collect();
         assert!(stats_lines.len() >= 2, "expected the enabled columns to wrap onto 2+ rows: {:?}", lines);
 
