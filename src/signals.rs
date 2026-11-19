@@ -89,6 +89,7 @@ pub fn set_alt_screen(on: bool) {
 }
 
 /// Immediate exit: best-effort terminal restore, then 128 + signal number.
+#[cfg(unix)]
 fn force_exit(sig: Signal) -> ! {
     restore_terminal();
     crate::logfile::write(&format!("{} received, exiting immediately", sig.name()));

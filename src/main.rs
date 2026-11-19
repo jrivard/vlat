@@ -823,7 +823,8 @@ mod input_files_tests {
         let none = input_files(None, None, None);
         assert_eq!(none.len(), 1);
         assert_eq!((none[0].role, none[0].note), ("defaults", Some("not found")));
-        assert!(none[0].path.ends_with("vlat/defaults"), "{}", none[0].path);
+        // Path::ends_with compares components, so it matches either separator (Windows joins with '\\').
+        assert!(std::path::Path::new(&none[0].path).ends_with("vlat/defaults"), "{}", none[0].path);
 
         let found = input_files(Some("/etc/vlat/defaults"), None, None);
         assert_eq!((found[0].path.as_str(), found[0].note), ("/etc/vlat/defaults", None));

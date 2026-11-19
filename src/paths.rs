@@ -21,20 +21,49 @@
 //! of `~/.config/vlat` / `~/.local/state/vlat` everywhere.
 
 use etcetera::base_strategy::{BaseStrategy, Xdg};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn xdg() -> Option<Xdg> {
     Xdg::new().ok()
 }
 
+/// Rebuild a path from its components so every separator is the platform's
+/// own. etcetera's `Xdg` joins literal `".config/"` / `".local/state/"`, which
+/// on Windows yields mixed paths like `C:\Users\x\.config/vlat\defaults`.
+/// A no-op on Unix.
+fn normalize(p: &Path) -> PathBuf {
+    p.components().collect()
+}
+
 /// `$XDG_CONFIG_HOME` (if absolute), else `~/.config`, else `./.config` if
 /// the home directory can't be located.
 pub fn xdg_config_dir() -> PathBuf {
-    xdg().map(|x| x.config_dir()).unwrap_or_else(|| PathBuf::from(".config"))
+    normalize(&xdg().map(|x| x.config_dir()).unwrap_or_else(|| PathBuf::from(".config")))
 }
 
 /// `$XDG_STATE_HOME` (if absolute), else `~/.local/state`, else
 /// `./.local/state` if the home directory can't be located.
 pub fn xdg_state_dir() -> PathBuf {
-    xdg().and_then(|x| x.state_dir()).unwrap_or_else(|| PathBuf::from(".local/state"))
+    normalize(&xdg().and_then(|x| x.state_dir()).unwrap_or_else(|| PathBuf::from(".local/state")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dirs_have_no_trailing_or_foreign_separators() {
+        for dir in [xdg_config_dir(), xdg_state_dir()] {
+            let s = dir.display().to_string();
+            assert!(!s.ends_with(['/', '\\']), "{s}");
+            #[cfg(windows)]
+            assert!(!s.contains('/'), "{s}");
+        }
+    }
+
+    #[test]
+    fn normalize_keeps_unix_paths_intact() {
+        assert_eq!(normalize(Path::new("/home/x/.config/")), PathBuf::from("/home/x/.config"));
+        assert_eq!(normalize(Path::new(".local/state")), PathBuf::from(".local/state"));
+    }
 }
