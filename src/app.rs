@@ -1465,7 +1465,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                 sort: sort_mode.as_str(),
                 keys: show_col_keys,
             };
-            session_ctx.save(&args, &rt, &states, &mode_labels);
+            session_ctx.save(&args, &rt, &states, &mode_labels)
         }}
     }
 
@@ -2951,7 +2951,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
 
             // Periodic session snapshot (also fires on exit, below the loop)
             _ = session_ticker.tick(), if session_ctx.enabled => {
-                save_session!();
+                let _ = save_session!();
             }
 
             // Periodic --summary-json snapshot (also fires at startup and exit)
@@ -3231,7 +3231,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
     crate::signals::release();
 
     // Final session snapshot so the run is restartable up to the moment it ended.
-    save_session!();
+    let session_saved = save_session!();
     // Final --summary-json snapshot with the run's last-known stats.
     save_summary_json!();
 
@@ -3360,7 +3360,10 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
         if !single_only_session { println!(); }
         let exec_cmd_strs: Vec<String> = exec_cmd_arcs.iter().map(|a| (**a).clone()).collect();
         let elapsed_secs = crate::session::epoch_ms().saturating_sub(session_ctx.started_at_ms) / 1000;
-        print_summary(&states, &mode_labels, &exec_cmd_strs, &deleted_states, &deleted_mode_labels, &[], &args, elapsed_secs);
+        // Only point to the saved session if the final save actually landed.
+        let more_cmd = if session_saved { session_ctx.summary_command() } else { None };
+        let opts = SummaryOpts { width: summary_width(), more_cmd: more_cmd.as_deref() };
+        print_summary(&states, &mode_labels, &exec_cmd_strs, &deleted_states, &deleted_mode_labels, &[], &args, elapsed_secs, &opts);
     }
     crate::logfile::write(&format!(
         "stats (final): probes_sent={} packets_received={} bytes_sent={} bytes_received={} re_resolves={} ui_updates={}",
@@ -3602,14 +3605,6 @@ fn fmt_thousands(n: u64) -> String {
     out.chars().rev().collect()
 }
 
-fn fmt_recv(s: &TargetState) -> String {
-    if s.total_sent == 0 {
-        return "0".to_string();
-    }
-    let received = s.total_sent.saturating_sub(s.drops as u64);
-    let pct = received as f64 / s.total_sent as f64 * 100.0;
-    format!("{} ({:.1}%)", fmt_thousands(received), pct)
-}
 
 /// Print the end-of-session summary for a saved session file - the picker's
 /// "summary & exit" action.  Rebuilds minimal TargetStates from the saved
@@ -3654,7 +3649,24 @@ pub fn print_saved_summary(sess: &crate::session::SessionFile, args: &Args) {
     let name = sess.name.as_deref().unwrap_or("(unnamed)");
     println!("{}", dim(&format!("  session {} - saved {}", name, sess.saved_at)));
     let elapsed_secs = sess.saved_at_ms().saturating_sub(sess.started_at_ms()) / 1000;
-    print_summary(&states, &mode_labels, &exec_cmds, &[], &[], &[], args, elapsed_secs);
+    // A saved session's summary (`vlat --summary`, the picker's "summary &
+    // exit") is where the live exit summary sends people for what it had to
+    // leave out, so it never leaves anything out: every column, full width.
+    let widest = print_summary(&states, &mode_labels, &exec_cmds, &[], &[], &[], args, elapsed_secs, &SummaryOpts { width: None, more_cmd: None });
+    // Wider than the terminal: its rows soft-wrap, so point to a pager that
+    // keeps them whole. Only in a terminal - piped output has no width.
+    if let Some(term_w) = summary_width() {
+        if widest > term_w {
+            let cmd = match &sess.name {
+                Some(n) => format!("vlat --summary {} | less -S", crate::session::shell_quote(n)),
+                None    => "vlat --summary | less -S".to_string(),
+            };
+            let bold = |s: &str| -> String { if nc { s.to_string() } else { format!("\x1b[1m{}\x1b[0m", s) } };
+            // The command gets a line of its own so it never breaks mid-way.
+            println!("  {}", dim("wider than the terminal; to keep rows unwrapped, run:"));
+            println!("    {}", bold(&cmd));
+        }
+    }
 }
 
 /// A single wrapped-table column. Most items are a single sub-column (e.g.
@@ -3668,33 +3680,14 @@ struct Item {
     /// totals[sub] - already right-padded to widths[sub] and colored, or
     /// None where a total isn't meaningful for this column.
     totals: Vec<Option<String>>,
+    /// Drop priority when the table is too wide (higher drops first; `None` never).
+    prio: Option<u32>,
 }
 
 impl Item {
     fn width(&self) -> usize {
         self.widths.iter().sum::<usize>() + 2 * self.widths.len().saturating_sub(1)
     }
-}
-
-/// Packs items left-to-right into as many groups ("physical lines") as needed
-/// so each group's total width fits `budget`. A group always gets at least
-/// one item even if that item alone exceeds budget, so an item is never
-/// dropped outright - only ever pushed onto its own line.
-fn pack_groups(widths: &[usize], budget: usize) -> Vec<Vec<usize>> {
-    let mut groups: Vec<Vec<usize>> = Vec::new();
-    let mut cur: Vec<usize> = Vec::new();
-    let mut cur_w = 0usize;
-    for (i, &iw) in widths.iter().enumerate() {
-        let add_w = iw + if cur.is_empty() { 0 } else { 2 };
-        if !cur.is_empty() && budget != usize::MAX && cur_w + add_w > budget {
-            groups.push(std::mem::take(&mut cur));
-            cur_w = 0;
-        }
-        cur.push(i);
-        cur_w += iw + if cur.len() == 1 { 0 } else { 2 };
-    }
-    if !cur.is_empty() { groups.push(cur); }
-    groups
 }
 
 /// Renders one physical line for a group of items: every sub-column of every
@@ -3729,22 +3722,36 @@ fn fmt_duration(total_secs: u64) -> String {
     }
 }
 
-/// Prints the end-of-session summary: the "standard" identity + delivery
-/// columns plus whatever extended stat columns the user enabled (minus the
-/// visual-only `bar`/`recent` columns and the live "up" status badge, none
-/// of which make sense in a static console dump). Columns that don't fit the
-/// terminal width wrap onto extra, indented lines per row rather than being
-/// dropped, so nothing that was requested silently disappears.
-fn print_summary(states: &[TargetState], mode_labels: &[String], exec_cmds: &[String], deleted: &[TargetState], deleted_mode_labels: &[String], deleted_exec_cmds: &[String], args: &Args, elapsed_secs: u64) {
+/// How `print_summary` fits its output, and what it can point to for more.
+struct SummaryOpts<'a> {
+    /// Width to fit to; `None` prints every column at full width.
+    width: Option<usize>,
+    /// A command that shows the whole summary, suggested when columns had to be
+    /// left out to fit (`None`: just suggest widening the terminal).
+    more_cmd: Option<&'a str>,
+}
+
+/// Prints the end-of-session summary: one target as three lines shaped like
+/// the single view, otherwise a table of the identity + delivery columns plus
+/// the number columns the user enabled (widgets like `bar`/`recent` and the
+/// live status make no sense in a console dump). A table too wide for
+/// `opts.width` leaves columns out and says which. Returns the width of the
+/// widest row printed.
+#[allow(clippy::too_many_arguments)]
+fn print_summary(states: &[TargetState], mode_labels: &[String], exec_cmds: &[String], deleted: &[TargetState], deleted_mode_labels: &[String], deleted_exec_cmds: &[String], args: &Args, elapsed_secs: u64, opts: &SummaryOpts) -> usize {
     // One target (and none deleted along the way), in any view: three lines
-    // shaped like the single view instead of a one-row table.
+    // shaped like the single view instead of a one-row table. These leave
+    // nothing out - they only flow onto more lines - so they fit the terminal
+    // even when `opts.width` asks for full width.
     if states.len() == 1 && deleted.is_empty() {
-        let term_w = terminal::size().map(|(w, _)| w as usize).unwrap_or(120);
+        let term_w = opts.width.or_else(summary_width).unwrap_or(usize::MAX);
         let mode = mode_labels.first().map(String::as_str).unwrap_or("");
+        let mut widest = 0;
         for line in crate::ui::exit_summary::single_exit_lines(&states[0], mode, args, &fmt_duration(elapsed_secs), term_w) {
+            widest = widest.max(line.width());
             println!("{}", line_to_ansi(&line, args.no_color));
         }
-        return;
+        return widest;
     }
     use ratatui::style::Color;
     let nc    = args.no_color;
@@ -3833,388 +3840,381 @@ fn print_summary(states: &[TargetState], mode_labels: &[String], exec_cmds: &[St
         }
     };
 
-    if all.is_empty() { return; }
+    if all.is_empty() { return 0; }
 
     let any_deleted = !deleted.is_empty();
-    let term_w = terminal::size().map(|(w, _)| w as usize).unwrap_or(usize::MAX);
-
-    // Compute identity-column widths across all entries (including deleted).
-    let del_tag     = "  [deleted]";
-    let del_tag_w   = if any_deleted { del_tag.len() } else { 0 };
-    let display_label_len = |s: &TargetState| -> usize {
-        if !s.custom_label {
-            if let Some(i) = s.label.rfind(" (") { i } else { s.label.len() }
-        } else {
-            s.label.len()
-        }
-    };
-    let mut label_width = all.iter().map(|(s, _, _, _)| display_label_len(s)).max().unwrap_or(0);
-    let type_w      = all.iter().map(|(_, m, _, _)| m.split(':').next().unwrap_or(*m).len()).max().unwrap_or(1).max("type".len());
-    let show_port   = all.iter().any(|(_, m, _, _)| m.contains(':'));
-    let port_w      = if show_port {
-        all.iter().map(|(_, m, _, _)| if let Some(i) = m.find(':') { m[i+1..].len() } else { 0 })
-            .max().unwrap_or(0).max("port".len())
-    } else { 0 };
-    let addr_txt = |s: &TargetState| -> String {
-        match s.current_ip {
-            Some(ip) => ip.to_string(),
-            None => String::new(),
-        }
-    };
-    let addr_w = all.iter()
-        .filter(|(_, m, _, _)| *m != "exec")
-        .map(|(s, _, _, _)| addr_txt(s).len())
-        .max().unwrap_or(0)
-        .max("address".len());
+    let term_w = opts.width.unwrap_or(usize::MAX);
     let rule_char = if args.ascii { "-" } else { "\u{2500}" };
-
-    // Totals: sent/received/loss/dup summed across every row (including
-    // deleted targets, which are part of the printed table too).
-    let total_sent_all: u64  = all.iter().map(|(s, _, _, _)| s.total_sent).sum();
-    let total_drops_all: u64 = all.iter().map(|(s, _, _, _)| s.drops as u64).sum();
-    let total_dups_all: u64  = all.iter().map(|(s, _, _, _)| s.dups as u64).sum();
-    let total_recv_all: u64  = total_sent_all.saturating_sub(total_drops_all);
-    let total_sent_txt = fmt_thousands(total_sent_all);
-    let total_recv_txt = if total_sent_all == 0 {
-        "0".to_string()
-    } else {
-        format!("{} ({:.1}%)", fmt_thousands(total_recv_all), total_recv_all as f64 / total_sent_all as f64 * 100.0)
-    };
-    let total_loss_txt = if total_drops_all > 0 {
-        format!("{} ({:.1}%)", fmt_thousands(total_drops_all), total_drops_all as f64 / total_sent_all.max(1) as f64 * 100.0)
-    } else {
-        fmt_thousands(total_drops_all)
-    };
-    let total_dup_txt = if total_dups_all > 0 {
-        format!("{} ({:.1}%)", fmt_thousands(total_dups_all), total_dups_all as f64 / total_sent_all.max(1) as f64 * 100.0)
-    } else {
-        fmt_thousands(total_dups_all)
-    };
-    let show_totals = all.len() > 1;
-
-    let col_w  = 8usize;
-    let chg_w  = 7usize;
-    let any_loss = all.iter().any(|(s, _, _, _)| s.drops > 0);
-    let any_dups = all.iter().any(|(s, _, _, _)| s.dups  > 0);
-    let loss_txt = |s: &TargetState| -> String {
-        if any_loss && s.drops > 0 {
-            format!("{} ({:.1}%)", fmt_thousands(s.drops as u64), s.life_loss_pct())
-        } else {
-            fmt_thousands(s.drops as u64)
-        }
-    };
-    let dup_txt  = |s: &TargetState| -> String {
-        if any_dups && s.dups > 0 {
-            let pct = s.dups as f64 / s.total_sent as f64 * 100.0;
-            format!("{} ({:.1}%)", fmt_thousands(s.dups as u64), pct)
-        } else {
-            fmt_thousands(s.dups as u64)
-        }
-    };
-    // The exit summary is a session summary: every column is lifetime.
-    let any_mtr_data = all.iter().any(|(s, _, _, _)| s.life_mtr().is_some());
-    let any_changes  = all.iter().any(|(s, _, _, _)| s.ip_changes > 0);
-
-    // Column visibility. Base stats respect args.hidden_base_stats (toggled
-    // via 'x' at runtime). Extra stats: the summary always includes the
-    // original default set (std, plus mtr when mtr data exists) and adds
-    // whatever else --columns explicitly requested on top.
-    use crate::cli::{BaseStat, ExtraStat};
-    let es = &args.extra_stats;
-    let has_extra = |s: &ExtraStat| es.contains(s);
-
-    let show_avg     = !args.hidden_base_stats.contains(&BaseStat::Avg);
-    let show_range   = !args.hidden_base_stats.contains(&BaseStat::Range); // min + max
-    let show_jitter  = !args.hidden_base_stats.contains(&BaseStat::Jitter);
-    let show_std     = true;
-    let show_mtr     = any_mtr_data || has_extra(&ExtraStat::Mtr);
-    let show_p01     = has_extra(&ExtraStat::P01);
-    let show_p10     = has_extra(&ExtraStat::P10);
-    let show_p50     = has_extra(&ExtraStat::P50);
-    let show_p95     = has_extra(&ExtraStat::P95);
-    let show_p99     = has_extra(&ExtraStat::P99);
-    let show_cv      = has_extra(&ExtraStat::Cv);
-    let show_jitpct  = has_extra(&ExtraStat::Jitpct);
-    let show_srtt    = has_extra(&ExtraStat::Srtt);
-    let show_changes = any_changes;
-    // ExtraStat::Bar and ExtraStat::Recent (the live view's inline range bar
-    // and per-probe sparkline) and the live "up" status badge are widgets,
-    // not tabular data - deliberately never rendered here.
-
-    // Narrow-terminal fallback for the identity columns themselves (mode/name/
-    // addr/port): these are never wrapped onto a second line since they're
-    // what identifies the row, so as a last resort the label gets truncated.
-    let ident_w_full = 2 + type_w + 2 + label_width + 2 + addr_w + if show_port { 2 + port_w } else { 0 };
-    if term_w != usize::MAX && ident_w_full + 2 > term_w {
-        let excess = (ident_w_full + 2).saturating_sub(term_w);
-        label_width = label_width.saturating_sub(excess).max(4);
-    }
-    let ident_w = 2 + type_w + 2 + label_width + 2 + addr_w + if show_port { 2 + port_w } else { 0 };
-
     let ell   = if args.ascii { "..." } else { "\u{2026}" };
     let ell_w = ell.chars().count();
 
-    // label column — strip the " (ip)" suffix; truncate with ellipsis if
-    // label_width was reduced to fit a narrow terminal.
-    let fmt_label = |s: &TargetState| -> (String, usize) {
-        let display_label = if !s.custom_label {
-            if let Some(i) = s.label.rfind(" (") { &s.label[..i] } else { &s.label }
-        } else {
-            &s.label
-        };
-        let vis_len = display_label.chars().count();
-        if vis_len > label_width {
-            let take = label_width.saturating_sub(ell_w);
-            let s: String = display_label.chars().take(take).collect();
-            (format!("{}{}", s, ell), label_width)
-        } else {
-            (display_label.to_string(), vis_len)
-        }
+    // ── Stat columns ────────────────────────────────────────────────────────
+    // The live views' columns, over the whole run: avg, range, jitter and loss
+    // (base stats hidden with `x` stay hidden), dup and address changes when
+    // any target had some, the number columns that are on (p95 by default),
+    // then sent and received. No units on the values (times are all ms); each
+    // column is as wide as its widest value; one line per target, never wrapped.
+    use crate::cli::{BaseStat, ExtraStat};
+    use crate::ui::{fmt_cv, fmt_jitpct, fmt_rtt, fmt_rtt_nodec};
+    let hidden   = |b: BaseStat| args.hidden_base_stats.contains(&b);
+    let dash     = "\u{2014}";
+    let answered = |s: &TargetState| s.life_replies() > 0;
+    let any_dups    = all.iter().any(|(s, _, _, _)| s.dups > 0);
+    let any_changes = all.iter().any(|(s, _, _, _)| s.ip_changes > 0);
+    let show_totals = all.len() > 1;
+    let count_pct = |n: u64, of: u64| -> String {
+        if n == 0 { "0".to_string() } else { format!("{} ({:.1}%)", fmt_thousands(n), n as f64 / of.max(1) as f64 * 100.0) }
     };
 
-    // Formats one extended-stat value by column name.
-    let fmt_ext_val = |name: &str, s: &TargetState| -> String {
-        let no_data    = s.total_sent == 0;
-        let all_lost   = s.total_sent > 0 && s.drops as u64 == s.total_sent;
-        let replied    = s.life_replies() > 0;
-        let fmt_ms     = |v: f64| if no_data || all_lost { "—".to_string() } else { format!("{:.1}ms", v) };
-        let pct_ms     = |v: f64| if replied { format!("{:.1}ms", v) } else { "—".to_string() };
-        match name {
-            "stddev" => fmt_ms(s.life_stddev()),
-            "mtr"    => s.life_mtr().map(|m| format!("{:.1}ms", m))
-                            .unwrap_or_else(|| if all_lost { "∞".to_string() } else { "—".to_string() }),
-            "p01"    => pct_ms(s.life_p01()),
-            "p10"    => pct_ms(s.life_p10()),
-            "p50"    => pct_ms(s.life_median()),
-            "p95"    => pct_ms(s.life_p95()),
-            "p99"    => pct_ms(s.life_p99()),
-            "cv%"    => {
-                let cv = s.life_cv();
-                if cv <= 0.0 { "—".to_string() }
-                else if cv < 100.0 { format!("{:.1}%", cv) } else { format!("{:.0}%", cv) }
-            }
-            "jit%"   => s.life_jitter_pct().map_or_else(|| "—".to_string(), |p| format!("{:.0}%", p)),
-            "srtt"   => if s.srtt > 0.0 { format!("{:.1}ms", s.srtt) } else { "—".to_string() },
-            _ => String::new(),
-        }
-    };
-    let fmt_ms = |s: &TargetState, v: f64| -> String {
-        let no_data  = s.total_sent == 0;
-        let all_lost = s.total_sent > 0 && s.drops as u64 == s.total_sent;
-        if no_data || all_lost { "—".to_string() } else { format!("{:.1}ms", v) }
-    };
+    // Drop priority when the table is too wide: higher goes first, `None`
+    // never goes. Extra columns go right to left, then dup/changes, then
+    // received, sent, jitter and range; avg and loss always stay.
+    const P_RANGE: u32 = 10; const P_JITTER: u32 = 20; const P_SENT: u32 = 30;
+    const P_RECV: u32 = 40;  const P_DUP: u32 = 50;    const P_CHANGES: u32 = 60;
+    const P_EXTRA: u32 = 100;
 
-    // ── Build the wrapped stat columns ──────────────────────────────────────
-    // Every non-identity column (core stats + whatever extended stats are
-    // enabled) is built as an `Item` up front, then packed onto as many
-    // physical lines as the terminal width allows. This is the same
-    // left-to-right greedy packing this file already used just for the
-    // extended stats; it now covers every stat column so none of them get
-    // silently dropped on a narrow terminal - they wrap and stagger instead.
     let mut items: Vec<Item> = Vec::new();
+    // One column from plain per-row values (right-aligned to the widest of
+    // value, label and total), each cell colored by `paint(row, padded)`.
+    let mut push = |label: &str, prio: Option<u32>, vals: Vec<String>, total: Option<String>,
+                    paint: &dyn Fn(usize, &str) -> String, paint_total: &dyn Fn(&str) -> String| {
+        let w = vals.iter().chain(total.iter()).map(|v| v.chars().count()).max().unwrap_or(0).max(label.chars().count());
+        let cells = vals.iter().enumerate().map(|(i, v)| paint(i, &format!("{:>w$}", v))).collect();
+        let total = total.map(|t| paint_total(&format!("{:>w$}", t)));
+        items.push(Item { labels: vec![label.to_string()], widths: vec![w], cells: vec![cells], totals: vec![total], prio });
+    };
+    let plain = |_: usize, v: &str| v.to_string();
+    let plain_total = |v: &str| v.to_string();
+    let is_dash = |v: &str| v.trim() == dash || v.trim() == "~";
+    let dim_dash = |_: usize, v: &str| if is_dash(v) { dim(v) } else { v.to_string() };
 
-    if show_avg {
-        let cells: Vec<String> = all.iter().map(|(s, _, _, _)| {
-            let padded = format!("{:>w$}", fmt_ms(s, s.avg_latency()), w=col_w);
-            latency_color(s.avg_latency(), &padded)
+    if !hidden(BaseStat::Avg) {
+        let vals = all.iter().map(|(s, _, _, _)| if answered(s) { fmt_rtt(s.avg_latency()) } else { dash.into() }).collect();
+        push("avg", None, vals, None,
+            &|i, v| if is_dash(v) { dim(v) } else { latency_color(all[i].0.avg_latency(), v) }, &plain_total);
+    }
+    if !hidden(BaseStat::Range) {
+        let vals = all.iter().map(|(s, _, _, _)| if answered(s) {
+            format!("{}-{}", fmt_rtt_nodec(s.life_min()), fmt_rtt_nodec(s.life_max()))
+        } else { dash.into() }).collect();
+        push("range", Some(P_RANGE), vals, None, &dim_dash, &plain_total);
+    }
+    if !hidden(BaseStat::Jitter) {
+        let vals = all.iter().map(|(s, _, _, _)| {
+            let j = s.avg_jitter();
+            if answered(s) && j > 0.0 { fmt_rtt(j) } else { dash.into() }
         }).collect();
-        items.push(Item { labels: vec!["avg".into()], widths: vec![col_w], cells: vec![cells], totals: vec![None] });
+        push("jitter", Some(P_JITTER), vals, None, &dim_dash, &plain_total);
     }
-    if show_jitter {
-        let cells: Vec<String> = all.iter().map(|(s, _, _, _)| format!("{:>w$}", fmt_ms(s, s.avg_jitter()), w=col_w)).collect();
-        items.push(Item { labels: vec!["jitter".into()], widths: vec![col_w], cells: vec![cells], totals: vec![None] });
+    let total_sent: u64  = all.iter().map(|(s, _, _, _)| s.total_sent).sum();
+    let total_drops: u64 = all.iter().map(|(s, _, _, _)| s.drops as u64).sum();
+    let total_dups: u64  = all.iter().map(|(s, _, _, _)| s.dups as u64).sum();
+    let drop_paint = |v: &str, n: u64| if n > 0 { let (r, g, b) = theme.drop_marker; rgb(r, g, b, v) } else { dim(v) };
+    if !hidden(BaseStat::Drops) {
+        let vals = all.iter().map(|(s, _, _, _)| count_pct(s.drops as u64, s.total_sent)).collect();
+        push("loss", None, vals, show_totals.then(|| count_pct(total_drops, total_sent)),
+            &|i, v| drop_paint(v, all[i].0.drops as u64), &|v| drop_paint(v, total_drops));
     }
-    if show_range {
-        let min_cells: Vec<String> = all.iter().map(|(s, _, _, _)| format!("{:>w$}", fmt_ms(s, s.life_min()), w=col_w)).collect();
-        let max_cells: Vec<String> = all.iter().map(|(s, _, _, _)| format!("{:>w$}", fmt_ms(s, s.life_max()), w=col_w)).collect();
-        items.push(Item {
-            labels: vec!["min".into(), "max".into()],
-            widths: vec![col_w, col_w],
-            cells: vec![min_cells, max_cells],
-            totals: vec![None, None],
-        });
+    if any_dups {
+        let dup_paint = |v: &str, n: u64| if n > 0 { color_ansi(theme.rtt_warn, v) } else { dim(v) };
+        let vals = all.iter().map(|(s, _, _, _)| count_pct(s.dups as u64, s.total_sent)).collect();
+        push("dup", Some(P_DUP), vals, show_totals.then(|| count_pct(total_dups, total_sent)),
+            &|i, v| dup_paint(v, all[i].0.dups as u64), &|v| dup_paint(v, total_dups));
+    }
+    if any_changes {
+        let vals = all.iter().map(|(s, _, _, _)| if s.ip_changes > 0 { s.ip_changes.to_string() } else { "-".into() }).collect();
+        push("changes", Some(P_CHANGES), vals, None,
+            &|i, v| if all[i].0.ip_changes > 0 { color_ansi(theme.ip_change, v) } else { dim(v) }, &plain_total);
+    }
+    let mut extra_rank = 0u32;
+    for stat in &args.extra_stats {
+        let (label, val): (&str, &dyn Fn(&TargetState) -> String) = match stat {
+            ExtraStat::Mtr => ("mtr", &|s: &TargetState| s.life_mtr().map_or_else(
+                || if s.total_sent > 0 && !answered(s) { "\u{221e}".to_string() } else { dash.to_string() }, fmt_rtt)),
+            ExtraStat::Std => ("std", &|s: &TargetState| if answered(s) { fmt_rtt(s.life_stddev()) } else { dash.into() }),
+            ExtraStat::P01 => ("p01", &|s: &TargetState| if s.has_life_rtts() { fmt_rtt(s.life_p01()) } else { dash.into() }),
+            ExtraStat::P10 => ("p10", &|s: &TargetState| if s.has_life_rtts() { fmt_rtt(s.life_p10()) } else { dash.into() }),
+            ExtraStat::P50 => ("p50", &|s: &TargetState| if s.has_life_rtts() { fmt_rtt(s.life_median()) } else { dash.into() }),
+            ExtraStat::P95 => ("p95", &|s: &TargetState| if s.has_life_rtts() { fmt_rtt(s.life_p95()) } else { dash.into() }),
+            ExtraStat::P99 => ("p99", &|s: &TargetState| if s.has_life_rtts() { fmt_rtt(s.life_p99()) } else { dash.into() }),
+            ExtraStat::Cv  => ("cv", &|s: &TargetState| { let cv = s.life_cv(); if cv > 0.0 { fmt_cv(cv) } else { dash.into() } }),
+            ExtraStat::Jitpct => ("jitpct", &|s: &TargetState| fmt_jitpct(s.life_jitter_pct())),
+            ExtraStat::Srtt => ("srtt", &|s: &TargetState| if s.srtt > 0.0 { fmt_rtt(s.srtt) } else { dash.into() }),
+            // Widgets, live-only text and ages: nothing to tabulate after the run.
+            _ => continue,
+        };
+        let vals = all.iter().map(|(s, _, _, _)| val(s)).collect();
+        push(label, Some(P_EXTRA + extra_rank), vals, None, &dim_dash, &plain_total);
+        extra_rank += 1;
     }
     {
-        let vals: Vec<String> = all.iter().map(|(s, _, _, _)| fmt_thousands(s.total_sent)).collect();
-        let w = vals.iter().map(|v| v.len()).max().unwrap_or(1).max("sent".len()).max(total_sent_txt.len());
-        let cells: Vec<String> = vals.iter().map(|v| format!("{:>w$}", v, w=w)).collect();
-        let totals = vec![if show_totals { Some(format!("{:>w$}", total_sent_txt, w=w)) } else { None }];
-        items.push(Item { labels: vec!["sent".into()], widths: vec![w], cells: vec![cells], totals });
+        let vals = all.iter().map(|(s, _, _, _)| fmt_thousands(s.total_sent)).collect();
+        push("sent", Some(P_SENT), vals, show_totals.then(|| fmt_thousands(total_sent)), &plain, &plain_total);
     }
     {
-        let vals: Vec<String> = all.iter().map(|(s, _, _, _)| fmt_recv(s)).collect();
-        let w = vals.iter().map(|v| v.len()).max().unwrap_or(1).max("received".len()).max(total_recv_txt.len());
-        let cells: Vec<String> = all.iter().zip(vals.iter()).map(|((s, _, _, _), v)| {
-            let padded = format!("{:>w$}", v, w=w);
-            let all_lost = s.total_sent > 0 && s.drops as u64 == s.total_sent;
-            if all_lost { let (dr, dg, db) = theme.drop_marker; rgb(dr, dg, db, &padded) } else { padded }
-        }).collect();
-        let totals = vec![if show_totals { Some(format!("{:>w$}", total_recv_txt, w=w)) } else { None }];
-        items.push(Item { labels: vec!["received".into()], widths: vec![w], cells: vec![cells], totals });
-    }
-    {
-        let vals: Vec<String> = all.iter().map(|(s, _, _, _)| loss_txt(s)).collect();
-        let w = vals.iter().map(|v| v.len()).max().unwrap_or(1).max("loss".len()).max(total_loss_txt.len());
-        let cells: Vec<String> = all.iter().zip(vals.iter()).map(|((s, _, _, _), v)| {
-            let padded = format!("{:>w$}", v, w=w);
-            if s.drops > 0 { let (dr, dg, db) = theme.drop_marker; rgb(dr, dg, db, &padded) } else { dim(&padded) }
-        }).collect();
-        let totals = vec![if show_totals {
-            let padded = format!("{:>w$}", total_loss_txt, w=w);
-            Some(if total_drops_all > 0 { let (dr, dg, db) = theme.drop_marker; rgb(dr, dg, db, &padded) } else { dim(&padded) })
-        } else { None }];
-        items.push(Item { labels: vec!["loss".into()], widths: vec![w], cells: vec![cells], totals });
-    }
-    {
-        let vals: Vec<String> = all.iter().map(|(s, _, _, _)| dup_txt(s)).collect();
-        let w = vals.iter().map(|v| v.len()).max().unwrap_or(1).max("dup".len()).max(total_dup_txt.len());
-        let cells: Vec<String> = all.iter().zip(vals.iter()).map(|((s, _, _, _), v)| {
-            let padded = format!("{:>w$}", v, w=w);
-            if s.dups > 0 { color_ansi(theme.rtt_warn, &padded) } else { dim(&padded) }
-        }).collect();
-        let totals = vec![if show_totals {
-            let padded = format!("{:>w$}", total_dup_txt, w=w);
-            Some(if total_dups_all > 0 { color_ansi(theme.rtt_warn, &padded) } else { dim(&padded) })
-        } else { None }];
-        items.push(Item { labels: vec!["dup".into()], widths: vec![w], cells: vec![cells], totals });
-    }
-    if show_changes {
-        let w = chg_w;
-        let cells: Vec<String> = all.iter().map(|(s, _, _, _)| {
-            if s.ip_changes > 0 {
-                let padded = format!("{:>w$}", s.ip_changes, w=w);
-                color_ansi(theme.ip_change, &padded)
-            } else {
-                dim(&format!("{:>w$}", "-", w=w))
-            }
-        }).collect();
-        items.push(Item { labels: vec!["changes".into()], widths: vec![w], cells: vec![cells], totals: vec![None] });
-    }
-    for (name, on) in [
-        ("stddev", show_std), ("mtr", show_mtr), ("p01", show_p01), ("p10", show_p10),
-        ("p50", show_p50), ("p95", show_p95), ("p99", show_p99), ("cv%", show_cv),
-        ("jit%", show_jitpct), ("srtt", show_srtt),
-    ] {
-        if !on { continue; }
-        let vals: Vec<String> = all.iter().map(|(s, _, _, _)| fmt_ext_val(name, s)).collect();
-        let w = vals.iter().map(|v| v.chars().count()).max().unwrap_or(0).max(name.len());
-        let cells: Vec<String> = vals.iter().map(|v| format!("{:>w$}", v, w=w)).collect();
-        items.push(Item { labels: vec![name.to_string()], widths: vec![w], cells: vec![cells], totals: vec![None] });
+        let vals = all.iter().map(|(s, _, _, _)| fmt_thousands(s.total_sent.saturating_sub(s.drops as u64))).collect();
+        let none_back = |s: &TargetState| s.total_sent > 0 && s.drops as u64 == s.total_sent;
+        push("received", Some(P_RECV), vals, show_totals.then(|| fmt_thousands(total_sent.saturating_sub(total_drops))),
+            &|i, v| if none_back(all[i].0) { let (r, g, b) = theme.drop_marker; rgb(r, g, b, v) } else { v.to_string() }, &plain_total);
     }
 
-    let item_widths: Vec<usize> = items.iter().map(|it| it.width()).collect();
-    let budget = if term_w == usize::MAX { usize::MAX } else { term_w.saturating_sub(ident_w + 2) };
-    let groups = pack_groups(&item_widths, budget);
-    let indent = " ".repeat(ident_w + 2);
+    // ── Identity columns ─────────────────────────────────────────────────────
+    let protos: Vec<String> = all.iter().map(|(_, m, _, _)| m.split(':').next().unwrap_or(m).to_string()).collect();
+    let show_mode = crate::ui::mode_badge_visible(args.column_vis.mode, &protos);
+    let type_w    = if show_mode { protos.iter().map(|p| p.len()).max().unwrap_or(0).max("mode".len()) } else { 0 };
+    let display_label = |s: &TargetState| -> String {
+        if !s.custom_label { if let Some(i) = s.label.rfind(" (") { return s.label[..i].to_string(); } }
+        s.label.clone()
+    };
+    let full_label_w = all.iter().map(|(s, _, _, _)| display_label(s).chars().count()).max().unwrap_or(0).max("name".len());
+    let show_port = all.iter().any(|(_, m, _, _)| m.contains(':'));
+    let port_w    = if show_port {
+        all.iter().map(|(_, m, _, _)| m.find(':').map_or(0, |i| m[i+1..].len())).max().unwrap_or(0).max("port".len())
+    } else { 0 };
+    let addr_txt = |s: &TargetState| s.current_ip.map(|ip| ip.to_string()).unwrap_or_default();
+    let addr_w = all.iter().filter(|(_, m, _, _)| *m != "exec").map(|(s, _, _, _)| addr_txt(s).len())
+        .max().unwrap_or(0).max("addr".len());
+    let del_tag   = "  [deleted]";
+    let del_w     = if any_deleted { del_tag.len() } else { 0 };
+    let ident_w   = |label_w: usize, addr_on: bool| -> usize {
+        2 + if show_mode { type_w + 2 } else { 0 } + label_w
+            + if addr_on { 2 + addr_w + if show_port { 2 + port_w } else { 0 } } else { 0 }
+    };
 
-    let group_widths: Vec<usize> = groups.iter().map(|g| {
-        g.iter().map(|&gi| items[gi].width()).sum::<usize>() + 2 * g.len().saturating_sub(1)
-    }).collect();
-    let max_group_w = group_widths.iter().copied().max().unwrap_or(0);
-    let del_w = if any_deleted { del_tag_w } else { 0 };
-    let rule_width = ident_w + del_w + if groups.is_empty() { 0 } else { 2 + max_group_w };
+    // ── Fit to the terminal ──────────────────────────────────────────────────
+    let widths: Vec<usize> = items.iter().map(|it| it.width()).collect();
+    let prios:  Vec<Option<u32>> = items.iter().map(|it| it.prio).collect();
+    let fit = fit_summary_columns(term_w, &widths, &prios, del_w, full_label_w, &ident_w);
+    let SummaryFit { keep, label_w: label_width, addr_on } = fit;
+    let group: Vec<usize> = (0..items.len()).filter(|&i| keep[i]).collect();
+    let stats_w = summary_stats_width(&widths, &keep);
+    let line_w  = ident_w(label_width, addr_on) + if group.is_empty() { 0 } else { 2 + stats_w } + del_w;
+
+    let fmt_label = |s: &TargetState| -> (String, usize) {
+        let l = display_label(s);
+        let n = l.chars().count();
+        if n > label_width {
+            let cut: String = l.chars().take(label_width.saturating_sub(ell_w)).collect();
+            (format!("{}{}", cut, ell), label_width)
+        } else { (l, n) }
+    };
 
     // ── Header ───────────────────────────────────────────────────────────
-    let mut header_line1 = format!("  {:<tw$}  {:<lw$}  {:>aw$}", "mode", "name", "addr", tw=type_w, lw=label_width, aw=addr_w);
-    if show_port { header_line1.push_str(&format!("  {:>pw$}", "port", pw=port_w)); }
-    if let Some(group) = groups.first() {
-        header_line1.push_str("  ");
-        header_line1.push_str(&render_group(&items, group, &|gi, si| format!("{:>w$}", items[gi].labels[si], w=items[gi].widths[si])));
+    let mut header = String::from("  ");
+    if show_mode { header.push_str(&format!("{:<tw$}  ", "mode", tw = type_w)); }
+    header.push_str(&format!("{:<lw$}", "name", lw = label_width));
+    if addr_on {
+        header.push_str(&format!("  {:>aw$}", "addr", aw = addr_w));
+        if show_port { header.push_str(&format!("  {:>pw$}", "port", pw = port_w)); }
     }
-    if any_deleted { header_line1.push_str("  status"); }
-    println!("{}", dim(&header_line1));
-    for group in groups.iter().skip(1) {
-        let line = render_group(&items, group, &|gi, si| format!("{:>w$}", items[gi].labels[si], w=items[gi].widths[si]));
-        println!("{}{}", indent, dim(&line));
+    if !group.is_empty() {
+        header.push_str("  ");
+        header.push_str(&render_group(&items, &group, &|gi, si| format!("{:>w$}", items[gi].labels[si], w = items[gi].widths[si])));
     }
-
-    // ── Separator: header section vs. data section ──────────────────────
-    // rule_width includes the leading 2-space indent (via ident_w), so the
-    // dashes only need to fill the rest, right after the printed "  ".
-    println!("  {}", dim(&rule_char.repeat(rule_width.saturating_sub(2))));
+    if any_deleted { header.push_str("  status"); }
+    println!("{}", dim(&header));
+    let rule = format!("  {}", dim(&rule_char.repeat(line_w.saturating_sub(2))));
+    println!("{}", rule);
 
     // ── Data rows ─────────────────────────────────────────────────────────
     for (row_idx, (s, mode, was_deleted, exec_cmd)) in all.iter().enumerate() {
-        // Split mode into protocol and optional non-standard port.
-        let (mode_proto, mode_port) = if let Some(i) = mode.find(':') {
-            (&mode[..i], &mode[i+1..])
-        } else {
-            (*mode, "")
-        };
-        let is_exec = mode_proto == "exec";
-
-        let f_type = fmt_type(mode_proto, type_w);
+        let (mode_proto, mode_port) = mode.split_once(':').unwrap_or((mode, ""));
+        let mut line = String::from("  ");
+        if show_mode { line.push_str(&fmt_type(mode_proto, type_w)); line.push_str("  "); }
         let (label_str, label_vis) = fmt_label(s);
-        let pad     = label_width.saturating_sub(label_vis);
-        let f_label = format!("{}{}", bold_color_ansi(ident_color(row_idx), &label_str), " ".repeat(pad));
-
-        // address column (and optional port column); exec merges both into a single command display
-        let (f_addr, f_port_col) = if is_exec {
-            let merge_w = addr_w + if show_port { 2 + port_w } else { 0 };
-            let cmd_chars: Vec<char> = exec_cmd.chars().collect();
-            let displayed = if cmd_chars.len() <= merge_w {
-                format!("{:<width$}", exec_cmd, width=merge_w)
+        line.push_str(&bold_color_ansi(ident_color(row_idx), &label_str));
+        line.push_str(&" ".repeat(label_width.saturating_sub(label_vis)));
+        if addr_on {
+            if mode_proto == "exec" {
+                // exec rows show the command across the address and port columns.
+                let merge_w = addr_w + if show_port { 2 + port_w } else { 0 };
+                let chars: Vec<char> = exec_cmd.chars().collect();
+                let shown = if chars.len() <= merge_w { format!("{:<merge_w$}", exec_cmd) }
+                    else { format!("{}{}", chars[..merge_w.saturating_sub(ell_w)].iter().collect::<String>(), ell) };
+                line.push_str(&format!("  {}", dim(&shown)));
             } else {
-                let take = merge_w.saturating_sub(ell_w);
-                format!("{}{}", cmd_chars[..take].iter().collect::<String>(), ell)
-            };
-            (format!("  {}", dim(&displayed)), String::new())
-        } else {
-            let txt = addr_txt(s);
-            let padded = format!("{:>aw$}", txt, aw=addr_w);
-            let f_p = if show_port { format!("  {:>pw$}", mode_port, pw=port_w) } else { String::new() };
-            (format!("  {}", dim(&padded)), f_p)
-        };
-
-        let mut line1 = format!("  {}  {}", f_type, f_label);
-        line1.push_str(&f_addr);
-        line1.push_str(&f_port_col);
-        if let Some(group) = groups.first() {
-            line1.push_str("  ");
-            line1.push_str(&render_group(&items, group, &|gi, si| items[gi].cells[si][row_idx].clone()));
+                line.push_str(&format!("  {}", dim(&format!("{:>aw$}", addr_txt(s), aw = addr_w))));
+                if show_port { line.push_str(&format!("  {:>pw$}", mode_port, pw = port_w)); }
+            }
         }
-        if any_deleted {
-            line1.push_str(&if *was_deleted { dim(del_tag) } else { String::new() });
+        if !group.is_empty() {
+            line.push_str("  ");
+            line.push_str(&render_group(&items, &group, &|gi, si| items[gi].cells[si][row_idx].clone()));
         }
-        println!("{}", line1);
-
-        for group in groups.iter().skip(1) {
-            let line = render_group(&items, group, &|gi, si| items[gi].cells[si][row_idx].clone());
-            println!("{}{}", indent, line);
-        }
+        if *was_deleted { line.push_str(&dim(del_tag)); }
+        println!("{}", line);
     }
 
     // ── Totals: sums the delivery columns so a multi-target run has an
-    // at-a-glance health check without adding up rows by eye. Skipped for a
-    // single target, where it would just repeat that one row.
+    // at-a-glance health check without adding up rows by eye.
     if show_totals {
-        println!("  {}", dim(&rule_char.repeat(rule_width.saturating_sub(2))));
-
-        let totals_label = "totals";
-        let totals_pad   = label_width.saturating_sub(totals_label.chars().count());
-        let f_label      = format!("{}{}", bold(totals_label), " ".repeat(totals_pad));
-
-        let mut trow = format!("  {}  {}", " ".repeat(type_w), f_label);
-        trow.push_str(&format!("  {:>aw$}", "", aw=addr_w));
-        if show_port { trow.push_str(&format!("  {:>pw$}", "", pw=port_w)); }
-        if let Some(group) = groups.first() {
+        println!("{}", rule);
+        let mut trow = String::from("  ");
+        if show_mode { trow.push_str(&" ".repeat(type_w + 2)); }
+        trow.push_str(&bold("totals"));
+        trow.push_str(&" ".repeat(label_width.saturating_sub("totals".len())));
+        if addr_on { trow.push_str(&" ".repeat(2 + addr_w + if show_port { 2 + port_w } else { 0 })); }
+        if !group.is_empty() {
             trow.push_str("  ");
-            trow.push_str(&render_group(&items, group, &|gi, si| {
-                items[gi].totals[si].clone().unwrap_or_else(|| format!("{:>w$}", "", w=items[gi].widths[si]))
+            trow.push_str(&render_group(&items, &group, &|gi, si| {
+                items[gi].totals[si].clone().unwrap_or_else(|| " ".repeat(items[gi].widths[si]))
             }));
         }
-        println!("{}", trow);
-        for group in groups.iter().skip(1) {
-            let line = render_group(&items, group, &|gi, si| {
-                items[gi].totals[si].clone().unwrap_or_else(|| format!("{:>w$}", "", w=items[gi].widths[si]))
-            });
-            println!("{}{}", indent, line);
-        }
+        println!("{}", trow.trim_end());
     }
 
-    // ── Total time running ───────────────────────────────────────────────
+    // ── What didn't fit, so nothing vanishes silently ───────────────────────
+    let mut left_out: Vec<&str> = (0..items.len()).filter(|&i| !keep[i]).map(|i| items[i].labels[0].as_str()).collect();
+    if !addr_on { left_out.push("addr"); }
     println!();
+    if !left_out.is_empty() {
+        // The command stays on one line (non-breaking spaces while wrapping)
+        // and stands out from the dim note around it.
+        let cmd_token = opts.more_cmd.map(|c| c.replace(' ', "\u{a0}"));
+        let note = match &cmd_token {
+            Some(t) => format!("left out to fit: {}. To see everything, run {}", left_out.join(", "), t),
+            None    => format!("left out to fit: {} (widen the terminal to see them)", left_out.join(", ")),
+        };
+        for (i, l) in wrap_words(&note, term_w.saturating_sub(4)).iter().enumerate() {
+            let styled = match (&cmd_token, opts.more_cmd) {
+                (Some(t), Some(cmd)) if l.contains(t.as_str()) => {
+                    let (before, after) = l.split_once(t.as_str()).unwrap_or((l, ""));
+                    format!("{}{}{}", dim(before), bold(cmd), dim(after))
+                }
+                _ => dim(l),
+            };
+            println!("{}{}", if i == 0 { "  " } else { "    " }, styled);
+        }
+    }
     println!("  {}", dim(&format!("total time running: {}", fmt_duration(elapsed_secs))));
+    line_w
+}
+
+/// Split `text` into lines of at most `width` columns at spaces (a word
+/// longer than `width` gets a line of its own).
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for word in text.split(' ') {
+        match lines.last_mut() {
+            Some(l) if l.chars().count() + 1 + word.chars().count() <= width.max(1) => { l.push(' '); l.push_str(word); }
+            _ => lines.push(word.to_string()),
+        }
+    }
+    lines
+}
+
+/// Width the exit summary fits to: the terminal's, or `None` (no fitting,
+/// full width) when stdout isn't a terminal - piped or redirected output, e.g.
+/// `vlat --summary > file`, gets every column.
+fn summary_width() -> Option<usize> {
+    use std::io::IsTerminal;
+    if !io::stdout().is_terminal() { return None; }
+    terminal::size().ok().map(|(w, _)| w as usize)
+}
+
+/// How the multi-target summary table fits the terminal (see `fit_summary_columns`).
+#[derive(Debug, PartialEq)]
+struct SummaryFit {
+    /// Per stat column: still shown.
+    keep: Vec<bool>,
+    /// Name column width (shortened with an ellipsis if below the longest name).
+    label_w: usize,
+    /// Address (and port) columns still shown.
+    addr_on: bool,
+}
+
+/// Width of the kept stat columns, two-space gaps between them.
+fn summary_stats_width(widths: &[usize], keep: &[bool]) -> usize {
+    let kept: Vec<usize> = widths.iter().zip(keep).filter(|(_, &k)| k).map(|(&w, _)| w).collect();
+    kept.iter().sum::<usize>() + 2 * kept.len().saturating_sub(1)
+}
+
+/// Fit the summary table to `term_w` without ever wrapping a row: drop stat
+/// columns by priority (highest `prios` first; `None` never drops), then
+/// shorten names to 8 columns, then drop the address, then shorten names to 4.
+/// `ident_w(label_w, addr_on)` is the identity columns' width; `extra_w` the
+/// trailing `[deleted]` tag's. Past all that, the row just runs long.
+fn fit_summary_columns(term_w: usize, widths: &[usize], prios: &[Option<u32>], extra_w: usize,
+                       full_label_w: usize, ident_w: &dyn Fn(usize, bool) -> usize) -> SummaryFit {
+    let mut fit = SummaryFit { keep: vec![true; widths.len()], label_w: full_label_w, addr_on: true };
+    let width = |f: &SummaryFit| {
+        let stats = if f.keep.iter().any(|&k| k) { 2 + summary_stats_width(widths, &f.keep) } else { 0 };
+        ident_w(f.label_w, f.addr_on) + stats + extra_w
+    };
+    if term_w == usize::MAX { return fit; }
+    while width(&fit) > term_w {
+        let next = (0..widths.len()).filter(|&i| fit.keep[i]).filter_map(|i| prios[i].map(|p| (p, i))).max();
+        match next { Some((_, i)) => fit.keep[i] = false, None => break }
+    }
+    let shorten = |f: &mut SummaryFit, floor: usize| {
+        let over = width(f).saturating_sub(term_w);
+        f.label_w = f.label_w.saturating_sub(over).max(floor.min(full_label_w));
+    };
+    if width(&fit) > term_w { shorten(&mut fit, 8); }
+    if width(&fit) > term_w { fit.addr_on = false; fit.label_w = full_label_w; shorten(&mut fit, 8); }
+    if width(&fit) > term_w { shorten(&mut fit, 4); }
+    fit
+}
+
+#[cfg(test)]
+mod summary_fit_tests {
+    use super::*;
+
+    // Identity: 2 + label + (2 + 12 addr when shown).
+    fn ident(label_w: usize, addr_on: bool) -> usize { 2 + label_w + if addr_on { 14 } else { 0 } }
+    // avg(never), range(10), loss(never), p95(100), p99(101), sent(30), received(40)
+    const W: [usize; 7] = [5, 7, 9, 5, 5, 4, 8];
+    const P: [Option<u32>; 7] = [None, Some(10), None, Some(100), Some(101), Some(30), Some(40)];
+
+    fn fit(term_w: usize) -> SummaryFit { fit_summary_columns(term_w, &W, &P, 0, 12, &ident) }
+    fn full_w() -> usize { ident(12, true) + 2 + summary_stats_width(&W, &[true; 7]) }
+
+    #[test]
+    fn everything_fits_wide_enough() {
+        let f = fit(full_w());
+        assert_eq!(f, SummaryFit { keep: vec![true; 7], label_w: 12, addr_on: true });
+        // Not a terminal: no fitting at all.
+        assert_eq!(fit_summary_columns(usize::MAX, &W, &P, 0, 12, &ident).keep, vec![true; 7]);
+    }
+
+    #[test]
+    fn drops_extras_right_to_left_then_received_sent_range() {
+        assert_eq!(fit(full_w() - 1).keep, vec![true, true, true, true, false, true, true], "p99 first");
+        assert_eq!(fit(full_w() - 8).keep, vec![true, true, true, false, false, true, true], "then p95");
+        assert_eq!(fit(full_w() - 15).keep, vec![true, true, true, false, false, true, false], "then received");
+        assert_eq!(fit(full_w() - 25).keep, vec![true, true, true, false, false, false, false], "then sent");
+        let f = fit(full_w() - 31);
+        assert_eq!(f.keep, vec![true, false, true, false, false, false, false], "then range; avg and loss stay");
+        assert_eq!((f.label_w, f.addr_on), (12, true), "identity untouched while stats could still go");
+    }
+
+    #[test]
+    fn then_names_then_address_then_names_again() {
+        let avg_loss = 2 + 5 + 2 + 9;
+        // Names shrink first (to 8)...
+        let f = fit(ident(10, true) + avg_loss);
+        assert_eq!((f.label_w, f.addr_on), (10, true));
+        // ...then the address goes (names back to full if that's enough)...
+        let f = fit(ident(12, false) + avg_loss);
+        assert_eq!((f.label_w, f.addr_on), (12, false));
+        // ...then names shrink down to 4.
+        let f = fit(ident(5, false) + avg_loss);
+        assert_eq!((f.label_w, f.addr_on), (5, false));
+        assert_eq!(fit(10).label_w, 4, "never below 4");
+    }
+
+    #[test]
+    fn deleted_tag_counts_toward_the_width() {
+        let f = fit_summary_columns(full_w(), &W, &P, 11, 12, &ident);
+        assert!(!f.keep[4], "the [deleted] tag needs room too: {f:?}");
+    }
+
+    #[test]
+    fn note_wraps_at_spaces() {
+        assert_eq!(wrap_words("left out to fit: p95, sent", 12), vec!["left out to", "fit: p95,", "sent"]);
+        assert_eq!(wrap_words("short", 40), vec!["short"]);
+        assert_eq!(wrap_words("averyveryverylongword x", 5), vec!["averyveryverylongword", "x"]);
+    }
 }
 
 #[cfg(test)]

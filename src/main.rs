@@ -261,19 +261,22 @@ fn print_explain() {
     println!("    dup and address changes appear only when non-zero");
     println!("  Several targets (or any deleted during the run): a table, columns:");
     for (name, desc) in [
-        ("avg     ", "lifetime average RTT"),
-        ("stddev  ", "standard deviation of RTT - spread around the average"),
-        ("mtr     ", "mean time to reliability: avg ÷ (1 − loss), over the session"),
-        ("jitter  ", "lifetime average jitter"),
-        ("min     ", "lifetime minimum RTT"),
-        ("max     ", "lifetime maximum RTT"),
+        ("avg     ", "average RTT"),
+        ("range   ", "best-worst RTT"),
+        ("jitter  ", "average jitter"),
+        ("loss    ", "drop count and loss %"),
+        ("dup     ", "duplicate count and % (only when some target had duplicates)"),
+        ("changes ", "number of times the target's IP address changed (only when some did)"),
+        ("p95 ... ", "the number columns that are on (p95 by default; mtr, std, p99 ... when enabled)"),
         ("sent    ", "total probes transmitted"),
         ("received", "probes that got a response"),
-        ("loss    ", "drop count and loss % (column omitted when zero for all targets)"),
-        ("changes ", "number of times the target's IP address changed (omitted when none)"),
     ] {
         println!("    {}  {}", bld(name), desc);
     }
+    println!("  One line per target, times in milliseconds. Too wide for the terminal: columns drop");
+    println!("  right to left (extras, then dup / changes, received, sent, jitter, range; never avg or loss),");
+    println!("  then names shorten, then the address goes; a note below the table lists what was left out");
+    println!("  and how to see it: vlat --summary prints a saved session's summary with every column.");
 
     // Probe modes
     println!();
@@ -556,6 +559,10 @@ async fn main() {
             eprintln!("vlat: --demo cannot be combined with --restart");
             process::exit(1);
         }
+        if args.summary.is_some() {
+            eprintln!("vlat: --demo cannot be combined with --summary");
+            process::exit(1);
+        }
         if let Some(n) = args.demo_count {
             if n == 0 || n > constants::MAX_TARGETS {
                 eprintln!("vlat: --demo-count must be between 1 and {}", constants::MAX_TARGETS);
@@ -581,13 +588,46 @@ async fn main() {
     }
 
     // ── session restart / picker ─────────────────────────────────────────────
-    // --restart <name> loads a saved session by name.  No targets at all (CLI
-    // or defaults file) opens the session picker; if no sessions exist yet,
-    // fall back to the "no targets" help.
+    // --restart <name> loads a saved session by name.  --summary [name] prints
+    // a saved session's exit summary (the most recent one without a name), the
+    // same as the picker's "summary & exit".  No targets at all (CLI or
+    // defaults file) opens the session picker; if no sessions exist yet, fall
+    // back to the "no targets" help.
     let mut restart_choice: Option<(std::path::PathBuf, session::SessionFile)> = None;
     let mut summary_only = false;
     if args.demo {
         // Handled above; skip restart lookup and the "no targets" session picker.
+    } else if let Some(ref name) = args.summary {
+        if args.restart.is_some() {
+            eprintln!("vlat: --summary cannot be combined with --restart");
+            process::exit(1);
+        }
+        if !args.targets.is_empty() {
+            eprintln!("vlat: --summary takes a session name, not targets (got: {})", args.targets.join(" "));
+            process::exit(1);
+        }
+        let found = if name.is_empty() {
+            session::list_sessions().into_iter().next()
+        } else {
+            session::find_by_name(name)
+        };
+        match found {
+            Some(found) => { restart_choice = Some(found); summary_only = true; }
+            None if name.is_empty() => {
+                eprintln!("vlat: no saved sessions yet - sessions are saved while vlat runs and at exit");
+                process::exit(1);
+            }
+            None => {
+                eprintln!("vlat: no saved session named '{}'", name);
+                let names = session::named_sessions();
+                if names.is_empty() {
+                    eprintln!("  (no named sessions exist - name one with --session-name)");
+                } else {
+                    eprintln!("  named sessions: {}", names.join(", "));
+                }
+                process::exit(1);
+            }
+        }
     } else if let Some(ref name) = args.restart {
         match session::find_by_name(name) {
             Some(found) => restart_choice = Some(found),
@@ -730,6 +770,12 @@ async fn main() {
         Some((path, sess)) => {
             session::apply_saved_columns(&mut args, &sess, user_set_columns);
             if summary_only {
+                // Plain text when piped or redirected (or NO_COLOR is set), so
+                // `vlat --summary > file` doesn't fill the file with escapes.
+                use std::io::IsTerminal;
+                if !std::io::stdout().is_terminal() || std::env::var_os("NO_COLOR").is_some() {
+                    args.no_color = true;
+                }
                 app::print_saved_summary(&sess, &args);
                 process::exit(0);
             }

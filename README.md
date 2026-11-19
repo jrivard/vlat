@@ -180,8 +180,18 @@ hidden, and the `quality` word and number columns (`p95` by default) are added w
 enabled. Widgets (`recent`, `bar`, `events`), `status` and the `seen`/`lost` ages are
 left out. `quality` here is judged over the whole run (`slow`, `jittery`, `spiky` or
 `good`; `degraded` needs a recent baseline, so it never appears). `dup` and address
-changes appear only when non-zero. With several targets, or if any were deleted
-during the run, the summary is a table instead.
+changes appear only when non-zero.
+
+With several targets, or if any were deleted during the run, the summary is a table
+with one line per target and the same columns: `avg`, `range`, `jitter`, `loss`,
+`dup` and `changes` when any target had some, the number columns that are on, then
+`sent` and `received`, with a totals row. Times are in milliseconds. When the table
+is wider than the terminal, columns are left out rather than wrapped: extras first
+(right to left), then `dup`/`changes`, `received`, `sent`, `jitter` and `range`;
+`avg` and `loss` always stay. After that, names are shortened and the address is
+dropped. A note below the table lists anything left out, along with the command that
+shows everything (`vlat --summary`, or `vlat --summary NAME` for a named session;
+runs that weren't saved, like `--no-session`, suggest widening the terminal instead).
 
 ## Sessions
 
@@ -189,14 +199,23 @@ vlat saves its session (settings + summary stats) to `$XDG_STATE_HOME/vlat/sessi
 (usually `~/.local/state/vlat/sessions`) every 60 seconds and at exit. The 10 most
 recent unnamed sessions are kept; named sessions are kept until deleted.
 
-Run `vlat` with no targets to pick a saved session from a menu, or restart by name:
+Run `vlat` with no targets to pick a saved session from a menu, restart one by name,
+or print one's [exit summary](#exit-summary) without running anything:
 
 ```sh
 vlat --session-name home 192.168.1.1 example.net   # run + name the session
 vlat --restart home                                # restart it later
 vlat --restart home --theme nord                   # restart, override a setting
 vlat --no-session example.net                      # don't save this run
+vlat --summary                                     # print the last session's summary
+vlat --summary home                                # print a named session's summary
 ```
+
+`--summary` prints the summary the run printed when it quit, then exits. It never
+leaves columns out to fit the terminal, so it's where to look when the exit summary
+had to. When the table is wider than the terminal it says so and suggests piping it
+through `less -S`. Piped or redirected, the output has no colors, so it can go
+straight into a file or another command.
 
 ## Defaults file
 

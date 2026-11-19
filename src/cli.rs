@@ -115,6 +115,8 @@ SESSIONS:
     vlat --restart home --theme nord                   # restart, override a setting
     vlat --restart home 10.0.0.1                       # restart + add a target
     vlat --no-session example.net                      # don't save this run
+    vlat --summary                                     # last session's summary
+    vlat --summary home                                # a named session's summary
 
   Restarting re-runs the session's saved settings and targets; probe
   stats start fresh (history is not carried over). CLI flags override
@@ -906,6 +908,10 @@ pub struct Args {
     /// Restart a saved session by name (see SESSIONS; run vlat with no targets for a picker)
     #[arg(long = "restart", value_name = "NAME")]
     pub restart: Option<String>,
+
+    /// Print a saved session's exit summary and exit: the session named NAME, or the most recent one when NAME is omitted
+    #[arg(long = "summary", value_name = "NAME", num_args = 0..=1, default_missing_value = "")]
+    pub summary: Option<String>,
 
     // ── Meta ──────────────────────────────────────────────────────────────────
     /// Print a shell completion script to stdout and exit (bash, fish, zsh, elvish, powershell)

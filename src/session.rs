@@ -168,10 +168,22 @@ impl SessionCtx {
         SessionCtx { enabled, name, path, started_at_ms: epoch_ms() }
     }
 
+    /// The command that prints this run's summary from its saved session -
+    /// `vlat --summary`, with the name for a named session - or `None` when
+    /// this run isn't being saved (`--no-session`, an unnamed `--demo`).
+    pub fn summary_command(&self) -> Option<String> {
+        if !self.enabled { return None; }
+        Some(match &self.name {
+            Some(n) => format!("vlat --summary {}", shell_quote(n)),
+            None    => "vlat --summary".to_string(),
+        })
+    }
+
     /// Snapshot the current run to disk (atomic write) and rotate old
-    /// unnamed sessions.  Failures are logged, never fatal.
-    pub fn save(&self, args: &Args, rt: &RuntimeSettings, states: &[TargetState], mode_labels: &[String]) {
-        if !self.enabled { return; }
+    /// unnamed sessions.  Failures are logged, never fatal.  Returns whether
+    /// the snapshot was written (`false` when disabled or the write failed).
+    pub fn save(&self, args: &Args, rt: &RuntimeSettings, states: &[TargetState], mode_labels: &[String]) -> bool {
+        if !self.enabled { return false; }
         let file = SessionFile {
             version:           SESSION_VERSION,
             name:              self.name.clone(),
@@ -194,12 +206,13 @@ impl SessionCtx {
         };
         if let Err(e) = write_atomic(&self.path, &file) {
             crate::logfile::write(&format!("session: save failed: {}", e));
-            return;
+            return false;
         }
         if self.name.is_none() {
             dedupe_unnamed(&self.path, &file);
         }
         rotate_unnamed();
+        true
     }
 }
 
@@ -537,7 +550,7 @@ fn command_line(groups: &[Vec<String>], targets: &[String]) -> String {
 }
 
 /// Quote a token for a POSIX shell if it contains anything unsafe.
-fn shell_quote(t: &str) -> String {
+pub fn shell_quote(t: &str) -> String {
     let safe = |c: char| c.is_ascii_alphanumeric() || "@%+=:,./-_".contains(c);
     if !t.is_empty() && t.chars().all(safe) {
         t.to_string()
@@ -1513,6 +1526,16 @@ mod tests {
             restart_command(&file),
             "vlat --interval 500ms -4 example.net:tcp:443 'svc,exec=./a b.sh'"
         );
+    }
+
+    #[test]
+    fn summary_command_names_the_session_to_look_at() {
+        let path = || PathBuf::from("/tmp/x.json");
+        let ctx = |enabled: bool, name: Option<&str>| SessionCtx { enabled, name: name.map(String::from), path: path(), started_at_ms: 0 };
+        assert_eq!(ctx(true, None).summary_command().as_deref(), Some("vlat --summary"));
+        assert_eq!(ctx(true, Some("home")).summary_command().as_deref(), Some("vlat --summary home"));
+        assert_eq!(ctx(true, Some("my home")).summary_command().as_deref(), Some("vlat --summary 'my home'"));
+        assert_eq!(ctx(false, Some("home")).summary_command(), None, "not saved: nothing to point to");
     }
 
     #[test]

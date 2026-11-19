@@ -1823,19 +1823,22 @@ pub fn explain_content_lines(ascii: bool) -> Vec<Line<'static>> {
     lines.push(Line::from("    dup and address changes appear only when non-zero"));
     lines.push(Line::from("  Several targets (or any deleted during the run): a table, columns:"));
     for (name, desc) in [
-        ("avg     ", "lifetime average RTT"),
-        ("stddev  ", "standard deviation of RTT \u{2014} spread around the average"),
-        ("mtr     ", "mean time to reliability: avg \u{00f7} (1 \u{2212} loss), over the session"),
-        ("jitter  ", "lifetime average jitter"),
-        ("min     ", "lifetime minimum RTT"),
-        ("max     ", "lifetime maximum RTT"),
+        ("avg     ", "average RTT"),
+        ("range   ", "best-worst RTT"),
+        ("jitter  ", "average jitter"),
+        ("loss    ", "drop count and loss %"),
+        ("dup     ", "duplicate count and % (only when some target had duplicates)"),
+        ("changes ", "number of times the target's IP address changed (only when some did)"),
+        ("p95 ... ", "the number columns that are on (p95 by default; mtr, std, p99 ... when enabled)"),
         ("sent    ", "total probes transmitted"),
         ("received", "probes that got a response"),
-        ("loss    ", "drop count and loss % (column omitted when zero for all targets)"),
-        ("changes ", "number of times the target's IP address changed (omitted when none)"),
     ] {
         lines.push(Line::from(vec![raw("    "), span(name, bld), raw("  "), raw(desc)]));
     }
+    lines.push(Line::from("  One line per target, times in milliseconds. Too wide for the terminal: columns drop"));
+    lines.push(Line::from("  right to left (extras, then dup / changes, received, sent, jitter, range; never avg or loss),"));
+    lines.push(Line::from("  then names shorten, then the address goes; a note below the table lists what was left out"));
+    lines.push(Line::from("  and how to see it: vlat --summary prints a saved session's summary with every column."));
 
     // Probe modes
     lines.push(Line::from(""));
