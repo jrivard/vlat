@@ -239,8 +239,8 @@ While `vlat` is running, you can use the following keys:
 |-----|--------------------------------------------------------|
 | `h` | Toggle help dialog                                     |
 | `e` | Show output legend                                     |
-| `v` | Change view (picker): single → list → graph → ekg → radar → bars → cards → scatter → worm → bubble → pong |
-| `1`-`9` | Jump to view directly: 1=graph 2=ekg 3=worm 4=radar 5=bars 6=cards 7=bubble 8=scatter 9=pong |
+| `v` | Change view (picker): list/single → graph → ekg → bars → cards → scatter → radar → worm → bubble |
+| `0`-`8` | Jump to view directly: 0=list/single 1=graph 2=ekg 3=bars 4=cards 5=scatter 6=radar 7=worm 8=bubble |
 | `c` | Show / hide columns (dialog)                           |
 | `k` | Toggle column key header                               |
 | `s` | Cycle multi-target sort: mtr → avg → none → name       |

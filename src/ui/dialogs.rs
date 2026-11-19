@@ -98,47 +98,47 @@ pub fn nav_skip(items: &[HelpItem], idx: usize, collapsed: &[bool; 3]) -> bool {
 pub const HELP_VIEWS: &[(&str, &str, &str)] = &[
     ("0", "list",   "one line per target, no graph"),
     ("1", "graph",  "fullscreen area chart"),
-    ("3", "worm",   "retro worm screensaver"),
-    ("4", "radar",  "radar sweep"),
+    ("7", "worm",   "retro worm screensaver"),
+    ("6", "radar",  "radar sweep"),
     ("2", "ekg",    "EKG monitor"),
-    ("5", "bars",   "vertical bars: RTT height, avg ─, p95 ╌, ghost trail"),
-    ("6", "cards",  "grid of per-target panels"),
-    ("7", "bubble",  "floating latency bubbles — size = avg RTT"),
-    ("8", "scatter", "scatter plot: avg RTT vs packet loss (a: pick axes)"),
+    ("3", "bars",   "vertical bars: RTT height, avg ─, p95 ╌, ghost trail"),
+    ("4", "cards",  "grid of per-target panels"),
+    ("8", "bubble",  "floating latency bubbles — size = avg RTT"),
+    ("5", "scatter", "scatter plot: avg RTT vs packet loss (a: pick axes)"),
     // pong (index 9) is intentionally excluded from VIEW_DISPLAY_ORDER and
     // VIEW_PICKER_ORDER below - it's still WIP and hidden from the in-app
     // picker/hotkeys. The entry is kept here (and the view itself fully
     // implemented in ui/pong.rs) so it's not lost; re-add its index to both
-    // order arrays below, and bump the "ambient" count in VIEW_GROUPS, once
+    // order arrays below, and bump the "ambient" count in VIEW_GROUPS (and give it a HELP_VIEWS key), once
     // it's ready to ship.
     ("9", "pong",    "pong screensaver \u{2014} fast, jittery bounces mean rough latency; slow, steady ones mean a calm connection"),
     ("0", "single",  "detailed view for one target (single target only)"),
 ];
 
-/// Maps a '1'..'9' hotkey position to a HELP_VIEWS index. This is the global
-/// jump-key order (unrelated to how the view picker lists things - see
-/// VIEW_PICKER_ORDER for that); list/single use '0' instead (handled
-/// separately - see enter_view_id! in app.rs), and pong (index 9) is
-/// deliberately hidden (see the comment above HELP_VIEWS), so only 8 of the
-/// 11 views appear here.
-/// Hotkey order: graph, ekg, worm, radar, bars, cards, bubble, scatter
-pub const VIEW_DISPLAY_ORDER: &[usize] = &[1, 4, 2, 3, 5, 6, 7, 8];
+/// Maps a '1'..'9' hotkey position to a HELP_VIEWS index. This is exactly
+/// VIEW_PICKER_ORDER minus its leading list/single slot, so the digit keys
+/// count straight down the picker: the useful views first, ambient
+/// screensavers last. list/single use '0' instead (handled separately - see
+/// enter_view_id! in app.rs), and pong (index 9) is deliberately hidden (see
+/// the comment above HELP_VIEWS).
+/// Hotkey order: graph, ekg, bars, cards, scatter, radar, worm, bubble
+pub const VIEW_DISPLAY_ORDER: &[usize] = &[1, 4, 5, 6, 8, 3, 2, 7];
 
-/// Maps view-picker cursor index to HELP_VIEWS index. Same set of views as
-/// VIEW_DISPLAY_ORDER plus a single merged list/single slot, reordered for
-/// the picker's on-screen listing. The first (compact) slot holds index 10
-/// (single) as a sentinel meaning "list or single, whichever fits the
+/// Maps view-picker cursor index to HELP_VIEWS index: a merged list/single
+/// slot followed by VIEW_DISPLAY_ORDER. The first (compact) slot holds index
+/// 10 (single) as a sentinel meaning "list or single, whichever fits the
 /// current target count" - the draw functions and `enter_view_id!`'s `_` arm
 /// both resolve it that way, so it never needs its own list (index 0) slot.
 /// pong (index 9) is deliberately hidden (see the comment above HELP_VIEWS).
-/// Display order: list/single, graph, ekg, radar, bars, cards, scatter, worm, bubble
-pub const VIEW_PICKER_ORDER: &[usize] = &[10, 1, 4, 3, 5, 6, 8, 2, 7];
+/// Display order: list/single, graph, ekg, bars, cards, scatter, radar, worm, bubble
+pub const VIEW_PICKER_ORDER: &[usize] = &[10, 1, 4, 5, 6, 8, 3, 2, 7];
 
 /// Section layout: (name, picker-cursor start, item count)
 const VIEW_GROUPS: &[(&str, usize, usize)] = &[
     ("compact",  0, 1),
     ("timeline", 1, 2),
-    ("ambient",  3, 6),
+    ("snapshot", 3, 3),
+    ("ambient",  6, 3),
 ];
 
 pub const HELP_SORTS: &[(&str, &str)] = &[
@@ -1721,9 +1721,9 @@ pub fn explain_content_lines(ascii: bool) -> Vec<Line<'static>> {
 
     // View switching
     lines.push(Line::from(""));
-    lines.push(Line::from(span("View switching  (v / 1-5):", hdr)));
-    lines.push(Line::from("  v  cycles view: list \u{2192} graph \u{2192} worm \u{2192} radar \u{2192} ekg \u{2192} list"));
-    lines.push(Line::from("  1=list  2=graph  3=worm  4=radar  5=ekg"));
+    lines.push(Line::from(span("View switching  (v / 0-8):", hdr)));
+    lines.push(Line::from("  v  opens the view picker"));
+    lines.push(Line::from("  0=list/single  1=graph  2=ekg  3=bars  4=cards  5=scatter  6=radar  7=worm  8=bubble"));
     lines.push(Line::from(""));
     lines.push(Line::from(vec![raw("  "), span("list   ", bld), raw("  one line per target, no graph - useful for many targets")]));
     lines.push(Line::from(vec![raw("  "), span("graph  ", bld), raw("  fullscreen area chart with labelled Y-axis, gridlines, and "), span("avg", dim), raw(" / "), span("p95", dim), raw(" reference lines  ("), span("y", bld), raw(" sets the chart scale)")]));
@@ -3131,5 +3131,28 @@ mod stat_toggle_order_tests {
         assert!(rows.windows(2).all(|w| w[0] < w[1]), "{:?}", order.iter().zip(&rows).collect::<Vec<_>>());
         // cursor 5 = first row of the "row" section = events (id 26)
         assert_eq!(stat_toggle_id(5), 26);
+    }
+}
+
+#[cfg(test)]
+mod view_order_tests {
+    use super::*;
+
+    /// The picker lists views in hotkey order: slot 0 is list/single ('0'),
+    /// then each following slot's key is its position, so the digits count
+    /// straight down the dialog with no gaps or jumps.
+    #[test]
+    fn picker_keys_count_down_in_order() {
+        assert_eq!(VIEW_PICKER_ORDER[0], 10);
+        assert_eq!(&VIEW_PICKER_ORDER[1..], VIEW_DISPLAY_ORDER);
+        for (pos, &idx) in VIEW_PICKER_ORDER.iter().enumerate() {
+            assert_eq!(HELP_VIEWS[idx].0, pos.to_string(), "view {}", HELP_VIEWS[idx].1);
+        }
+        let mut next = 0;
+        for &(_, start, count) in VIEW_GROUPS {
+            assert_eq!(start, next);
+            next += count;
+        }
+        assert_eq!(next, VIEW_PICKER_ORDER.len());
     }
 }

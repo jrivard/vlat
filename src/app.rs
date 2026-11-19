@@ -1353,7 +1353,7 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
     // Switch to a view by display id: 0=list, 1=fullscreen graph, 2=worm,
     // 3=radar, 4=ekg, 5=bars, 6=cards, 7=bubble, 8=scatter, 9=pong, 10=single
     // (the HELP_VIEWS order).
-    // The '1'..'9' hotkeys follow display order instead (see VIEW_DISPLAY_ORDER):
+    // The '1'..'9' hotkeys follow picker order instead (see VIEW_DISPLAY_ORDER):
     // digit - 1 is a position in VIEW_DISPLAY_ORDER, which maps to this id. The
     // '0' hotkey and the picker's merged compact slot both pass id 10, which the
     // `_` arm below resolves to single (exactly one target) or list (otherwise).
@@ -2407,8 +2407,8 @@ pub async fn run(mut args: Args, session_ctx: crate::session::SessionCtx) -> Res
                                     dialog = DialogMode::None;
                                 }
                                 KeyCode::Char(ch @ '1'..='9') => {
-                                    // Digit shortcuts follow the global hotkey mapping (VIEW_DISPLAY_ORDER),
-                                    // not the picker's on-screen order, so '1' still means "list" etc. here too.
+                                    // Digit shortcuts use the global hotkey mapping (VIEW_DISPLAY_ORDER),
+                                    // which matches the picker's on-screen order after the '0' slot.
                                     let display_c = (ch as usize) - ('1' as usize);
                                     let id = VIEW_DISPLAY_ORDER.get(display_c).copied().unwrap_or(0);
                                     *cursor = VIEW_PICKER_ORDER.iter().position(|&i| i == id).unwrap_or(0);

@@ -168,8 +168,8 @@ fn print_explain() {
     // View switching
     println!();
     println!("{}", hdr("View switching  (v / 0-8):"));
-    println!("  v opens a picker:  list  single  graph  ekg  radar  bars  cards  scatter  worm  bubble");
-    println!("  0=list/single  1=graph  2=ekg  3=worm  4=radar  5=bars  6=cards  7=bubble  8=scatter  (jump directly)");
+    println!("  v opens a picker:  list/single  graph  ekg  bars  cards  scatter  radar  worm  bubble");
+    println!("  0=list/single  1=graph  2=ekg  3=bars  4=cards  5=scatter  6=radar  7=worm  8=bubble  (jump directly)");
     println!("  0 shows single with exactly one target, list otherwise");
     println!();
     println!("  {}   one line per target, no graph", bld("list   "));

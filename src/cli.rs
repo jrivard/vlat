@@ -178,7 +178,7 @@ LIVE KEYS (while running):
   e         explain output legend
   t         change color theme (picker)
   v         change view (picker): list  single  graph  ekg  radar  bars  cards  scatter  worm  bubble
-  0,1-8     jump to view: 0=list/single 1=graph 2=ekg 3=worm 4=radar 5=bars 6=cards 7=bubble 8=scatter
+  0,1-8     jump to view: 0=list/single 1=graph 2=ekg 3=bars 4=cards 5=scatter 6=radar 7=worm 8=bubble
   i         toggle target headers  (graph / worm / radar / ekg / bubble views)
   k         toggle column key header
   c         show / hide columns (dialog)
