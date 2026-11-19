@@ -133,7 +133,7 @@ impl BubbleState {
             // Compute new speed and apply random angular perturbation
             let speed      = BASE_SPEED + jitter_norm * JITTER_SPEED;
             let max_perturb = BASE_PERTURB + jitter_norm * JITTER_PERTURB;
-            let perturb = ((rng_next(&mut self.rng) as f64 / u64::MAX as f64) * 2.0 - 1.0)
+            let perturb = (rng_unit(&mut self.rng) * 2.0 - 1.0)
                           * max_perturb;
 
             let (vx, vy) = rotate(bubble.vx, bubble.vy, perturb);
@@ -207,9 +207,9 @@ impl BubbleState {
 fn mk_bubble(rng: &mut u64, w: u16, h: u16) -> Bubble {
     let wf = w.max(4) as f64;
     let hf = h.max(4) as f64;
-    let x = (rng_next(rng) as f64 / u64::MAX as f64) * wf;
-    let y = (rng_next(rng) as f64 / u64::MAX as f64) * hf;
-    let angle = (rng_next(rng) as f64 / u64::MAX as f64) * std::f64::consts::TAU;
+    let x = rng_unit(rng) * wf;
+    let y = rng_unit(rng) * hf;
+    let angle = rng_unit(rng) * std::f64::consts::TAU;
     Bubble {
         x, y,
         vx: angle.cos() * BASE_SPEED * ASPECT,
@@ -226,6 +226,12 @@ fn rotate(vx: f64, vy: f64, angle: f64) -> (f64, f64) {
 fn rng_next(s: &mut u64) -> u64 {
     *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
     *s >> 17
+}
+
+/// Uniform in [0, 1). `rng_next` yields 47 bits, so scale by 2^47 - not
+/// `u64::MAX`, which would pin every draw near 0.
+fn rng_unit(s: &mut u64) -> f64 {
+    rng_next(s) as f64 / (1u64 << 47) as f64
 }
 
 fn jitter_norm(state: Option<&TargetState>, global_max_jitter: f64) -> f64 {
@@ -745,6 +751,26 @@ pub fn draw_bubble(
 
     if frozen {
         super::dialogs::draw_frozen_notice(frame, area, args.ascii, &args.theme, tick);
+    }
+}
+
+#[cfg(test)]
+mod spawn_tests {
+    use super::*;
+
+    #[test]
+    fn rng_unit_spans_the_unit_interval() {
+        let mut rng = 0x1234_5678_9abc_def0;
+        let draws: Vec<f64> = (0..1000).map(|_| rng_unit(&mut rng)).collect();
+        assert!(draws.iter().all(|&v| (0.0..1.0).contains(&v)));
+        assert!(draws.iter().any(|&v| v < 0.1) && draws.iter().any(|&v| v > 0.9));
+    }
+
+    #[test]
+    fn bubbles_spawn_across_the_whole_field() {
+        let bs = BubbleState::new(40, 200, 50);
+        assert!(bs.bubbles.iter().any(|b| b.x > 100.0), "no bubble in the right half");
+        assert!(bs.bubbles.iter().any(|b| b.y > 25.0), "no bubble in the bottom half");
     }
 }
 
